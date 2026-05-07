@@ -1,0 +1,24 @@
+[project]
+name = "myproject"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "asyncpg>=0.31.0",
+    "cryptography>=46.0.7",
+    "fastapi>=0.135.2",
+    "httpx>=0.28.1",
+    "psycopg2-binary>=2.9.11",
+    "psycopg[binary]>=3.3.3",
+    "pycryptodome>=3.23.0",
+    "python-dotenv>=1.2.2",
+    "python-jose>=3.5.0",
+    "python-multipart>=0.0.26",
+    "redis[hiredis]>=7.4.0",
+    "requests>=2.33.1",
+    "sqlmodel>=0.0.38",
+    "uvicorn[standard]>=0.42.0",
+    "wechatpayv3[async]>=2.0.2",
+    "yt-dlp>=2026.3.17",
+]
