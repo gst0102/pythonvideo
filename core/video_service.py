@@ -9,12 +9,6 @@ from dotenv import load_dotenv
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-os.makedirs('logs', exist_ok=True)
-file_handler = logging.FileHandler('logs/video_service.log', encoding='utf-8')
-file_handler.setLevel(logging.INFO)
-file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
-logger.addHandler(file_handler)
-
 load_dotenv()
 
 COOKIE_FILE = os.getenv('COOKIE_FILE', 'cookies.txt')

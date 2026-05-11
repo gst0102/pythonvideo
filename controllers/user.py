@@ -4,9 +4,6 @@ from schemas.user import UserLoginValidate
 import os
 from dotenv import load_dotenv
 import httpx
-from sqlmodel import select,Session
-from models.user import User
-from database import get_session
 from typing import cast
 from uuid import uuid4
 from jwt_create import create_access_token, get_current_user
@@ -21,48 +18,23 @@ SECRET = os.getenv('SECRET')
 IP = os.getenv('IP')
 PORT = os.getenv('PORT')
 
-# 登录请求地址
 code2Session = 'https://api.weixin.qq.com/sns/jscode2session'
 
 
-#用户登陆
 @router.post("/user_login",summary='用户相关')
-async def login(req:UserLoginValidate,session:Session = Depends(get_session)):
-    print("用户登陆")
-    # 构造请求参数
+async def login(req:UserLoginValidate):
     params = {
       'appid':APPID,
       'secret':SECRET,
       'js_code':req.code,
       'grant_type':'authorization_code'
     }
-    print(req.code)
     async with httpx.AsyncClient() as client:
       r = await client.get(code2Session,params=params)
-      print(r.json())
     data = r.json()
     if "errcode" in data:
       return response([], 400, data)
     openid:str = data.get('openid')
-    # 查询用户是否存在
-    statement = select(User).where(User.openid == openid)
-    # 执行上一条sql语句
-    userinfo = session.exec(statement).first()
-    print(userinfo)
-    if not userinfo:
-      # 插入数据库
-      userinfo = User(
-        avatar=req.avatar,
-        nickname=req.nickname,
-        openid=openid,
-      )
-      # 先放入回话里
-      session.add(userinfo)
-      # 提交事物
-      session.commit()
-      # 同步数据
-      session.refresh(userinfo)
-    # 生成token
     usertoken = create_access_token({'openid':openid})
 
     return response({'avatar':req.avatar,'nickname':req.nickname,'usertoken':usertoken})

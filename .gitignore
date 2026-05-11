@@ -88,10 +88,6 @@ uv.lock
 *.bak
 Untitled-*.py
 
-# Cookies (contains sensitive session data)
-cookies.txt
-core/cookies.txt
-
 # Jupyter notebooks
 .ipynb_checkpoints/
 *.ipynb

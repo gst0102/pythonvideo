@@ -21,7 +21,7 @@ DATABASE_URL = f"postgresql+psycopg://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT
 # 创建异步连接引擎
 engine = create_async_engine(
     DATABASE_URL,
-    echo=True,
+    echo=False,
     pool_size=10,
     max_overflow=20
 )

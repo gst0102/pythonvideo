@@ -5,7 +5,6 @@ from core.middleware import gloglobal_middleware,validation_exception_handler
 from fastapi.staticfiles import StaticFiles
 import os
 from fastapi.exceptions import RequestValidationError
-from database import init_db
 from contextlib import asynccontextmanager
 from fastapi.middleware.cors import CORSMiddleware
 from core.databaseApi import init_redis_pool, close_redis_pool
@@ -24,7 +23,6 @@ from controllers.database import router as database_router
 async def lifespan(app: FastAPI):
     # 应用启动时
     print('应用启动执行')
-    await init_db()  # 初始化数据库
     await init_redis_pool() # 初始化 Redis 连接池
     # await init_wechatpay()  # 初始化微信支付
         # 将连接池挂载到 app.state，方便全局访问
@@ -51,10 +49,10 @@ app.add_exception_handler(RequestValidationError,validation_exception_handler)
 # 3. CORS 跨域配置 (关键！)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 允许所有源（开发阶段）
-    allow_credentials=True, # 允许携带 Cookie
-    allow_methods=["*"],    # 允许所有方法 (GET, POST, OPTIONS等)
-    allow_headers=["*"],    # 允许所有请求头
+    allow_origins=os.getenv("CORS_ORIGINS", "*").split(","),
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 # 配置静态文件访问
 image_folder = os.path.join(os.getcwd(), "image")
