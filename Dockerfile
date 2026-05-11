@@ -13,10 +13,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && pip install --upgrade pip --no-cache-dir \
     && pip install uv --no-cache-dir
 
-COPY pyproject.toml ./
+COPY pyproject.toml uv.lock ./
 
-RUN uv pip compile pyproject.toml -o /tmp/requirements.txt \
-    && uv pip install --system -r /tmp/requirements.txt
+RUN uv pip sync --system uv.lock
 
 FROM python:3.10-slim
 

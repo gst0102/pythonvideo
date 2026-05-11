@@ -79,7 +79,6 @@ Thumbs.db
 docker-compose.override.yml
 
 # UV/Pip
-uv.lock
 .pytest_cache/
 
 # Temporary files
