@@ -67,7 +67,7 @@ app.include_router(user_router)
 app.include_router(video_router)
 app.include_router(weixinpay_router)
 app.include_router(database_router)
-app.include_router(pc_router)
+app.include_router(pc_router, prefix="/api")
 
 
 if __name__ == "__main__":
