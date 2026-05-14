@@ -4,8 +4,8 @@
 # 使用 Let's Encrypt 免费证书
 # 建议添加到 crontab: 0 3 * * * /path/to/renew-ssl.sh >> /var/log/ssl-renew.log 2>&1
 
-DOMAIN="your-domain.com"
-EMAIL="250667571@qq.com"
+DOMAIN="${DOMAIN:-your-domain.com}"
+EMAIL="${EMAIL:-250667571@qq.com}"
 WEBROOT="/var/www/certbot"
 SSL_DIR="./nginx/ssl"
 

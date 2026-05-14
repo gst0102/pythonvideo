@@ -6,6 +6,8 @@ services:
     container_name: video-service-app
     expose:
       - "8000"
+    ports:
+      - "8000:8000"
     environment:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
@@ -14,6 +16,13 @@ services:
       - PORT=8000
       - CORS_ORIGINS=${CORS_ORIGINS:-*}
     volumes:
+      # 挂载整个项目目录（方便代码实时更新）
+      - ./:/app
+      # 排除 Python 缓存目录（避免宿主机和容器冲突）
+      - /app/__pycache__
+      # 排除虚拟环境（容器内自己的依赖不要被覆盖）
+      - /app/.venv
+      # 保留原有的挂载配置（数据持久化）
       - ./image:/app/image
       - ./downloads:/app/downloads
       - ./logs:/app/logs
@@ -81,7 +90,7 @@ services:
   redis:
     image: redis:7-alpine
     container_name: video-service-redis
-    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru --requirepass ${REDIS_PASSWORD:-}
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
     volumes:
       - redis_data:/data
     expose:
@@ -90,7 +99,7 @@ services:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 5s
-      retries: 5
+      retries: 6
     restart: unless-stopped
     networks:
       - app-network

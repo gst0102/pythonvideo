@@ -8,7 +8,6 @@ from fastapi.exceptions import RequestValidationError
 from contextlib import asynccontextmanager
 from fastapi.middleware.cors import CORSMiddleware
 from core.databaseApi import init_redis_pool, close_redis_pool
-import redis.asyncio as redis
 # 用户相关的接口
 from controllers.user import router as user_router
 # 视频相关的接口
@@ -17,6 +16,8 @@ from controllers.video import router as video_router
 from controllers.weixinpay import router as weixinpay_router
 # 数据库相关接口
 from controllers.database import router as database_router
+# PC管理端接口
+from controllers.pcRouter import router as pc_router
 # , init_wechatpay, close_wechatpay
 # 生命周期管理
 @asynccontextmanager
@@ -58,19 +59,22 @@ app.add_middleware(
 image_folder = os.path.join(os.getcwd(), "image")
 os.makedirs(image_folder, exist_ok=True)
 app.mount("/image", StaticFiles(directory=image_folder))
-
+@app.get("/health")
+def health_check():
+    return {"status": "ok", "message": "服务运行正常"}
 # --------------------------接口-------------------------
 app.include_router(user_router)
 app.include_router(video_router)
 app.include_router(weixinpay_router)
 app.include_router(database_router)
+app.include_router(pc_router)
 
 
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
         app="main:app",
-        host="127.0.0.1",
+        host="0.0.0.0",
         port=8000,
         reload=True,
     )

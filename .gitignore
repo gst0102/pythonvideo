@@ -79,6 +79,7 @@ Thumbs.db
 docker-compose.override.yml
 
 # UV/Pip
+
 .pytest_cache/
 
 # Temporary files
@@ -86,6 +87,10 @@ docker-compose.override.yml
 *.temp
 *.bak
 Untitled-*.py
+
+# Cookies (contains sensitive session data)
+cookies.txt
+core/cookies.txt
 
 # Jupyter notebooks
 .ipynb_checkpoints/

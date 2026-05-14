@@ -5,15 +5,7 @@ from typing import Optional
 import httpx
 import os
 import json
-from dotenv import load_dotenv
 from core.databaseApi import get_redis,RedisClient,get_access_token
-import redis.asyncio as redis
-# 加载环境变量
-load_dotenv()
-# 1. 定义全局变量存储连接池（通过 app.state 管理）
-# 注意：这里只定义类型，实际实例在 lifespan 中创建
-redis_pool: redis.ConnectionPool | None = None
-
 
 # 微信云开发环境
 evn = os.getenv('evn')

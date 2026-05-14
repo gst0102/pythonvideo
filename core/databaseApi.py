@@ -15,26 +15,27 @@ appid = os.getenv('APPID')
 secret = os.getenv('SECRET')
 grant_type='client_credential'
 async def get_access_token(redis_client: redis.Redis):
-    # 1. 【核心优化】先从 Redis 里查一下，有没有现成的 Token
     cached_token = await redis_client.get("access_token")
     if cached_token:
         print("✅ 命中缓存，直接返回 Redis 中的 Token")
         return {"message": "从缓存获取成功", "token": cached_token, "source": "redis"}
 
-    # 2. 如果 Redis 里没有，再去调用微信接口
     print("🌐 缓存未命中，正在请求微信服务器...")
     tokenUrl = f'https://api.weixin.qq.com/cgi-bin/token?appid={appid}&secret={secret}&grant_type={grant_type}'
     try:
         async with httpx.AsyncClient() as client:
-            response  = await client.get(tokenUrl)
+            response = await client.get(tokenUrl)
             data = response.json()
             access_token = data.get("access_token")
-            # 写入redis
+            if not access_token:
+                print(f"❌ 获取 access_token 失败: {data}")
+                return {"message": "获取Token失败", "token": None, "source": "wechat"}
             await redis_client.set("access_token", access_token, ex=7200)
-            print("token11111",access_token)
-            return access_token
+            print("✅ 已获取新 Token 并缓存到 Redis")
+            return {"message": "从微信获取成功", "token": access_token, "source": "wechat"}
     except Exception as e:
-        print(e)
+        print(f"❌ 请求微信服务器异常: {e}")
+        return {"message": f"请求异常: {str(e)}", "token": None, "source": "error"}
     
 # 1. 定义全局变量存储连接池（通过 app.state 管理）
 # 注意：这里只定义类型，实际实例在 lifespan 中创建
