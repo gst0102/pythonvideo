@@ -1,0 +1,215 @@
+{
+  "project": "视频下载助手后端",
+  "database": "PostgreSQL",
+  "orm": "SQLModel (SQLAlchemy + Pydantic)",
+  "driver": "asyncpg",
+  "version": "2.0",
+  "updated": "2026-05-30",
+  "tables": [
+    {
+      "name": "users",
+      "model_file": "models/user.py",
+      "description": "用户核心数据表",
+      "fields": [
+        {"name": "id", "type": "UUID", "constraints": "PK, UUID(as_uuid=True)", "default": "uuid4", "description": "主键"},
+        {"name": "openid", "type": "String(64)", "constraints": "UNIQUE, NOT NULL, INDEX", "description": "微信 openid"},
+        {"name": "nickname", "type": "String(100)", "constraints": "NOT NULL", "description": "用户昵称"},
+        {"name": "avatar", "type": "String(500)", "default": "\"\"", "description": "头像 URL"},
+        {"name": "invite_code", "type": "String(10)", "constraints": "UNIQUE, NOT NULL, INDEX", "description": "邀请码"},
+        {"name": "parent_id", "type": "UUID", "constraints": "NULLABLE, INDEX", "description": "一级邀请人 ID"},
+        {"name": "grand_parent_id", "type": "UUID", "constraints": "NULLABLE", "description": "二级邀请人 ID"},
+        {"name": "invite_count", "type": "int", "default": "0", "description": "直接邀请人数"},
+        {"name": "indirect_count", "type": "int", "default": "0", "description": "间接邀请人数"},
+        {"name": "team_count", "type": "int", "default": "0", "description": "总团队人数"},
+        {"name": "balance", "type": "Numeric(10,2)", "default": "0.00", "description": "可提现余额"},
+        {"name": "frozen_balance", "type": "Numeric(10,2)", "default": "0.00", "description": "冻结余额（提现中）"},
+        {"name": "total_income", "type": "Numeric(10,2)", "default": "0.00", "description": "累计收入"},
+        {"name": "total_withdrawn", "type": "Numeric(10,2)", "default": "0.00", "description": "累计提现"},
+        {"name": "is_vip", "type": "Boolean", "default": "False", "description": "是否 VIP"},
+        {"name": "vip_expire_at", "type": "DateTime(tz)", "constraints": "NULLABLE", "description": "VIP 到期时间"},
+        {"name": "anime_subscriptions", "type": "JSON", "default": "[]", "description": "番剧订阅 ID 列表（向后兼容）"},
+        {"name": "created_at", "type": "DateTime(tz)", "constraints": "server_default=now()", "description": "创建时间"},
+        {"name": "updated_at", "type": "DateTime(tz)", "constraints": "server_default=now(), onupdate=now()", "description": "更新时间"}
+      ],
+      "relationships": [
+        {"target": "orders", "type": "one-to-many"},
+        {"target": "commission_records", "type": "one-to-many", "note": "foreign_keys=[user_id]"},
+        {"target": "withdraw_records", "type": "one-to-many"},
+        {"target": "chat_messages", "type": "one-to-many"}
+      ]
+    },
+    {
+      "name": "orders",
+      "model_file": "models/order.py",
+      "description": "VIP 购买订单表",
+      "fields": [
+        {"name": "id", "type": "UUID", "constraints": "PK, UUID(as_uuid=True)", "default": "uuid4", "description": "主键"},
+        {"name": "user_id", "type": "UUID", "constraints": "FK(users.id), NOT NULL, INDEX", "description": "用户 ID"},
+        {"name": "amount", "type": "Numeric(10,2)", "constraints": "NOT NULL", "description": "订单金额（元）"},
+        {"name": "period", "type": "String(20)", "constraints": "NOT NULL", "description": "订阅周期: month/quarter/year"},
+        {"name": "duration_days", "type": "int", "default": "30", "description": "VIP 有效天数 (30/90/365)"},
+        {"name": "description", "type": "String(200)", "default": "\"\"", "description": "订单描述"},
+        {"name": "out_trade_no", "type": "String(64)", "constraints": "UNIQUE, NOT NULL, INDEX", "description": "商户订单号"},
+        {"name": "transaction_id", "type": "String(64)", "constraints": "NULLABLE", "description": "微信支付订单号"},
+        {"name": "status", "type": "String(20)", "default": "\"pending\"", "description": "状态: pending/paid/cancelled"},
+        {"name": "paid_at", "type": "DateTime(tz)", "constraints": "NULLABLE", "description": "支付时间"},
+        {"name": "created_at", "type": "DateTime(tz)", "constraints": "server_default=now()", "description": "创建时间"},
+        {"name": "updated_at", "type": "DateTime(tz)", "constraints": "server_default=now(), onupdate=now()", "description": "更新时间"}
+      ]
+    },
+    {
+      "name": "commission_records",
+      "model_file": "models/commission.py",
+      "description": "二级分销佣金记录表",
+      "fields": [
+        {"name": "id", "type": "UUID", "constraints": "PK, UUID(as_uuid=True)", "default": "uuid4", "description": "主键"},
+        {"name": "user_id", "type": "UUID", "constraints": "FK(users.id), NOT NULL, INDEX", "description": "获得佣金的用户（邀请人）"},
+        {"name": "from_user_id", "type": "UUID", "constraints": "FK(users.id), NOT NULL, INDEX", "description": "贡献佣金的用户（购买者）"},
+        {"name": "order_id", "type": "UUID", "constraints": "NULLABLE", "description": "关联订单 ID"},
+        {"name": "order_amount", "type": "Numeric(10,2)", "constraints": "NOT NULL", "description": "订单金额（元）"},
+        {"name": "commission_rate", "type": "Numeric(5,2)", "constraints": "NOT NULL", "description": "佣金比例 (10.00 = 10%)"},
+        {"name": "commission_amount", "type": "Numeric(10,2)", "constraints": "NOT NULL", "description": "实际佣金金额（元）"},
+        {"name": "level", "type": "SmallInteger", "constraints": "NOT NULL", "description": "1=一级邀请(10%), 2=二级邀请(5%)"},
+        {"name": "type", "type": "String(20)", "default": "\"vip_recharge\"", "description": "佣金类型"},
+        {"name": "status", "type": "String(20)", "default": "\"settled\"", "description": "状态: pending/settled/cancelled"},
+        {"name": "created_at", "type": "DateTime(tz)", "constraints": "server_default=now()", "description": "创建时间"}
+      ]
+    },
+    {
+      "name": "withdraw_records",
+      "model_file": "models/withdrawal.py",
+      "description": "用户提现记录表",
+      "fields": [
+        {"name": "id", "type": "UUID", "constraints": "PK, UUID(as_uuid=True)", "default": "uuid4", "description": "主键"},
+        {"name": "user_id", "type": "UUID", "constraints": "FK(users.id), NOT NULL, INDEX", "description": "用户 ID"},
+        {"name": "amount", "type": "Numeric(10,2)", "constraints": "NOT NULL", "description": "提现金额（元）"},
+        {"name": "status", "type": "String(20)", "constraints": "INDEX", "default": "\"processing\"", "description": "状态: processing/success/failed"},
+        {"name": "batch_no", "type": "String(64)", "constraints": "UNIQUE, NOT NULL, INDEX", "description": "商户批次单号"},
+        {"name": "transfer_bill_no", "type": "String(64)", "constraints": "NULLABLE", "description": "微信转账单号"},
+        {"name": "fail_reason", "type": "Text", "constraints": "NULLABLE", "description": "失败原因"},
+        {"name": "ip", "type": "String(45)", "constraints": "NULLABLE", "description": "客户端 IP"},
+        {"name": "created_at", "type": "DateTime(tz)", "constraints": "server_default=now()", "description": "申请时间"},
+        {"name": "completed_at", "type": "DateTime(tz)", "constraints": "NULLABLE", "description": "完成时间"},
+        {"name": "updated_at", "type": "DateTime(tz)", "constraints": "server_default=now(), onupdate=now()", "description": "更新时间"}
+      ]
+    },
+    {
+      "name": "chat_messages",
+      "model_file": "models/chat.py",
+      "description": "在线客服聊天消息表",
+      "fields": [
+        {"name": "id", "type": "UUID", "constraints": "PK, UUID(as_uuid=True)", "default": "uuid4", "description": "主键"},
+        {"name": "user_id", "type": "UUID", "constraints": "FK(users.id), NOT NULL, INDEX", "description": "用户 ID"},
+        {"name": "sender", "type": "String(10)", "constraints": "NOT NULL", "description": "发送者: user/admin"},
+        {"name": "content", "type": "Text", "constraints": "NOT NULL", "description": "消息内容（最大 1000 字）"},
+        {"name": "msg_type", "type": "String(10)", "default": "\"text\"", "description": "消息类型: text/image"},
+        {"name": "is_read", "type": "Boolean", "default": "False", "description": "管理员是否已读"},
+        {"name": "created_at", "type": "DateTime(tz)", "constraints": "server_default=now(), INDEX", "description": "发送时间"}
+      ]
+    },
+    {
+      "name": "system_configs",
+      "model_file": "models/config.py",
+      "description": "系统配置表（JSONB 灵活存储）",
+      "fields": [
+        {"name": "id", "type": "UUID", "constraints": "PK, UUID(as_uuid=True)", "default": "uuid4", "description": "主键"},
+        {"name": "type", "type": "String(50)", "constraints": "UNIQUE, NOT NULL, INDEX", "description": "配置类型标识"},
+        {"name": "config_data", "type": "JSONB", "constraints": "NOT NULL", "default": "{}", "description": "JSON 格式配置内容"},
+        {"name": "updated_at", "type": "DateTime(tz)", "constraints": "server_default=now(), onupdate=now()", "description": "更新时间"}
+      ],
+      "known_config_types": [
+        {"type": "vip_settings", "description": "VIP 套餐定价和权益配置"},
+        {"type": "withdrawal_config", "description": "提现规则（最低/最高金额、说明）"},
+        {"type": "service_settings", "description": "客服设置（自动回复、欢迎语、快捷回复）"},
+        {"type": "platform_settings", "description": "平台全局设置"},
+        {"type": "commission_settings", "description": "佣金比例配置（一级10%、二级5%）"},
+        {"type": "banner_settings", "description": "首页轮播广告配置"}
+      ]
+    },
+    {
+      "name": "anime_resources",
+      "model_file": "models/anime_resource.py",
+      "description": "影视资源表（番剧/电影/4K，定时同步 + URL去重）",
+      "fields": [
+        {"name": "id", "type": "UUID", "constraints": "PK, UUID(as_uuid=True)", "default": "uuid4", "description": "主键"},
+        {"name": "anime_id", "type": "String(100)", "constraints": "NOT NULL, INDEX", "description": "外部数据源番剧 ID"},
+        {"name": "title", "type": "String(500)", "constraints": "NOT NULL", "description": "番剧标题"},
+        {"name": "category", "type": "String(20)", "constraints": "NOT NULL, INDEX", "description": "资源类型: anime/movie/4k"},
+        {"name": "quality", "type": "String(20)", "constraints": "NULLABLE", "description": "画质: 1080P/4K/720P"},
+        {"name": "episode", "type": "String(100)", "constraints": "NULLABLE", "description": "更新进度（如\"更至36集\"）"},
+        {"name": "status", "type": "String(20)", "constraints": "NULLABLE", "description": "状态: 更新中/完结/预告"},
+        {"name": "baidu_url", "type": "Text", "constraints": "NULLABLE, 部分唯一索引", "description": "百度网盘链接"},
+        {"name": "baidu_password", "type": "String(20)", "constraints": "NULLABLE", "description": "百度网盘密码"},
+        {"name": "quark_url", "type": "Text", "constraints": "NULLABLE, 部分唯一索引", "description": "夸克网盘链接"},
+        {"name": "source_update_time", "type": "DateTime(tz)", "constraints": "NULLABLE", "description": "外部源最后更新时间"},
+        {"name": "is_active", "type": "Boolean", "constraints": "INDEX", "default": "True", "description": "是否活跃（外部删除后标记False）"},
+        {"name": "created_at", "type": "DateTime(tz)", "constraints": "server_default=now()", "description": "创建时间"},
+        {"name": "updated_at", "type": "DateTime(tz)", "constraints": "server_default=now(), onupdate=now()", "description": "更新时间"}
+      ],
+      "sync_config": {
+        "method": "APScheduler AsyncIOScheduler",
+        "anime_interval": "15分钟",
+        "movie_4k_cron": "每天 8:00",
+        "dedup": "baidu_url 和 quark_url 分别建部分唯一索引（NULL-safe）",
+        "soft_delete": "外部删除的标记 is_active=False"
+      }
+    },
+    {
+      "name": "user_subscriptions",
+      "model_file": "models/user_subscription.py",
+      "description": "用户番剧订阅关系表",
+      "fields": [
+        {"name": "id", "type": "UUID", "constraints": "PK, UUID(as_uuid=True)", "default": "uuid4", "description": "主键"},
+        {"name": "user_id", "type": "UUID", "constraints": "NOT NULL, INDEX", "description": "用户 ID"},
+        {"name": "anime_id", "type": "String(100)", "constraints": "NOT NULL, INDEX", "description": "番剧 ID"},
+        {"name": "is_reminded", "type": "Boolean", "default": "False", "description": "是否已催更提醒"},
+        {"name": "last_episode", "type": "String(100)", "constraints": "NULLABLE", "description": "用户最后看到的集数"},
+        {"name": "created_at", "type": "DateTime(tz)", "constraints": "server_default=now()", "description": "订阅时间"}
+      ],
+      "constraints": [
+        "(user_id, anime_id) 组合唯一约束，防止重复订阅"
+      ],
+      "usage": "用于\"我的订阅\"列表展示、催更检测、推送通知"
+    }
+  ],
+  "business_rules": {
+    "vip": {
+      "periods": {"month": 30, "quarter": 90, "year": 365},
+      "test_mode": "VIP_TEST_MODE=true 时月卡仅 0.1 元"
+    },
+    "commission": {
+      "level_1_rate": 10,
+      "level_2_rate": 5,
+      "description": "一级邀请人获10%佣金，二级邀请人获5%佣金"
+    },
+    "withdrawal": {
+      "min_amount": 0.10,
+      "max_amount": 200.00,
+      "method": "微信商家转账 V3 API (transfer_scene_id=1005)",
+      "rollback": "API 失败时显式回滚 frozen_balance → balance",
+      "cleanup": "POST /withdrawal/release-frozen 清理超24小时冻结金额"
+    },
+    "anime_unlock": {
+      "movie_required": 3,
+      "k4_required": 5,
+      "description": "邀请人数 ≥ 3 解锁电影，≥ 5 解锁 4K"
+    },
+    "rate_limit": {
+      "video": "每分钟 5 次 (user_id+IP)",
+      "wecom": "每分钟 10 次"
+    }
+  },
+  "tech_stack": {
+    "framework": "FastAPI (uvicorn)",
+    "orm": "SQLModel (SQLAlchemy + Pydantic)",
+    "database": "PostgreSQL 15+",
+    "driver": "asyncpg",
+    "cache": "Redis 7+",
+    "auth": "JWT (python-jose)",
+    "payment": "微信支付 V3 API (WeChatPayV3)",
+    "video_download": "yt-dlp + Playwright (抖音/小红书自定义爬虫)",
+    "scheduler": "APScheduler (番剧定时同步)",
+    "http_client": "httpx (async)",
+    "migrations": "Alembic"
+  }
+}

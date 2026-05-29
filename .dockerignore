@@ -29,3 +29,7 @@ node_modules/
 *.avi
 *.mkv
 *.mov
+cookies.txt
+cookies.txt.*
+down-test/pw_browsers/
+down-test/downloads/

@@ -14,24 +14,36 @@ evn = os.getenv('evn')
 appid = os.getenv('APPID')
 secret = os.getenv('SECRET')
 grant_type='client_credential'
-async def get_access_token(redis_client: redis.Redis):
-    cached_token = await redis_client.get("access_token")
-    if cached_token:
-        print("✅ 命中缓存，直接返回 Redis 中的 Token")
-        return {"message": "从缓存获取成功", "token": cached_token, "source": "redis"}
+async def get_access_token(redis_client: redis.Redis = None):
+    # 尝试从 Redis 缓存获取
+    if redis_client:
+        try:
+            cached_token = await redis_client.get("access_token")
+            if cached_token:
+                print("✅ 命中缓存，直接返回 Redis 中的 Token")
+                return {"message": "从缓存获取成功", "token": cached_token, "source": "redis"}
+        except Exception as e:
+            print(f"⚠️ Redis 读取失败，直接请求微信: {e}")
 
-    print("🌐 缓存未命中，正在请求微信服务器...")
+    # 缓存未命中或 Redis 不可用，直接从微信获取
+    print("🌐 正在请求微信服务器获取 access_token...")
     tokenUrl = f'https://api.weixin.qq.com/cgi-bin/token?appid={appid}&secret={secret}&grant_type={grant_type}'
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(tokenUrl)
             data = response.json()
             access_token = data.get("access_token")
             if not access_token:
                 print(f"❌ 获取 access_token 失败: {data}")
                 return {"message": "获取Token失败", "token": None, "source": "wechat"}
-            await redis_client.set("access_token", access_token, ex=7200)
-            print("✅ 已获取新 Token 并缓存到 Redis")
+
+            # 尝试缓存到 Redis（失败不影响主流程）
+            if redis_client:
+                try:
+                    await redis_client.set("access_token", access_token, ex=7200)
+                    print("✅ 已获取新 Token 并缓存到 Redis")
+                except Exception:
+                    print("⚠️ Redis 缓存写入失败（不影响主流程）")
             return {"message": "从微信获取成功", "token": access_token, "source": "wechat"}
     except Exception as e:
         print(f"❌ 请求微信服务器异常: {e}")

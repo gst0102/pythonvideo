@@ -1,13 +1,14 @@
 [project]
 name = "myproject"
-version = "0.1.0"
-description = "Add your description here"
+version = "0.2.0"
+description = "视频下载助手 - FastAPI 后端"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "cryptography>=46.0.7",
     "fastapi>=0.135.2",
     "httpx>=0.28.1",
+    "playwright>=1.55.0",
     "pycryptodome>=3.23.0",
     "python-dotenv>=1.2.2",
     "python-jose>=3.5.0",
@@ -17,4 +18,10 @@ dependencies = [
     "uvicorn[standard]>=0.42.0",
     "wechatpayv3[async]>=2.0.2",
     "yt-dlp>=2026.3.17",
+    # === 新增：PostgreSQL + ORM ===
+    "sqlmodel[asyncio]>=0.0.24",
+    "asyncpg>=0.30.0",
+    "alembic>=1.15.0",
+    # === 新增：定时任务调度 ===
+    "apscheduler>=3.10.4",
 ]

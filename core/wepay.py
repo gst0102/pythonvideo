@@ -151,3 +151,81 @@ class WeChatPayV3:
             "signType": "RSA",
             "paySign": pay_sign
         }
+
+    def merchant_transfer(self, out_bill_no: str, openid: str, amount: float, transfer_remark: str = "收益提现") -> dict:
+        """
+        发起商家转账到零钱（2025年新版 API）。
+        
+        Args:
+            out_bill_no: 商户转账单号（唯一，仅数字+字母，≤32位）
+            openid: 收款用户 openid
+            amount: 转账金额（元）
+            transfer_remark: 转账备注（UTF-8，最多32个字符）
+        
+        Returns:
+            dict: 微信返回的转账结果，包含 state, transfer_bill_no 等
+        
+        Raises:
+            Exception: 微信 API 返回非 200 状态码
+        """
+        amount_in_fen = int(round(float(amount) * 100))
+        transfer_url = "/v3/fund-app/mch-transfer/transfer-bills"
+        full_url = f"https://api.mch.weixin.qq.com{transfer_url}"
+
+        # 确保转账备注不超过 32 字符（微信限制）
+        if len(transfer_remark.encode("utf-8")) > 32:
+            transfer_remark = transfer_remark[:10]  # 约 30 字节
+
+        body = {
+            "appid": self.app_id,
+            "out_bill_no": out_bill_no,
+            "transfer_scene_id": "1005",
+            "openid": openid,
+            "transfer_amount": amount_in_fen,
+            "transfer_remark": transfer_remark,
+            "user_recv_perception": "劳务报酬",
+            "transfer_scene_report_infos": [
+                {"info_type": "岗位类型", "info_content": "用户"},
+                {"info_type": "报酬说明", "info_content": "平台推广收益提现"},
+            ],
+        }
+
+        if self.notify_url:
+            body["notify_url"] = self.notify_url
+
+        # 调试日志：打印完整请求体（不含敏感信息）
+        import logging
+        logger = logging.getLogger(__name__)
+        safe_body = {**body}
+        if "openid" in safe_body:
+            safe_body["openid"] = safe_body["openid"][:6] + "***"
+        logger.info(f"[WeChatPay] 商家转账请求: {json.dumps(safe_body, ensure_ascii=False)}")
+
+        timestamp = str(int(time.time()))
+        nonce_str = "".join(random.choices(string.ascii_letters + string.digits, k=32))
+        body_str = json.dumps(body, ensure_ascii=False)
+        authorization = self._get_authorization("POST", transfer_url, body_str, timestamp, nonce_str)
+
+        headers = {
+            "Authorization": authorization,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "myproject/withdrawal",
+        }
+
+        resp = requests.post(full_url, headers=headers, data=body_str.encode("utf-8"), timeout=30)
+
+        # 详细的错误日志
+        try:
+            result = resp.json()
+        except Exception:
+            result = {"raw": resp.text}
+
+        logger.info(f"[WeChatPay] 转账响应: HTTP {resp.status_code}, body={json.dumps(result, ensure_ascii=False)}")
+
+        if resp.status_code != 200:
+            error_msg = result.get("message", str(result))
+            error_code = result.get("code", "UNKNOWN")
+            raise Exception(f"微信转账API错误 [{resp.status_code}/{error_code}]: {error_msg}")
+
+        return result

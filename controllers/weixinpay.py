@@ -20,6 +20,10 @@ from core.databaseApi import get_redis, RedisClient, get_access_token
 from dotenv import load_dotenv
 from Crypto.Cipher import AES
 
+# === 新增：PostgreSQL + PaymentService ===
+from models.base import get_session_ctx
+from services.payment_service import PaymentService
+
 # 配置日志
 logger = logging.getLogger(__name__)
 
@@ -81,77 +85,74 @@ def convert_fen_to_yuan(price_in_fen: int) -> float:
 @router.post("/api/newcreateOrder")
 async def create_ordervalue(data: OrderCreateRequest, redis: RedisClient = Depends(get_redis)):
     """创建订单并调用微信支付"""
+    logger.info(f"[支付] 收到下单请求: userId={data.userId}, period={data.period}, price={data.price}")
     
-    # 转换金额（元 -> 分）用于微信支付
-    price_in_fen = convert_yuan_to_fen(data.price)
-    
-    # 获取微信 access_token
-    token_result = await get_access_token(redis_client=redis)
-    access_token_str = token_result.get("token")
-    if not access_token_str:
-        return {"code": 500, "msg": "获取Token失败"}
-
-    # 拼接调用云函数的 URL
-    cloud_func_url = f"https://api.weixin.qq.com/tcb/invokecloudfunction?access_token={access_token_str}&env={evn}&name=database"
-    
-    # 生成商户订单号
-    out_trade_no = generate_out_trade_no()
-    now_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    # 数据库存储元
-
-    price_in_yuan = float(convert_fen_to_yuan(price_in_fen))
-    # 准备写入云数据库的订单数据
-    order_data = {
-        "user_id": data.userId,
-        "price": price_in_yuan,
-        "paymentStatus": "001",  # 001 代表未支付
-        "period": data.period,
-        "out_trade_no": out_trade_no,
-        "create_time": now_time,
-        "update_time": now_time,
-        "transaction_id": None,
-        "pay_time": None,
-        "expire_time": None,
-        "description": data.description
-    }
-
-    # 调用云函数将订单存入云数据库
-    doc_id = None
-    
-    async with httpx.AsyncClient() as client:
-        db_res = await client.post(cloud_func_url, json={
-            "action": "add",
-            "collectionName": "order-info",
-            "data": order_data
-        })
-        db_result = db_res.json()
-        logger.info(f"数据库写入结果: {db_result}")
-        
-        # 从返回结果中提取 _id
-        if db_result.get("success") and db_result.get("data", {}).get("_id"):
-            doc_id = db_result["data"]["_id"]
-            logger.info(f"订单创建成功，文档ID: {doc_id}")
-
-    # 调用微信统一下单（传入分）
     try:
+        price_in_fen = convert_yuan_to_fen(data.price)
+
+        # 获取微信 access_token（Redis 不可用时自动降级直调微信）
+        try:
+            token_result = await get_access_token(redis_client=redis)
+        except Exception:
+            token_result = await get_access_token(redis_client=None)
+        access_token_str = token_result.get("token")
+        if not access_token_str:
+            logger.error("[支付] 获取微信 access_token 失败")
+            return {"code": 500, "msg": "获取微信Token失败，请检查APPID/SECRET配置"}
+
+        # 调用云函数写入订单
+        cloud_func_url = f"https://api.weixin.qq.com/tcb/invokecloudfunction?access_token={access_token_str}&env={evn}&name=database"
+
+        out_trade_no = generate_out_trade_no()
+        now_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        price_in_yuan = float(convert_fen_to_yuan(price_in_fen))
+
+        order_data = {
+            "user_id": data.userId,
+            "price": price_in_yuan,
+            "paymentStatus": "001",
+            "period": data.period,
+            "out_trade_no": out_trade_no,
+            "create_time": now_time,
+            "update_time": now_time,
+            "transaction_id": None,
+            "pay_time": None,
+            "expire_time": None,
+            "description": data.description,
+        }
+
+        doc_id = None
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            try:
+                db_res = await client.post(cloud_func_url, json={
+                    "action": "add",
+                    "collectionName": "order-info",
+                    "data": order_data,
+                })
+                db_result = db_res.json()
+                logger.info(f"[支付] 云函数写入结果: {db_result}")
+                if db_result.get("data", {}).get("_id"):
+                    doc_id = db_result["data"]["_id"]
+            except Exception as db_err:
+                logger.warning(f"[支付] 云函数写入失败(继续下单): {db_err}")
+
+        # 调用微信统一下单
+        logger.info(f"[支付] 调起微信支付: out_trade_no={out_trade_no}, total={price_in_fen}分")
         prepay_id = wx_pay.create_jsapi_order(
             description=data.description,
             out_trade_no=out_trade_no,
             total=price_in_fen,
             openid=data.openid,
-            notify_url=config.get('notify_url')
+            notify_url=config.get("notify_url"),
         )
 
-        # 生成前端调起支付需要的参数
         pay_params = wx_pay.get_jsapi_params(prepay_id)
-        logger.info(f'支付参数生成成功, prepay_id: {prepay_id}')
-        
+        logger.info(f"[支付] 下单成功, prepay_id={prepay_id}")
         return {"code": 200, "msg": "success", "data": pay_params, "doc_id": doc_id}
 
     except Exception as e:
-        logger.error(f"创建订单失败: {str(e)}")
-        raise HTTPException(status_code=400, detail=str(e))
+        logger.error(f"[支付] 创建订单失败: {e}", exc_info=True)
+        return {"code": 500, "msg": f"下单失败: {str(e)}"}
 
 
 # ==================== 回调相关函数 ====================
@@ -328,39 +329,34 @@ async def pay_notify(request: Request):
             logger.error("❌ 缺少订单号")
             return {"code": "FAIL", "message": "缺少订单号"}
         
-        # 11. 使用 main.py 中管理的 Redis 连接池创建客户端
+        # 11. 使用 PostgreSQL 处理支付回调（含 VIP 激活 + 佣金计算）
+        async with get_session_ctx() as session:
+            update_success = await PaymentService.handle_payment_success(
+                session, out_trade_no, transaction_id, total_fee_in_fen, success_time,
+            )
+
+        # 12. Redis 缓存订单状态
         import redis.asyncio as redis_async
         pool = request.app.state.redis_pool
         redis_client = redis_async.Redis(connection_pool=pool, decode_responses=True)
-        
         try:
-            # 更新数据库中的订单状态
-            update_success = await update_order_payment_status(
-                out_trade_no, transaction_id, total_fee_in_fen, success_time,openid, redis_client
-            )
-            
             if update_success:
                 logger.info("✅ 订单状态更新成功")
-                # 缓存订单状态到 Redis
                 await redis_client.setex(
-                    f"order:{out_trade_no}:status",
-                    3600,
-                    "paid"
+                    f"order:{out_trade_no}:status", 3600, "paid",
                 )
                 await redis_client.setex(
-                    f"order:{out_trade_no}:transaction",
-                    3600,
+                    f"order:{out_trade_no}:transaction", 3600,
                     json.dumps({
                         "transaction_id": transaction_id,
                         "paid_time": success_time,
-                        "amount": convert_fen_to_yuan(total_fee_in_fen)
-                    })
+                        "amount": convert_fen_to_yuan(total_fee_in_fen),
+                    }),
                 )
                 logger.info(f"✅ Redis 缓存更新成功: order:{out_trade_no}")
             else:
                 logger.error("❌ 订单状态更新失败")
         finally:
-            # 重要：释放从连接池获取的 Redis 连接
             await redis_client.aclose()
         
         logger.info("✅ 回调处理完成")

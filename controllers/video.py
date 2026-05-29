@@ -2,6 +2,7 @@
 import asyncio
 import urllib.parse
 import logging
+import uuid
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, field_validator
 from typing import Any
@@ -102,19 +103,74 @@ async def get_video_info(request: Request, video_request: VideoRequest):
         raise HTTPException(status_code=500, detail=f"服务器内部错误: {str(e)}")
 
 
-@router.get('/user_video', summary='下载视频')
-async def get_video_url(
+@router.get('/user_video', summary='下载视频(GET-查询参数)')
+async def get_video_url_get(
     request: Request, 
     user_id: str, 
     url: str, 
     format_preset: str = "fast"
 ):
-    """
-    下载视频
-    - user_id: 用户ID
-    - url: 视频URL
-    - format_preset: 格式预设 (fast, medium, quality)
-    """
+    """GET 方式，参数通过查询字符串传递"""
+    return await _download_video(request, user_id, url, format_preset)
+
+
+@router.post('/user_video', summary='下载视频(POST-JSON body，推荐)')
+async def get_video_url_post(
+    request: Request,
+    body: VideoRequest,
+):
+    """POST 方式，参数通过 JSON body 传递，适合长 URL"""
+    return await _download_video(request, body.user_id, body.url, body.format_preset)
+
+
+# ═══ Token 下载（解决长 URL 编码 + 小程序文件限额）═══
+
+# 内存 token 存储 {token: {url, user_id, format_preset, expires}}
+_download_tokens: dict[str, dict] = {}
+_TOKEN_TTL = 300  # 5分钟有效
+
+
+@router.post('/download-token', summary='生成下载Token')
+async def create_download_token(body: VideoRequest):
+    """POST 接收长 URL，返回短 token。前端用 token 调 GET /download/{token} 下载"""
+    token = uuid.uuid4().hex[:16]
+    _download_tokens[token] = {
+        "url": body.url,
+        "user_id": body.user_id,
+        "format_preset": body.format_preset,
+    }
+    logger.info(f"[Token] 生成 token={token} for {body.url[:60]}...")
+    
+    # 清理过期 token
+    import time
+    now = time.time()
+    expired = [k for k, v in _download_tokens.items() if now - v.get("_created", now) > _TOKEN_TTL]
+    for k in expired:
+        del _download_tokens[k]
+
+    return response(data={"token": token, "expires_in": _TOKEN_TTL}, code=200, msg="Token 已生成")
+
+
+@router.get('/download/{token}', summary='Token下载视频')
+async def download_by_token(request: Request, token: str):
+    """通过 token 下载视频，避免长 URL 在查询参数中"""
+    entry = _download_tokens.pop(token, None)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Token 无效或已过期")
+    
+    # 标记创建时间用于过期清理
+    import time
+    entry["_created"] = time.time()
+    _download_tokens[token] = entry  # 放回去以便重试
+    
+    return await _download_video(
+        request, entry["user_id"], entry["url"], entry["format_preset"]
+    )
+
+
+# ═══ 核心下载逻辑 ═══
+
+async def _download_video(request: Request, user_id: str, url: str, format_preset: str):
     client_ip = request.client.host
     logger.info(f"收到视频下载请求 from 用户 {user_id} (IP: {client_ip}): {url}")
     

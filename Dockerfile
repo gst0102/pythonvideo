@@ -21,8 +21,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     build-essential \
     && rm -rf /var/lib/apt/lists/* \
-    && pip install --upgrade pip --no-cache-dir \
-    && pip install uv --no-cache-dir
+    && pip install --upgrade pip --no-cache-dir -i https://mirrors.aliyun.com/pypi/simple/
+
+# 使用 pip 安装 uv（官方脚本可能被墙，用 pip 更稳定）
+RUN pip install uv --no-cache-dir -i https://mirrors.aliyun.com/pypi/simple/
 
 COPY pyproject.toml uv.lock ./
 
@@ -52,9 +54,26 @@ RUN if [ -f /etc/apt/sources.list ]; then \
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     curl \
+    libatk-bridge2.0-0 \
+    libatk1.0-0 \
+    libcups2 \
+    libdrm2 \
+    libgbm1 \
+    libnss3 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxfixes3 \
+    libxkbcommon0 \
+    libxrandr2 \
+    libasound2 \
+    libpango-1.0-0 \
+    libcairo2 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /opt/venv /opt/venv
+
+RUN /opt/venv/bin/playwright install --with-deps chromium \
+    && /opt/venv/bin/playwright install-deps chromium
 
 COPY . .
 

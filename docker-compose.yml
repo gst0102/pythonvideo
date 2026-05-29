@@ -12,6 +12,8 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - DATABASE_URL=${DATABASE_URL:-postgresql+asyncpg://postgres:${DB_PASSWORD:-postgres}@postgres:5432/agent}
+      - DB_ECHO=${DB_ECHO:-false}
       - IP=${DOMAIN:-0.0.0.0}
       - PORT=8000
       - CORS_ORIGINS=${CORS_ORIGINS:-*}
@@ -28,9 +30,12 @@ services:
       - ./logs:/app/logs
       - ./certs:/app/certs:ro
       - ./cookies.txt:/app/cookies.txt:ro
+      - ./cookies.txt.dan:/app/cookies.txt.dan:ro
       - ./.env:/app/.env:ro
     depends_on:
       redis:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
     restart: unless-stopped
     networks:
@@ -52,12 +57,14 @@ services:
   nginx:
     image: nginx:alpine
     container_name: video-service-nginx
-    ports:
-      - "80:80"
-      - "443:443"
+    # ⚠️ 如果服务器宿主机已有 nginx 占用 80/443，注释掉 ports
+    # 改为在宿主机 nginx 里配置反向代理到 app:8000
+    # ports:
+    #   - "80:80"
+    #   - "443:443"
     volumes:
       - ./nginx/default.conf:/etc/nginx/conf.d/default.conf
-      - ./nginx/ssl:/etc/nginx/ssl:ro
+      - ./nginx/ssl:/etc/letsencrypt:ro
       - ./www/certbot:/var/www/certbot:ro
       - ./image:/usr/share/nginx/html/image:ro
     depends_on:
@@ -114,10 +121,43 @@ services:
         max-size: "20m"
         max-file: "3"
 
+  postgres:
+    image: postgres:16-alpine
+    container_name: video-service-postgres
+    environment:
+      POSTGRES_DB: agent
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    expose:
+      - "5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d agent"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - app-network
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 1G
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "3"
+
 volumes:
   redis_data:
+    driver: local
+  postgres_data:
     driver: local
 
 networks:
   app-network:
     driver: bridge
+

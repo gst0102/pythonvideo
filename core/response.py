@@ -1,31 +1,37 @@
 # core/response.py
-# 统一接口返回格式
 
-from typing import Any, Union, Optional
-from pydantic import BaseModel
-from fastapi.responses import JSONResponse, StreamingResponse
+from collections.abc import AsyncIterator, Iterator
+from typing import Any, Optional, Union
+
+import inspect
 import types
+from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import BaseModel
+
 
 class ResponseModel(BaseModel):
     data: Any | None = None
     code: int = 200
     msg: Any = "SUCCESS"
 
+
 def response(
-        data: Any = None,  # 返回的数据，可以是任意类型，也可以是none
-        code: int = 200,  # 状态码
-        msg: Any = "SUCCESS",  # 状态信息
-        media_type: Optional[str] = None,  # 新增：允许指定媒体类型
-        headers: Optional[dict] = None  # 新增：允许指定头部（用于下载文件名）
-        ) -> Union[JSONResponse, StreamingResponse]:
-    # 场景 1：如果是流式数据（生成器），返回 StreamingResponse
-    # 检查 data 是否是生成器
-    if isinstance(data, types.GeneratorType):
+    data: Any = None,
+    code: int = 200,
+    msg: Any = "SUCCESS",
+    media_type: Optional[str] = None,
+    headers: Optional[dict] = None,
+) -> Union[JSONResponse, StreamingResponse]:
+    if (
+        isinstance(data, types.GeneratorType)
+        or inspect.isasyncgen(data)
+        or isinstance(data, (Iterator, AsyncIterator))
+    ):
         return StreamingResponse(
-            data, 
+            data,
             status_code=code,
-            media_type=media_type or "application/octet-stream",  # 默认二进制流
-            headers=headers
+            media_type=media_type or "application/octet-stream",
+            headers=headers,
         )
 
     if data is None:
