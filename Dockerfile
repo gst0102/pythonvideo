@@ -10,21 +10,21 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /build
 
-# 使用阿里云镜像源
+# 使用清华镜像源
 RUN if [ -f /etc/apt/sources.list ]; then \
-        sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list; \
+        sed -i 's|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list; \
     elif [ -f /etc/apt/sources.list.d/debian.sources ]; then \
-        sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources; \
+        sed -i 's|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list.d/debian.sources; \
     fi
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     build-essential \
     && rm -rf /var/lib/apt/lists/* \
-    && pip install --upgrade pip --no-cache-dir -i https://mirrors.aliyun.com/pypi/simple/
+    && pip install --upgrade pip --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple/
 
 # 使用 pip 安装 uv（官方脚本可能被墙，用 pip 更稳定）
-RUN pip install uv --no-cache-dir -i https://mirrors.aliyun.com/pypi/simple/
+RUN pip install uv --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple/
 
 COPY pyproject.toml uv.lock ./
 
@@ -44,11 +44,11 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# 使用阿里云镜像源
+# 使用清华镜像源
 RUN if [ -f /etc/apt/sources.list ]; then \
-        sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list; \
+        sed -i 's|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list; \
     elif [ -f /etc/apt/sources.list.d/debian.sources ]; then \
-        sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources; \
+        sed -i 's|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list.d/debian.sources; \
     fi
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
