@@ -3,6 +3,7 @@
 # 完整流程: 用户转发视频到企业微信 -> 回调接收URL -> 发送小程序卡片 -> 前端传后端下载保存
 
 import os
+import json
 import yt_dlp
 import asyncio
 import uuid
@@ -282,7 +283,203 @@ async def receive_message(request: Request):
 
 
 # ============================================================
-#  发送小程序卡片回复
+#  微信客服回调接口（接收普通微信用户消息）
+# ============================================================
+
+@router.get('/kf/callback', summary='微信客服回调URL验证')
+async def kf_verify_callback(
+    msg_signature: str = Query(..., description="签名"),
+    timestamp: str = Query(..., description="时间戳"),
+    nonce: str = Query(..., description="随机数"),
+    echostr: str = Query(..., description="加密的随机字符串"),
+):
+    """企业微信后台配置微信客服回调URL时验证（与企业回调共用Token/Key）"""
+    token = os.getenv("WECOM_TOKEN", "")
+    encoding_aes_key = os.getenv("WECOM_ENCODING_AES_KEY", "")
+
+    if not token or not encoding_aes_key:
+        logger.error("[WeCom-KF] 回调验证失败: 缺少 WECOM_TOKEN 或 WECOM_ENCODING_AES_KEY")
+        return PlainTextResponse("配置错误", status_code=500)
+
+    try:
+        if not _verify_signature(msg_signature, timestamp, nonce, echostr, token):
+            logger.error("[WeCom-KF] 回调验证失败: 签名不匹配")
+            return PlainTextResponse("签名验证失败", status_code=403)
+
+        decrypted = _decrypt_echostr(echostr, encoding_aes_key)
+        logger.info("[WeCom-KF] 回调 URL 验证成功")
+        return PlainTextResponse(decrypted)
+
+    except Exception as e:
+        logger.error(f"[WeCom-KF] 回调验证异常: {str(e)}")
+        return PlainTextResponse(f"验证失败: {str(e)}", status_code=500)
+
+
+@router.post('/kf/callback', summary='接收微信客服消息推送')
+async def kf_receive_message(request: Request):
+    """接收普通微信用户发给客服的消息（消息体同上加密，解密后为JSON）"""
+    params = request.query_params
+    msg_signature = params.get("msg_signature", "")
+    timestamp = params.get("timestamp", "")
+    nonce = params.get("nonce", "")
+
+    token = os.getenv("WECOM_TOKEN", "")
+    encoding_aes_key = os.getenv("WECOM_ENCODING_AES_KEY", "")
+
+    if not token or not encoding_aes_key:
+        return PlainTextResponse("", status_code=200)
+
+    xml_body = await request.body()
+    xml_str = xml_body.decode("utf-8")
+
+    try:
+        root = ET.fromstring(xml_str)
+        encrypt_text = root.find("Encrypt").text
+
+        if not _verify_signature(msg_signature, timestamp, nonce, encrypt_text, token):
+            logger.error("[WeCom-KF] 消息签名验证失败")
+            return PlainTextResponse("", status_code=200)
+
+        decrypted = _decrypt_message(xml_str, encoding_aes_key)
+        msg = json.loads(decrypted)
+
+        msg_type = msg.get("MsgType", "")
+        from_user = msg.get("FromUserName", "")   # 外部用户 openid
+        to_user = msg.get("ToUserName", "")        # open_kfid（客服账号ID）
+
+        logger.info(f"[WeCom-KF] 收到客服消息: MsgType={msg_type}, From={from_user}")
+
+        if msg_type == "text":
+            content = msg.get("Content", "").strip()
+            urls = re.findall(r'https?://[^\s]+', content)
+            if urls:
+                video_url = urls[0]
+                video_title = content.replace(video_url, "").strip() or "视频链接"
+                logger.info(f"[WeCom-KF] 检测到视频链接: {video_url}")
+                asyncio.create_task(_kf_process_video(from_user, to_user, video_url, video_title))
+            else:
+                asyncio.create_task(_kf_reply_text(from_user, to_user,
+                    "请发送视频链接（支持抖音、快手、小红书等），我会帮您下载保存。"))
+
+        elif msg_type == "event":
+            event = msg.get("Event", "")
+            if event == "kf_connect":
+                asyncio.create_task(_kf_reply_text(from_user, to_user,
+                    "欢迎使用视频下载助手！\n\n直接发送视频链接（抖音、快手等），我会帮您下载并返回小程序卡片。"))
+
+        return PlainTextResponse("")
+
+    except json.JSONDecodeError:
+        logger.error(f"[WeCom-KF] JSON解析失败")
+        return PlainTextResponse("", status_code=200)
+    except Exception as e:
+        logger.error(f"[WeCom-KF] 处理消息异常: {str(e)}")
+        return PlainTextResponse("", status_code=200)
+
+
+async def _kf_reply_text(touser: str, open_kfid: str, content: str) -> None:
+    """微信客服 - 发送文本消息"""
+    try:
+        access_token = await get_wecom_access_token()
+        payload = {
+            "touser": touser,
+            "open_kfid": open_kfid,
+            "msgtype": "text",
+            "text": {"content": content}
+        }
+        kf_send_url = "https://qyapi.weixin.qq.com/cgi-bin/kf/send_msg"
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(kf_send_url, params={"access_token": access_token}, json=payload)
+            result = resp.json()
+        if result.get("errcode") != 0:
+            logger.error(f"[WeCom-KF] 发送文本失败: {result}")
+        else:
+            logger.info(f"[WeCom-KF] 文本已发送给 {touser}")
+    except Exception as e:
+        logger.error(f"[WeCom-KF] 发送文本异常: {e}")
+
+
+async def _kf_reply_menu(touser: str, open_kfid: str, head: str,
+                          btn_text: str, mini_appid: str, mini_path: str, tail: str = "") -> None:
+    """微信客服 - 发送菜单消息（带小程序跳转按钮，不需要上传媒体文件）"""
+    try:
+        access_token = await get_wecom_access_token()
+        payload = {
+            "touser": touser,
+            "open_kfid": open_kfid,
+            "msgtype": "msgmenu",
+            "msgmenu": {
+                "head_content": head,
+                "list": [{
+                    "type": "miniprogram",
+                    "content": btn_text,
+                    "miniprogram": {
+                        "appid": mini_appid,
+                        "pagepath": mini_path
+                    }
+                }],
+                "tail_content": tail
+            }
+        }
+        kf_send_url = "https://qyapi.weixin.qq.com/cgi-bin/kf/send_msg"
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(kf_send_url, params={"access_token": access_token}, json=payload)
+            result = resp.json()
+        if result.get("errcode") != 0:
+            logger.error(f"[WeCom-KF] 发送菜单失败: {result}")
+        else:
+            logger.info(f"[WeCom-KF] 菜单消息已发送给 {touser}")
+    except Exception as e:
+        logger.error(f"[WeCom-KF] 发送菜单异常: {e}")
+
+
+async def _kf_process_video(user_id: str, kf_id: str, video_url: str, title: str) -> None:
+    """微信客服 - 处理视频链接：下载后回复带小程序按钮的菜单消息"""
+    await _kf_reply_text(user_id, kf_id, f"正在下载视频，请稍候...\n{title[:30]}")
+
+    try:
+        video_info = await asyncio.to_thread(extract_video_info, video_url)
+        video_title = video_info.get("title", title or f"video_{int(time.time())}")
+
+        user_dir = os.path.join(DOWNLOADS_DIR, sanitize_filename(user_id))
+        os.makedirs(user_dir, exist_ok=True)
+
+        safe_title = sanitize_filename(video_title)
+        unique_id = str(uuid.uuid4())[:8]
+        output_template = os.path.join(user_dir, f"{safe_title}_{unique_id}.%(ext)s")
+
+        start_time = time.time()
+        downloaded_file = await asyncio.to_thread(download_video, video_url, output_template)
+        elapsed = time.time() - start_time
+
+        if not downloaded_file or not os.path.exists(downloaded_file):
+            await _kf_reply_text(user_id, kf_id, "视频下载失败，请检查链接是否有效。")
+            return
+
+        file_size = os.path.getsize(downloaded_file)
+        app_id = os.getenv("APPID", "wx5b74bb5779e91393").strip()
+        page_path = os.getenv("WECOM_MINIPROGRAM_PAGE", "pages/content/content").strip()
+        encoded_url = urllib.parse.quote(video_url, safe="")
+
+        mini_path = f"{page_path}?url={encoded_url}"
+
+        await _kf_reply_menu(
+            user_id, kf_id,
+            head=f"下载完成！\n{video_title[:30]}\n大小: {format_file_size(file_size)}\n耗时: {elapsed:.0f}秒",
+            btn_text="打开小程序查看",
+            mini_appid=app_id,
+            mini_path=mini_path,
+            tail="点击上方按钮"
+        )
+
+        logger.info(f"[WeCom-KF] 视频处理完成: {video_title}, user={user_id}")
+
+    except Exception as e:
+        logger.error(f"[WeCom-KF] 视频处理失败: {e}")
+        await _kf_reply_text(user_id, kf_id, f"处理失败: {str(e)[:100]}")
+
+# ============================================================
+#  发送小程序卡片回复（企业内成员）
 # ============================================================
 
 async def _reply_with_miniprogram_card(touser: str, video_url: str, title: str = "视频链接") -> None:
