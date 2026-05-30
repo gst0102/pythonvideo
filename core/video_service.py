@@ -16,7 +16,6 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 PROXY_URL = os.getenv("PROXY_URL")
-
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -38,9 +37,15 @@ class VideoService:
 
         for candidate in candidates:
             if candidate.exists() and candidate.is_file():
-                logger.info("[VideoService] 找到 cookie 文件: %s", candidate)
+                logger.info("[VideoService] found cookie file: %s", candidate)
                 return str(candidate)
-        logger.warning("[VideoService] 未找到 cookie 文件: %s，可能无法下载需要登录的视频", candidates[0] if candidates else "N/A")
+            elif candidate.exists() and not candidate.is_file():
+                logger.warning("[VideoService] cookie 路径存在但不是文件: %s", candidate)
+
+        logger.warning(
+            "[VideoService] cookie file not found, login-required videos may fail: %s",
+            candidates[0] if candidates else "N/A",
+        )
         return None
 
     @classmethod
@@ -65,10 +70,39 @@ class VideoService:
         if cookiefile:
             options["cookiefile"] = cookiefile
 
+        # 如果配置了代理，yt-dlp 也走代理
+        if PROXY_URL:
+            options["proxy"] = PROXY_URL
+            logger.info("[VideoService] yt-dlp 使用代理: %s", PROXY_URL)
+
         return options
 
+    @classmethod
+    def normalize_extractor_error(cls, video_url: str, exc: Exception) -> Exception:
+        message = str(exc)
+        if DouyinService.is_douyin_url(video_url):
+            cookiefile = cls.resolve_cookie_file()
+            if "Fresh cookies" in message:
+                if cookiefile:
+                    return ValueError(
+                        f"抖音解析失败：服务器上的 cookies 已失效，请更新 {cookiefile} 后重试"
+                    )
+                return ValueError("抖音解析失败：缺少有效 cookies，请更新 cookies.txt 后重试")
+
+            if "cookies" in message.lower():
+                if cookiefile:
+                    return ValueError(
+                        f"抖音解析失败：当前 cookies 不可用，请更新 {cookiefile} 后重试"
+                    )
+                return ValueError("抖音解析失败：缺少可用 cookies，请更新 cookies.txt 后重试")
+
+        return exc
+
     @staticmethod
-    def fetch_stream(real_url: str, request_headers: dict | None = None) -> tuple[requests.Response, dict]:
+    def fetch_stream(
+        real_url: str,
+        request_headers: dict | None = None,
+    ) -> tuple[requests.Response, dict]:
         proxies = {"http": PROXY_URL, "https": PROXY_URL} if PROXY_URL else None
         session = requests.Session()
         adapter = requests.adapters.HTTPAdapter(
@@ -83,7 +117,7 @@ class VideoService:
         if request_headers:
             headers.update(request_headers)
 
-        logger.info("建立流式连接: %s", real_url)
+        logger.info("opening stream connection: %s", real_url)
         source_response = session.get(
             real_url,
             stream=True,
@@ -103,67 +137,70 @@ class VideoService:
         if "accept-ranges" in source_response.headers:
             source_headers["Accept-Ranges"] = source_response.headers["accept-ranges"]
 
-        logger.info("源站响应头: %s", source_headers)
+        logger.info("upstream stream headers: %s", source_headers)
         return source_response, source_headers
 
     @classmethod
     def get_video_info(cls, video_url: str) -> dict:
-        # 抖音：先试 DouyinService，失败则降级到 yt-dlp
         if DouyinService.is_douyin_url(video_url):
             try:
                 return DouyinService.get_video_info(video_url)
-            except Exception as e:
-                logger.warning("DouyinService 提取失败，降级到 yt-dlp: %s", e)
+            except Exception as exc:
+                logger.warning("DouyinService failed, fallback to yt-dlp: %s", exc)
 
         if XiaohongshuService.is_xhs_url(video_url):
             return XiaohongshuService.get_video_info(video_url)
 
         ydl_opts = cls.get_ytdlp_options("fast")
-        logger.info("开始获取视频信息: %s", video_url)
+        logger.info("getting video info: %s", video_url)
 
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(video_url, download=False)
-            if not info:
-                raise ValueError("无法提取视频信息")
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(video_url, download=False)
+                if not info:
+                    raise ValueError("无法提取视频信息")
 
-            video_info = {
-                "title": info.get("title", "video"),
-                "thumbnail": info.get("thumbnail", ""),
-                "formats": [
-                    {"preset": "fast", "label": "快速", "description": "优先 MP4 格式，解析速度快"},
-                    {"preset": "medium", "label": "标准", "description": "限制 100MB 内的较优格式"},
-                    {"preset": "quality", "label": "高清", "description": "优先更高质量源"},
-                ],
-            }
+                video_info = {
+                    "title": info.get("title", "video"),
+                    "thumbnail": info.get("thumbnail", ""),
+                    "formats": [
+                        {"preset": "fast", "label": "fast", "description": "Prefer MP4 for speed"},
+                        {"preset": "medium", "label": "medium", "description": "Balance size and quality"},
+                        {"preset": "quality", "label": "quality", "description": "Prefer the best stream"},
+                    ],
+                }
 
-            logger.info("视频信息获取成功: %s", video_info["title"])
-            return video_info
+                logger.info("video info resolved: %s", video_info["title"])
+                return video_info
+        except Exception as exc:
+            raise cls.normalize_extractor_error(video_url, exc) from exc
 
     @classmethod
-    def create_stream_generator(cls, video_url: str, format_preset: str = "fast") -> Tuple[str, Iterator[bytes], dict]:
-        logger.info("开始处理视频 URL: %s", video_url)
+    def create_stream_generator(
+        cls,
+        video_url: str,
+        format_preset: str = "fast",
+    ) -> Tuple[str, Iterator[bytes], dict]:
+        logger.info("processing video url: %s", video_url)
 
-        # 抖音：先试 DouyinService，失败则降级到 yt-dlp
         if DouyinService.is_douyin_url(video_url):
             try:
                 return cls._create_douyin_stream_generator(video_url)
-            except Exception as e:
-                logger.warning("DouyinService 流提取失败，降级到 yt-dlp: %s", e)
-                # fall through to yt-dlp below
+            except Exception as exc:
+                logger.warning("DouyinService stream failed, fallback to yt-dlp: %s", exc)
 
         if XiaohongshuService.is_xhs_url(video_url):
             return cls._create_xhs_stream_generator(video_url)
 
         presets_to_try = [format_preset, "fast"]
-        last_error = None
+        last_error: Exception | None = None
 
         for preset in presets_to_try:
             try:
                 ydl_opts = cls.get_ytdlp_options(preset)
-                logger.info("尝试使用格式预设: %s", preset)
+                logger.info("trying preset: %s", preset)
 
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    logger.info("正在提取视频信息...")
                     info = ydl.extract_info(video_url, download=False)
                     if not info:
                         raise ValueError("无法提取视频信息")
@@ -183,32 +220,32 @@ class VideoService:
                                     break
 
                     if not real_url:
-                        raise ValueError("无法获取视频 URL")
+                        raise ValueError("无法获取视频流地址")
 
                     video_title = info.get("title", "video")
-                    logger.info("视频标题: %s", video_title)
+                    logger.info("video title: %s", video_title)
 
                 source_resp, source_headers = cls.fetch_stream(real_url)
 
                 def stream_generator() -> Iterator[bytes]:
                     try:
-                        logger.info("开始转发视频流: %s", video_title)
+                        logger.info("start streaming: %s", video_title)
                         for chunk in source_resp.raw.stream(65536, decode_content=True):
                             if chunk:
                                 yield chunk.tobytes() if hasattr(chunk, "tobytes") else chunk
-                        logger.info("视频流传输完成: %s", video_title)
+                        logger.info("stream finished: %s", video_title)
                     except Exception as exc:
-                        logger.error("视频流传输失败: %s", exc)
+                        logger.error("stream transfer failed: %s", exc)
                         raise
                     finally:
                         source_resp.close()
-                        logger.info("源站连接已关闭: %s", video_title)
+                        logger.info("upstream connection closed: %s", video_title)
 
                 return video_title, stream_generator(), source_headers
 
             except Exception as exc:
-                logger.warning("使用预设 %s 失败: %s", preset, exc)
-                last_error = exc
+                logger.warning("preset %s failed: %s", preset, exc)
+                last_error = cls.normalize_extractor_error(video_url, exc)
                 continue
 
         if last_error:
@@ -216,7 +253,10 @@ class VideoService:
         raise ValueError("无法处理视频")
 
     @classmethod
-    def _create_douyin_stream_generator(cls, video_url: str) -> Tuple[str, Iterator[bytes], dict]:
+    def _create_douyin_stream_generator(
+        cls,
+        video_url: str,
+    ) -> Tuple[str, Iterator[bytes], dict]:
         stream_info = DouyinService.extract_stream_info(video_url)
         video_title = stream_info["title"]
 
@@ -226,7 +266,11 @@ class VideoService:
                 "Content-Length": stream_info.get("content_length", ""),
             }
             source_headers = {key: value for key, value in source_headers.items() if value}
-            return video_title, DouyinService.bytes_to_stream(stream_info["blob_bytes"]), source_headers
+            return (
+                video_title,
+                DouyinService.bytes_to_stream(stream_info["blob_bytes"]),
+                source_headers,
+            )
 
         source_resp, source_headers = cls.fetch_stream(
             stream_info["stream_url"],
@@ -235,19 +279,22 @@ class VideoService:
 
         def stream_generator() -> Iterator[bytes]:
             try:
-                logger.info("开始转发抖音视频流: %s", video_title)
+                logger.info("start forwarding douyin stream: %s", video_title)
                 for chunk in source_resp.raw.stream(65536, decode_content=True):
                     if chunk:
                         yield chunk.tobytes() if hasattr(chunk, "tobytes") else chunk
-                logger.info("抖音视频流传输完成: %s", video_title)
+                logger.info("douyin stream finished: %s", video_title)
             finally:
                 source_resp.close()
-                logger.info("抖音源站连接已关闭: %s", video_title)
+                logger.info("douyin upstream closed: %s", video_title)
 
         return video_title, stream_generator(), source_headers
 
     @classmethod
-    def _create_xhs_stream_generator(cls, video_url: str) -> Tuple[str, Iterator[bytes], dict]:
+    def _create_xhs_stream_generator(
+        cls,
+        video_url: str,
+    ) -> Tuple[str, Iterator[bytes], dict]:
         stream_info = XiaohongshuService.extract_stream_info(video_url)
         video_title = stream_info["title"]
 
@@ -258,13 +305,13 @@ class VideoService:
 
         def stream_generator() -> Iterator[bytes]:
             try:
-                logger.info("开始转发小红书视频流: %s", video_title)
+                logger.info("start forwarding xiaohongshu stream: %s", video_title)
                 for chunk in source_resp.raw.stream(65536, decode_content=True):
                     if chunk:
                         yield chunk.tobytes() if hasattr(chunk, "tobytes") else chunk
-                logger.info("小红书视频流传输完成: %s", video_title)
+                logger.info("xiaohongshu stream finished: %s", video_title)
             finally:
                 source_resp.close()
-                logger.info("小红书源站连接已关闭: %s", video_title)
+                logger.info("xiaohongshu upstream closed: %s", video_title)
 
         return video_title, stream_generator(), source_headers

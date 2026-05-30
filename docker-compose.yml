@@ -17,6 +17,10 @@ services:
       - IP=${DOMAIN:-0.0.0.0}
       - PORT=8000
       - CORS_ORIGINS=${CORS_ORIGINS:-*}
+      # 代理配置（服务器访问小红书/抖音等可能需要代理）
+      - PROXY_URL=${PROXY_URL:-}
+      # Cookie 文件路径（可选覆盖）
+      - COOKIE_FILE=${COOKIE_FILE:-}
     volumes:
       # 挂载整个项目目录（方便代码实时更新）
       - ./:/app
@@ -30,7 +34,8 @@ services:
       - ./logs:/app/logs
       - ./certs:/app/certs:ro
       - ./cookies.txt:/app/cookies.txt
-      - ./cookies.txt.dan:/app/cookies.txt.dan
+      # cookies.txt.dan 为可选备用文件；如果宿主机存在则挂载，否则由代码回退到 cookies.txt
+      - ./cookies.txt.dan:/app/cookies.txt.dan:ro
       - ./.env:/app/.env:ro
     depends_on:
       redis:

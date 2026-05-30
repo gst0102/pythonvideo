@@ -10,11 +10,35 @@ logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
+# 代理配置（与 video_service 共用 PROXY_URL）
+PROXY_URL = os.getenv("PROXY_URL")
+
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/136.0.0.0 Safari/537.36"
 )
+
+
+def _build_proxies() -> dict | None:
+    """构造代理字典，供所有 HTTP 请求使用"""
+    if PROXY_URL:
+        return {"http": PROXY_URL, "https": PROXY_URL}
+    return None
+
+
+def _build_session() -> requests.Session:
+    """创建带连接池的 Session（可选代理）"""
+    session = requests.Session()
+    session.proxies = _build_proxies()
+    adapter = requests.adapters.HTTPAdapter(
+        pool_connections=5,
+        pool_maxsize=5,
+        max_retries=2,
+    )
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    return session
 
 
 class XiaohongshuService:
@@ -51,7 +75,10 @@ class XiaohongshuService:
 
         for candidate in candidates:
             if candidate.exists() and candidate.is_file():
+                logger.info("[XHS] 找到 cookie 文件: %s", candidate)
                 return candidate
+            elif candidate.exists() and not candidate.is_file():
+                logger.warning("[XHS] cookie 路径存在但不是文件（可能是目录）: %s", candidate)
         return None
 
     @classmethod
@@ -59,14 +86,16 @@ class XiaohongshuService:
         """Follow xhslink.com redirect to get the real xiaohongshu URL."""
         logger.info("[XHS] 正在解析短链接: %s", short_url)
         try:
-            resp = requests.get(
+            session = _build_session()
+            resp = session.get(
                 short_url,
                 headers={"User-Agent": USER_AGENT},
                 allow_redirects=True,
                 timeout=15,
             )
             final_url = resp.url
-            logger.info("[XHS] 短链接解析结果: %s", final_url)
+            logger.info("[XHS] 短链接解析结果: %s (status=%s)", final_url, resp.status_code)
+            session.close()
             return final_url
         except requests.RequestException as e:
             logger.warning("[XHS] 短链接解析失败，使用原始 URL: %s", e)
@@ -125,12 +154,12 @@ class XiaohongshuService:
         if "xhslink.com" in url:
             url = cls.resolve_short_link(url)
 
-        logger.info("[XHS] 最终 URL: %s", url)
+        logger.info("[XHS] 最终 URL: %s (代理: %s)", url, "有" if PROXY_URL else "无")
 
         cookie_file = cls.resolve_cookie_file()
         cookies = cls.parse_netscape_cookies(cookie_file)
         if cookies:
-            logger.info("[XHS] 加载了 %d 个 cookie", len(cookies))
+            logger.info("[XHS] 加载了 %d 个 cookie (来源: %s)", len(cookies), cookie_file)
         else:
             logger.warning("[XHS] 未找到 cookie 文件，可能无法下载")
 
@@ -146,6 +175,10 @@ class XiaohongshuService:
 
         if cookie_file:
             ydl_opts["cookiefile"] = str(cookie_file)
+
+        # 如果有代理，也传给 yt-dlp
+        if PROXY_URL:
+            ydl_opts["proxy"] = PROXY_URL
 
         logger.info("[XHS] 使用 yt-dlp 提取视频信息...")
         try:
@@ -204,29 +237,49 @@ class XiaohongshuService:
             headers["Cookie"] = cookie_str
 
         api_url = f"https://edith.xiaohongshu.com/api/sns/web/v1/feed?source_note_id={note_id}"
-        logger.info("[XHS] 请求API: %s", api_url)
+        logger.info("[XHS] 请求API: %s (代理: %s)", api_url, "有" if PROXY_URL else "无")
 
         try:
-            resp = requests.get(api_url, headers=headers, timeout=30)
+            session = _build_session()
+            resp = session.get(api_url, headers=headers, timeout=30)
+            logger.info("[XHS] API响应状态: %s", resp.status_code)
+
+            # 先尝试解析 JSON，即使状态码非 200 也可能有错误信息
+            try:
+                data = resp.json()
+            except ValueError:
+                logger.error("[XHS] API返回非JSON: %s...", resp.text[:500])
+                raise ValueError(f"小红书API返回非JSON (HTTP {resp.status_code}): {resp.text[:200]}")
+
             resp.raise_for_status()
-            data = resp.json()
+            session.close()
+        except requests.HTTPError as e:
+            logger.error("[XHS] API HTTP错误 %s: %s", resp.status_code if 'resp' in dir() else '?', e)
+            # 尝试从响应中提取错误信息
+            error_msg = data.get("msg", str(e)) if 'data' in dir() else str(e)
+            raise ValueError(f"小红书API请求失败 (HTTP {getattr(resp, 'status_code', '?')}): {error_msg}")
         except requests.RequestException as e:
-            logger.error("[XHS] API请求失败: %s", e)
-            raise ValueError(f"小红书API请求失败: {e}")
+            logger.error("[XHS] API网络错误: %s (代理=%s)", e, PROXY_URL or "无")
+            raise ValueError(f"小红书API网络请求失败: {e}")
 
         if not data.get("success"):
-            raise ValueError(f"小红书API返回失败: {data.get('msg', '未知错误')}")
+            msg = data.get("msg", "未知错误")
+            logger.error("[XHS] API返回失败: success=False, msg=%s", msg)
+            raise ValueError(f"小红书API返回失败: {msg}")
 
         items = data.get("data", {}).get("items", [])
         if not items:
-            raise ValueError("小红书API未返回视频数据")
+            logger.error("[XHS] API返回空items, 完整响应: %s", 
+                         str(data)[:500])
+            raise ValueError("小红书API未返回视频数据（可能是链接无效或需要登录）")
 
         note = items[0].get("note_card", items[0])
         title = note.get("display_title", note.get("title", "小红书视频"))
         video_info = note.get("video", {})
 
         if not video_info:
-            raise ValueError("该笔记不包含视频")
+            logger.error("[XHS] 笔记不包含视频, note_card keys: %s", list(note.keys())[:10])
+            raise ValueError("该笔记不包含视频（可能是图文笔记）")
 
         media = video_info.get("media", {})
         stream_data = media.get("stream", {})
@@ -246,7 +299,9 @@ class XiaohongshuService:
             stream_url = video_info.get("url", "") or video_info.get("video_url", "")
 
         if not stream_url:
-            raise ValueError("无法从小红书提取视频地址")
+            logger.error("[XHS] 未能提取视频地址, stream keys: %s, video_info keys: %s",
+                         list(stream_data.keys()), list(video_info.keys())[:10])
+            raise ValueError("无法从小红书提取视频地址（视频流字段为空）")
 
         logger.info("[XHS-API] 标题: %s", title)
         logger.info("[XHS-API] 视频地址: %s...", stream_url[:100])

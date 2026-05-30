@@ -42,6 +42,14 @@ class VideoRequest(BaseModel):
             raise ValueError(f"{info.field_name}必填")
         return v
     
+    @field_validator("user_id", mode="before")
+    @classmethod
+    def normalize_user_id(cls, v: Any) -> str:
+        """空字符串或 None 统一替换为 anonymous"""
+        if not v or (isinstance(v, str) and not v.strip()):
+            return "anonymous"
+        return v
+    
     @field_validator("format_preset")
     @classmethod
     def validate_format_preset(cls, v: str) -> str:
@@ -240,7 +248,7 @@ async def _download_video(request: Request, user_id: str, url: str, format_prese
         
     except ValueError as e:
         # 处理值错误，如无法提取视频信息
-        logger.error(f"值错误 for 用户 {user_id}: {str(e)}")
+        logger.error(f"值错误 for 用户 {user_id}: {str(e)}", exc_info=True)
         raise HTTPException(status_code=400, detail=str(e))
     except requests.exceptions.RequestException as e:
         # 处理网络请求错误
