@@ -25,23 +25,14 @@ router = APIRouter(prefix="/video", tags=["视频相关接口"])
 
 class VideoRequest(BaseModel):
     url: str
-    user_id: str
+    user_id: str = "anonymous"
     format_preset: str = "fast"  # fast, medium, quality
 
-    @field_validator("url", "user_id", "format_preset", mode="before")
+    @field_validator("url", "format_preset", mode="before")
     @classmethod
     def check_not_empty(cls, v: Any, info: Any) -> Any:
         if not isinstance(v, str) or not v.strip():
             raise ValueError(f"{info.field_name}必填")
-        return v
-
-
-    @field_validator("user_id")
-    @classmethod
-    def validate_user_id(cls, v: str) -> str:
-        # 简单验证 user_id 格式，可根据实际需求调整
-        if not v or len(v.strip()) == 0:
-            raise ValueError("用户ID不能为空")
         return v
     
     @field_validator("format_preset")
