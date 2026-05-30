@@ -29,8 +29,8 @@ services:
       - ./downloads:/app/downloads
       - ./logs:/app/logs
       - ./certs:/app/certs:ro
-      - ./cookies.txt:/app/cookies.txt:ro
-      - ./cookies.txt.dan:/app/cookies.txt.dan:ro
+      - ./cookies.txt:/app/cookies.txt
+      - ./cookies.txt.dan:/app/cookies.txt.dan
       - ./.env:/app/.env:ro
     depends_on:
       redis:

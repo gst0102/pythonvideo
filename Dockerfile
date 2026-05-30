@@ -72,9 +72,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=builder /opt/venv /opt/venv
 
-RUN /opt/venv/bin/playwright install --with-deps chromium \
-    && /opt/venv/bin/playwright install-deps chromium
-
 COPY . .
 
 RUN mkdir -p /app/image /app/downloads /app/logs /app/certs \
@@ -82,6 +79,9 @@ RUN mkdir -p /app/image /app/downloads /app/logs /app/certs \
     && chown -R appuser:appuser /app /opt/venv
 
 USER appuser
+
+# Playwright 浏览器必须用 appuser 身份安装，否则浏览器路径不匹配
+RUN /opt/venv/bin/playwright install chromium
 
 EXPOSE 8000
 
