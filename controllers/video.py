@@ -1,5 +1,6 @@
 # routers/video.py
 import asyncio
+import json
 import urllib.parse
 import logging
 import uuid
@@ -7,7 +8,8 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, field_validator
 from typing import Any
 from core.video_service import VideoService
-from core.response import response # 导入修改后的 response
+from core.response import response
+from core.databaseApi import redis_pool
 import requests
 import yt_dlp
 import time
@@ -116,8 +118,8 @@ async def get_video_url_post(
 
 # ═══ Token 下载（解决长 URL 编码 + 小程序文件限额）═══
 
-# 内存 token 存储 {token: {url, user_id, format_preset, expires}}
-_download_tokens: dict[str, dict] = {}
+# Redis token 存储（支持多 worker 进程共享）
+_DOWNLOAD_TOKEN_PREFIX = "video:download:"
 _TOKEN_TTL = 300  # 5分钟有效
 
 
@@ -125,35 +127,42 @@ _TOKEN_TTL = 300  # 5分钟有效
 async def create_download_token(body: VideoRequest):
     """POST 接收长 URL，返回短 token。前端用 token 调 GET /download/{token} 下载"""
     token = uuid.uuid4().hex[:16]
-    _download_tokens[token] = {
+    redis_key = f"{_DOWNLOAD_TOKEN_PREFIX}{token}"
+
+    entry = json.dumps({
         "url": body.url,
         "user_id": body.user_id,
         "format_preset": body.format_preset,
-    }
-    logger.info(f"[Token] 生成 token={token} for {body.url[:60]}...")
-    
-    # 清理过期 token
-    import time
-    now = time.time()
-    expired = [k for k, v in _download_tokens.items() if now - v.get("_created", now) > _TOKEN_TTL]
-    for k in expired:
-        del _download_tokens[k]
+    })
 
+    if redis_pool:
+        import redis.asyncio as aioredis
+        client = aioredis.Redis(connection_pool=redis_pool, decode_responses=True)
+        await client.setex(redis_key, _TOKEN_TTL, entry)
+        await client.aclose()
+
+    logger.info(f"[Token] 生成 token={token} for {body.url[:60]}...")
     return response(data={"token": token, "expires_in": _TOKEN_TTL}, code=200, msg="Token 已生成")
 
 
 @router.get('/download/{token}', summary='Token下载视频')
 async def download_by_token(request: Request, token: str):
     """通过 token 下载视频，避免长 URL 在查询参数中"""
-    entry = _download_tokens.pop(token, None)
+    redis_key = f"{_DOWNLOAD_TOKEN_PREFIX}{token}"
+    entry = None
+
+    if redis_pool:
+        import redis.asyncio as aioredis
+        client = aioredis.Redis(connection_pool=redis_pool, decode_responses=True)
+        raw = await client.get(redis_key)
+        if raw:
+            entry = json.loads(raw)
+            await client.delete(redis_key)  # 一次性 token，用完即删
+        await client.aclose()
+
     if not entry:
         raise HTTPException(status_code=404, detail="Token 无效或已过期")
-    
-    # 标记创建时间用于过期清理
-    import time
-    entry["_created"] = time.time()
-    _download_tokens[token] = entry  # 放回去以便重试
-    
+
     return await _download_video(
         request, entry["user_id"], entry["url"], entry["format_preset"]
     )
