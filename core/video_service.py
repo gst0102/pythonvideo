@@ -22,7 +22,9 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 class VideoService:
     @staticmethod
     def resolve_cookie_file() -> str | None:
-        configured = os.getenv("COOKIE_FILE", "cookies.txt")
+        configured = os.getenv("COOKIE_FILE")
+        if not configured:  # 空字符串或未设置
+            configured = "cookies.txt"
         candidates: list[Path] = []
 
         configured_path = Path(configured)
