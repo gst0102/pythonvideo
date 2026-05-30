@@ -10,6 +10,11 @@ from typing import Any
 from core.video_service import VideoService
 from core.response import response
 from core.databaseApi import redis_pool
+
+# 运行时获取 redis_pool（避免 from-import 复制 None 的问题）
+def _get_redis_pool():
+    import core.databaseApi
+    return core.databaseApi.redis_pool
 import requests
 import yt_dlp
 import time
@@ -135,9 +140,10 @@ async def create_download_token(body: VideoRequest):
         "format_preset": body.format_preset,
     })
 
-    if redis_pool:
+    pool = _get_redis_pool()
+    if pool:
         import redis.asyncio as aioredis
-        client = aioredis.Redis(connection_pool=redis_pool, decode_responses=True)
+        client = aioredis.Redis(connection_pool=pool, decode_responses=True)
         await client.setex(redis_key, _TOKEN_TTL, entry)
         await client.aclose()
 
@@ -151,9 +157,10 @@ async def download_by_token(request: Request, token: str):
     redis_key = f"{_DOWNLOAD_TOKEN_PREFIX}{token}"
     entry = None
 
-    if redis_pool:
+    pool = _get_redis_pool()
+    if pool:
         import redis.asyncio as aioredis
-        client = aioredis.Redis(connection_pool=redis_pool, decode_responses=True)
+        client = aioredis.Redis(connection_pool=pool, decode_responses=True)
         raw = await client.get(redis_key)
         if raw:
             entry = json.loads(raw)
