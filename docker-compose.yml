@@ -42,7 +42,7 @@ services:
       # 证书 (只读)
       - ./certs:/app/certs:ro
       # Cookie 文件
-      - ./cookies.txt:/app/cookies.txt
+      # - ./cookies.txt:/app/cookies.txt
       # 备用 cookie（服务器上才有的文件，本地部署请注释此行）
       # - ./cookies.txt.dan:/app/cookies.txt.dan:ro
       # 环境变量 (只读)

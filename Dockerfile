@@ -59,7 +59,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libasound2 \
     libpango-1.0-0 \
     libcairo2 \
-    passwd \
     && rm -rf /var/lib/apt/lists/*
 
 # 从构建阶段复制虚拟环境
@@ -68,12 +67,14 @@ COPY --from=builder /build/.venv /app/.venv
 # 复制应用代码（此层及之后会因代码变更重新构建）
 COPY . .
 
-# 创建运行时目录
-RUN mkdir -p /app/image /app/downloads /app/logs /app/certs \
-    && useradd -m -u 1000 appuser \
-    && chown -R appuser:appuser /app
+# 创建运行时目录 & 非 root 用户
+# 不依赖 useradd/passwd 包 — 直接写 /etc/passwd & /etc/group，任何 slim 镜像都可用
+RUN mkdir -p /app/image /app/downloads /app/logs /app/certs /home/appuser \
+    && echo 'appuser:x:1000:1000::/home/appuser:/bin/sh' >> /etc/passwd \
+    && echo 'appuser:x:1000:' >> /etc/group \
+    && chown -R 1000:1000 /app /home/appuser
 
-USER appuser
+USER 1000:1000
 
 # 安装 Playwright Chromium 浏览器 (必须以 appuser 运行)
 RUN python -m playwright install chromium
