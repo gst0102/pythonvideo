@@ -70,6 +70,23 @@ class WithdrawalService:
         if amount > 200.00:
             return None, "单次最多提现 200.00 元"
 
+        # 1.5 日限额检查（今日已成功 + 处理中的提现总额 ≤ 100 元）
+        today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        daily_stmt = (
+            select(func.coalesce(func.sum(WithdrawalRecord.amount), 0))
+            .where(
+                and_(
+                    WithdrawalRecord.user_id == user_id,
+                    WithdrawalRecord.created_at >= today_start,
+                    WithdrawalRecord.status.in_(["success", "processing"]),
+                )
+            )
+        )
+        daily_result = await session.execute(daily_stmt)
+        daily_total = round(float(daily_result.scalar() or 0), 2)
+        if daily_total + amount > 100.00:
+            return None, f"今日提现限额 100 元，已提 {daily_total:.2f} 元，本次 {amount:.2f} 元超出限额"
+
         # 2. 查询用户
         user = await session.get(User, user_id)
         if not user:

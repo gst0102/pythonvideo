@@ -82,6 +82,12 @@ class AnimeResource(SQLModel, table=True):
         description="夸克网盘链接（部分唯一索引）",
     )
 
+    four_k_url: Optional[str] = Field(
+        default=None,
+        sa_column=Column(Text, nullable=True),
+        description="4K网盘链接（部分唯一索引）",
+    )
+
     # ── 元数据 ──
     source_update_time: Optional[datetime] = Field(
         default=None,

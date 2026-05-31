@@ -59,7 +59,7 @@ async def lifespan(app: FastAPI):
 
     # 番剧数据定时同步（APScheduler）
     try:
-        from services.sync_service import create_scheduler, sync_anime_from_external, SYNC_ENABLED
+        from services.sync_service import create_scheduler, sync_anime_from_kdocs, SYNC_ENABLED
         scheduler = create_scheduler()
         if scheduler:
             scheduler.start()
@@ -131,11 +131,11 @@ app.include_router(pc_router, prefix="/api")  # /api/pc → 云函数代理
 # 番剧数据手动同步接口（调试/首次部署用）
 @app.get("/admin/sync-anime")
 async def manual_sync_anime(type: str = "anime"):
-    """手动触发数据同步（type=anime|movie|4k，逗号分隔多个）"""
+    """手动触发金山文档数据同步（type=anime|movie|4k，逗号分隔多个）"""
     try:
-        from services.sync_service import sync_anime_from_external
+        from services.sync_service import sync_anime_from_kdocs
         types = [t.strip() for t in type.split(",") if t.strip()]
-        result = await sync_anime_from_external(types)
+        result = await sync_anime_from_kdocs(types)
         return {"code": 0, "message": "同步完成", "data": result}
     except Exception as e:
         return {"code": 500, "message": f"同步失败: {str(e)}"}

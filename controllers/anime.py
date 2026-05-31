@@ -362,6 +362,7 @@ async def get_resources(
             "baidu_url": anime.baidu_url,
             "baidu_password": anime.baidu_password,
             "quark_url": anime.quark_url,
+            "4k_url": anime.four_k_url,
             "update_time": _format_time(anime.source_update_time or anime.updated_at),
         })
 

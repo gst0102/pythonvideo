@@ -181,7 +181,71 @@ class DouyinService:
         return base64.b64decode(payload)
 
     @classmethod
+    def _get_video_id_from_share_url(cls, raw_url: str) -> str | None:
+        """从分享短链获取视频 ID，不依赖 Playwright"""
+        import httpx
+        with httpx.Client(follow_redirects=False, timeout=15) as client:
+            resp = client.get(raw_url, headers={"User-Agent": USER_AGENT})
+            location = resp.headers.get("location", "")
+            match = re.search(r"/video/(\d+)", location)
+            return match.group(1) if match else None
+
+    @classmethod
+    def _get_video_info_via_api(cls, video_id: str) -> dict | None:
+        """通过抖音 API 直接获取视频信息，不依赖浏览器"""
+        import httpx
+        cookie_file = cls.resolve_cookie_file()
+        cookie_str = ""
+        if cookie_file:
+            netscape = cls.parse_netscape_cookies(cookie_file)
+            cookie_str = "; ".join(f"{c['name']}={c['value']}" for c in netscape if c["domain"] in ("douyin.com", "www.douyin.com", ".douyin.com"))
+        url = f"https://www.douyin.com/aweme/v1/web/aweme/detail/?aweme_id={video_id}&aid=6383&version_name=23.5.0&device_platform=web"
+        headers = {
+            "User-Agent": USER_AGENT,
+            "Referer": f"https://www.douyin.com/video/{video_id}",
+            "Cookie": cookie_str,
+        }
+        try:
+            resp = httpx.get(url, headers=headers, timeout=15)
+            if resp.status_code != 200:
+                logger.warning("Douyin API returned %d", resp.status_code)
+                return None
+            data = resp.json()
+            aweme = data.get("aweme_detail", {})
+            if not aweme:
+                return None
+            video_urls = (aweme.get("video", {}).get("play_addr", {}).get("url_list", [])
+                          or aweme.get("video", {}).get("download_addr", {}).get("url_list", []))
+            cover_urls = (aweme.get("video", {}).get("cover", {}).get("url_list", [])
+                          or aweme.get("video", {}).get("origin_cover", {}).get("url_list", []))
+            if not video_urls:
+                return None
+            return {
+                "title": aweme.get("desc", ""),
+                "thumbnail": cover_urls[0] if cover_urls else "",
+                "formats": [
+                    {"preset": "fast", "label": "quick", "description": "Prefer fast direct stream"},
+                    {"preset": "medium", "label": "standard", "description": "Keep response shape consistent"},
+                    {"preset": "quality", "label": "hd", "description": "Use the best direct URL available"},
+                ],
+            }
+        except Exception as e:
+            logger.warning("Douyin API call failed: %s", e)
+            return None
+
+    @classmethod
     def get_video_info(cls, raw_url: str) -> dict:
+        # 优先尝试 API 直调（无需浏览器）
+        video_id = cls._get_video_id_from_share_url(raw_url)
+        if video_id:
+            logger.info("Douyin video_id resolved: %s", video_id)
+            result = cls._get_video_info_via_api(video_id)
+            if result:
+                logger.info("Douyin API success: %s", result["title"][:40])
+                return result
+            logger.warning("Douyin API failed, fallback to Playwright")
+
+        # 兜底：Playwright 浏览器提取
         stream_info = cls.extract_stream_info(raw_url)
         return {
             "title": stream_info["title"],
@@ -201,13 +265,19 @@ class DouyinService:
         cookie_file = cls.resolve_cookie_file()
         cookies = cls.parse_netscape_cookies(cookie_file)
         captured_network_urls: list[str] = []
+        captured_api_data: dict | None = None
 
         logger.info("Start parsing douyin url: %s", raw_url)
 
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(
                 headless=True,
-                args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                ],
             )
             context = browser.new_context(
                 user_agent=USER_AGENT,
@@ -225,7 +295,30 @@ class DouyinService:
             )
 
             def on_response(response) -> None:
+                nonlocal captured_api_data
                 url = response.url
+                # ═══ 新增：拦截抖音视频详情 API ═══
+                if "aweme/v1/web/aweme/detail" in url and not captured_api_data:
+                    try:
+                        body = response.json()
+                        aweme_list = body.get("aweme_detail") or body.get("aweme_list")
+                        aweme = (aweme_list[0] if isinstance(aweme_list, list) and aweme_list
+                                 else aweme_list if isinstance(aweme_list, dict) else None)
+                        if aweme:
+                            video = aweme.get("video", {})
+                            play_addr = video.get("play_addr", {}) or video.get("play_addr_h264", {})
+                            url_list = play_addr.get("url_list", []) or video.get("download_addr", {}).get("url_list", [])
+                            if url_list:
+                                captured_api_data = {
+                                    "title": aweme.get("desc", ""),
+                                    "videoUrl": url_list[0],
+                                    "cover": (aweme.get("video", {}).get("cover", {}).get("url_list", [""])[0]
+                                              or aweme.get("video", {}).get("origin_cover", {}).get("url_list", [""])[0]),
+                                }
+                                logger.info("Douyin API intercepted: %s", captured_api_data["title"][:40])
+                    except Exception:
+                        pass
+
                 # 更宽泛的视频 URL 匹配
                 if any(token in url for token in (".mp4", ".m3u8", "video", "playwm", "play/")):
                     excluded = ("douyinstatic.com", "/obj/", "/static/", "live.douyin.com")
@@ -242,11 +335,13 @@ class DouyinService:
                     logger.warning("Douyin page load timed out, continue extracting from DOM")
 
                 video_data = None
-                for _ in range(8):  # 减少到 8 秒，多策略提取更快
+                for _ in range(10):
                     page.wait_for_timeout(1000)
-                    video_data = cls.extract_video_data(page)
-                    if video_data and video_data.get("videoUrl"):
-                        logger.info("Douyin 提取成功，数据源: %s", video_data.get("source", "?"))
+
+                    # 优先使用拦截到的 API 数据
+                    if captured_api_data:
+                        video_data = captured_api_data
+                        logger.info("Douyin 使用 API 拦截数据")
                         break
 
                     if captured_network_urls:
@@ -257,6 +352,11 @@ class DouyinService:
                             "duration": 0,
                             "cover": "",
                         }
+                        break
+
+                    video_data = cls.extract_video_data(page)
+                    if video_data and video_data.get("videoUrl"):
+                        logger.info("Douyin 提取成功，数据源: %s", video_data.get("source", "?"))
                         break
 
                 if not video_data or not video_data.get("videoUrl"):

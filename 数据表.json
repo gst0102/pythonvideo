@@ -83,7 +83,7 @@
         {"name": "id", "type": "UUID", "constraints": "PK, UUID(as_uuid=True)", "default": "uuid4", "description": "主键"},
         {"name": "user_id", "type": "UUID", "constraints": "FK(users.id), NOT NULL, INDEX", "description": "用户 ID"},
         {"name": "amount", "type": "Numeric(10,2)", "constraints": "NOT NULL", "description": "提现金额（元）"},
-        {"name": "status", "type": "String(20)", "constraints": "INDEX", "default": "\"processing\"", "description": "状态: processing/success/failed"},
+        {"name": "status", "type": "String(20)", "constraints": "INDEX", "default": "\"processing\"", "description": "状态: processing/success/failed/WRONG_AMOUNT/WAIT_USER_CONFIRM. 失败后金额显式回滚到 balance，超24h自动释放。详见 release-frozen 接口"},
         {"name": "batch_no", "type": "String(64)", "constraints": "UNIQUE, NOT NULL, INDEX", "description": "商户批次单号"},
         {"name": "transfer_bill_no", "type": "String(64)", "constraints": "NULLABLE", "description": "微信转账单号"},
         {"name": "fail_reason", "type": "Text", "constraints": "NULLABLE", "description": "失败原因"},
