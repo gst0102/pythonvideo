@@ -1,7 +1,5 @@
 # 服务器部署操作指南
 
-> 本文档供服务器手动操作使用，不需要提交到 Git（已加入 .gitignore）。
-
 ---
 
 ## 前置条件
@@ -12,11 +10,29 @@
 
 ---
 
+## 零、一次性配置：Docker Hub 镜像加速（仅需一次）
+
+```bash
+# 在服务器上执行，之后 docker pull 会走清华镜像
+sudo mkdir -p /etc/docker
+sudo tee /etc/docker/daemon.json <<'EOF'
+{
+  "registry-mirrors": ["https://docker.1ms.run"]
+}
+EOF
+sudo systemctl daemon-reload
+sudo systemctl restart docker
+```
+
+> `docker.1ms.run` 是目前可用的 Docker Hub 代理。如果挂了，换 `https://mirror.ccs.tencentyun.com`（腾讯云）、`https://hub-mirror.c.163.com`（网易）。
+
+---
+
 ## 一、拉取最新代码
 
 ```bash
 ssh root@81.70.84.35
-cd /opt/video-service    # 或你的实际项目路径
+cd /opt/video-service
 git pull origin master
 ```
 
@@ -24,14 +40,13 @@ git pull origin master
 
 ## 二、确保 .env 配置正确
 
-`.env` 不会被 Git 跟踪，服务器上的 `.env` 不会受影响。但新增了一些环境变量，需要确认：
+`.env` 不会被 Git 跟踪，服务器上的 `.env` 不会受影响。确认以下变量存在且正确：
 
 ```bash
-# 编辑服务器上的 .env，确认以下变量存在且正确：
 vim /opt/video-service/.env
 ```
 
-**本次新增/需确认的变量：**
+**需确认的环境变量：**
 
 | 变量名 | 说明 | 服务器建议值 |
 |--------|------|-------------|
@@ -40,42 +55,53 @@ vim /opt/video-service/.env
 | `NOTIFY_URL` | 微信支付回调 | `https://api.lifelove.top/wxpay/api/pay/notify` |
 | `DOMAIN` | 域名 | `api.lifelove.top` |
 | `CORS_ORIGINS` | 跨域白名单 | `https://api.lifelove.top,https://www.lifelove.top` |
-| `DB_ECHO` | SQL 调试（生产关） | `false` |
+| `DB_ECHO` | SQL 调试 | `false` |
 | `DB_SSL_MODE` | SSL 模式 | `prefer` |
-| `ANIME_SYNC_ENABLED` | 番剧同步开关 | `true` |
-| `ANIME_SYNC_INTERVAL` | 同步间隔(分钟) | `15` |
-| `DB_PASSWORD` | 数据库密码 | 你实际的密码（docker-compose 引用） |
+| `DB_PASSWORD` | 数据库密码 | docker-compose.yml 引用此变量 |
 
-**注意：`DATABASE_URL` 必须使用容器内的 hostname `postgres`，不是 `127.0.0.1` 或 `localhost`。**
+> **重要：`DATABASE_URL` 的 host 必须是 `postgres`（容器名），不是 `127.0.0.1`。**
 
 ---
 
-## 三、重建并重启服务
+## 三、重建并重启（利用 Docker 层缓存，不动的不重下）
 
 ```bash
 cd /opt/video-service
 
-# 1. 拉取新镜像 + 重新构建 app 服务
-docker compose build --no-cache app
+# 构建（不用 --no-cache，Docker 层缓存会复用未变更的层）
+# ffmpeg 层在 COPY . . 之前，代码改了也不重新下载
+docker compose build app
 
-# 2. 重启所有服务
+# 重启
 docker compose up -d
 
-# 3. 查看日志确认正常
+# 看日志确认
 docker compose logs -f app --tail 50
 ```
 
-> 如果 `cookies.txt.dan` 文件在服务器上不存在，先在 `docker-compose.yml` 中注释掉对应行。
+**缓存解释：**
+
+```
+Dockerfile 层顺序          每次代码变更后？
+────────────────────────────────────────
+apt 镜像配置              ✅ 缓存复用（不重跑）
+ffmpeg + 系统库安装       ✅ 缓存复用（不重下）
+COPY --from=builder venv  ✅ 缓存复用（pyproject.toml 不变）
+COPY . .                  ❌ 代码变 → 此层及之后重新构建
+mkdir + useradd           重新跑（很快）
+playwright install        重新跑（但浏览器二进制在 Docker 层缓存里，增量下载）
+```
+
+> 只有 `pyproject.toml` / `uv.lock` 变了，uv sync 层才会重建。平时改代码只重建 COPY 之后的层。
+
+> 如果 `cookies.txt.dan` 在服务器上不存在，先在 `docker-compose.yml` 里注释对应行。
 
 ---
 
 ## 四、数据库迁移（如有表结构变更）
 
 ```bash
-# 进入 app 容器执行迁移
 docker compose exec app alembic upgrade head
-
-# 确认版本
 docker compose exec app alembic current
 ```
 
@@ -84,41 +110,25 @@ docker compose exec app alembic current
 ## 五、验证
 
 ```bash
-# 健康检查
 curl http://localhost:8000/health
-
-# 应该返回:
-# {"status":"ok","message":"服务运行正常"}
+# 应返回: {"status":"ok","message":"服务运行正常"}
 ```
 
 ---
 
-## 六、重要变更说明
+## 六、关键变更说明
 
-### 本次 Dockerfile 改动
+### Dockerfile
 
-1. 改用 `uv sync --frozen` 替代 `uv pip compile`，从 lockfile 精确安装依赖
-2. 使用 `UV_LINK_MODE=copy` 确保 venv 可跨 stage 复制
-3. Playwright Chromium 浏览器安装步骤不变
+1. `uv sync --frozen` 替代 `uv pip compile`，lockfile 精确安装
+2. 清华 APT 镜像源（apt 包走清华，pip 包也走清华）
+3. ffmpeg 等系统依赖放在 COPY . . 之前，利用 Docker 层缓存
 
-### 本次 docker-compose.yml 改动
+### docker-compose.yml
 
-**关键：移除了 `./:/app` 的整项目挂载。** 
-- 之前：整个项目目录挂载到容器内，会覆盖 Docker 镜像中的文件
-- 现在：只挂载数据目录（image/downloads/logs/certs/cookies.txt/.env）
-- **好处**：Docker 镜像构建的代码优先，不会出现"改了 Dockerfile 但容器跑的仍是旧代码"的问题
-- **开发调试**：如需热重载，可创建 `docker-compose.override.yml`：
+- **移除了 `./:/app` 整项目挂载**，代码由 Docker 镜像决定
+- 只挂载数据目录：image/downloads/logs/certs/cookies.txt/.env
 
-```yaml
-# docker-compose.override.yml（本地开发用，不要提交到 Git）
-services:
-  app:
-    volumes:
-      - ./:/app
-      - /app/__pycache__
-      - /app/.venv
-```
+### 安全
 
-### 安全修复
-
-- `alembic.ini` 和 `migrations/env.py` 中的硬编码密码已移除，改为从 `DATABASE_URL` 环境变量读取
+- `alembic.ini` 和 `migrations/env.py` 的硬编码密码已清除

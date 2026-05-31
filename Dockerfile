@@ -10,13 +10,16 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /build
 
+# 清华 APT 镜像源（加速 ffmpeg 等包下载）
+RUN sed -i 's|http://deb.debian.org|http://mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list.d/debian.sources
+
 # 安装编译工具 + uv
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential curl \
     && rm -rf /var/lib/apt/lists/* \
     && pip install uv --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple/
 
-# 先复制依赖文件，利于 Docker 缓存
+# 先复制依赖文件，利于 Docker 缓存（pyproject.toml 不变时复用此层）
 COPY pyproject.toml uv.lock ./
 
 # 用 lockfile 精确安装（跳过项目本身，后面 COPY . 会带进来）
@@ -34,7 +37,11 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
+# 清华 APT 镜像源
+RUN sed -i 's|http://deb.debian.org|http://mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list.d/debian.sources
+
 # 运行时系统依赖：ffmpeg + Playwright Chromium 运行库
+# 此层在 COPY . . 之前，代码变更不会导致重复下载
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     curl \
@@ -57,7 +64,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # 从构建阶段复制虚拟环境
 COPY --from=builder /build/.venv /app/.venv
 
-# 复制应用代码
+# 复制应用代码（此层及之后会因代码变更重新构建）
 COPY . .
 
 # 创建运行时目录
