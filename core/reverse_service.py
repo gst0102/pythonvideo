@@ -262,8 +262,10 @@ class ReverseService:
             return None
         title = aweme.get("desc", "抖音视频")
         video = aweme.get("video", {})
-        play_addr = video.get("play_addr", {}) or video.get("play_addr_h264", {})
-        url_list = play_addr.get("url_list", []) or video.get("download_addr", {}).get("url_list", [])
+        # download_addr 含音视频合流（有水印），play_addr 仅视频流（无音频）
+        download_urls = video.get("download_addr", {}).get("url_list", [])
+        play_urls = (video.get("play_addr", {}) or video.get("play_addr_h264", {})).get("url_list", [])
+        url_list = download_urls or play_urls
         if not url_list:
             return None
         cover = ""
@@ -333,8 +335,10 @@ class ReverseService:
                             aweme = aweme[0]
                         if aweme:
                             v = aweme.get("video", {})
-                            pa = v.get("play_addr", {}) or v.get("play_addr_h264", {})
-                            ul = pa.get("url_list", []) or v.get("download_addr", {}).get("url_list", [])
+                            # download_addr 含音视频合流（有水印），play_addr 仅视频流（无音频）
+                            download_urls = v.get("download_addr", {}).get("url_list", [])
+                            play_urls = (v.get("play_addr", {}) or v.get("play_addr_h264", {})).get("url_list", [])
+                            ul = download_urls or play_urls
                             if ul:
                                 captured_api = {"title": aweme.get("desc", ""), "videoUrl": ul[0], "cover": (v.get("cover", {}).get("url_list", [""])[0] or v.get("origin_cover", {}).get("url_list", [""])[0])}
                                 logger.info("[抖音] API 拦截: %s", captured_api["title"][:40])
