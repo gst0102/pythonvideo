@@ -59,6 +59,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libasound2 \
     libpango-1.0-0 \
     libcairo2 \
+    passwd \
     && rm -rf /var/lib/apt/lists/*
 
 # 从构建阶段复制虚拟环境
