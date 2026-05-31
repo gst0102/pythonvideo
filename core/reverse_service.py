@@ -1,27 +1,21 @@
 """
-五平台逆向下载服务 v2
+四平台逆向下载服务 v2（已去掉 Playwright / 快手）
 原理：
 - 小红书: 纯 Python SSR 解析，绕过 API 签名
 - B站: 纯 Python 公开 API
-- 抖音: 短链解析 → API 直调 → Playwright 浏览器渲染 + API 拦截
-- 头条: yt-dlp 提取（最稳定）
-- 快手: Playwright 浏览器渲染 + 提取 video 标签
+- 抖音: 短链解析 → API 直调
+- 头条: yt-dlp 提取
 
 所有平台均返回可直接流式传输的 CDN URL。
 """
-import base64
 import json
 import logging
 import os
 import re
-import time
 from pathlib import Path
 from typing import Iterator
-from urllib.parse import unquote
 
 import requests
-from playwright.sync_api import TimeoutError as PlaywrightTimeout
-from playwright.sync_api import sync_playwright
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +32,6 @@ class ReverseService:
     BILI_DOMAIN = re.compile(r"(?:bilibili\.com|b23\.tv)", re.I)
     DOUYIN_DOMAIN = re.compile(r"(?:douyin\.com|iesdouyin\.com)", re.I)
     TOUTIAO_DOMAIN = re.compile(r"toutiao\.com", re.I)
-    KUAISHOU_DOMAIN = re.compile(r"(?:kuaishou\.com|chenzhongtech\.com)", re.I)
 
     @staticmethod
     def sanitize_filename(name: str) -> str:
@@ -51,7 +44,6 @@ class ReverseService:
             or cls.BILI_DOMAIN.search(url)
             or cls.DOUYIN_DOMAIN.search(url)
             or cls.TOUTIAO_DOMAIN.search(url)
-            or cls.KUAISHOU_DOMAIN.search(url)
         )
 
     @classmethod
@@ -64,8 +56,6 @@ class ReverseService:
             return "douyin"
         if cls.TOUTIAO_DOMAIN.search(url):
             return "toutiao"
-        if cls.KUAISHOU_DOMAIN.search(url):
-            return "kuaishou"
         return "unknown"
 
     @classmethod
@@ -80,8 +70,6 @@ class ReverseService:
             return cls._extract_douyin(url)
         if platform == "toutiao":
             return cls._extract_toutiao(url)
-        if platform == "kuaishou":
-            return cls._extract_kuaishou(url)
         raise ValueError(f"不支持的平台: {platform}")
 
     @classmethod
@@ -95,8 +83,6 @@ class ReverseService:
             return cls._douyin_video_info(url)
         if platform == "toutiao":
             return cls._toutiao_video_info(url)
-        if platform == "kuaishou":
-            return cls._kuaishou_video_info(url)
         return {
             "title": "未知视频",
             "thumbnail": "",
@@ -231,7 +217,7 @@ class ReverseService:
             return {"title": "B站视频", "thumbnail": "", "cover_url": "", "formats": [{"preset": "fast", "label": "快速", "description": "优先 MP4"}]}
 
     # ============================================================
-    #  抖音 — 短链解析 → API 直调 → Playwright 浏览器渲染 + API 拦截
+    #  抖音 — 短链解析 → API 直调（无 Playwright 回退）
     # ============================================================
 
     @classmethod
@@ -255,7 +241,7 @@ class ReverseService:
                 return None
             data = resp.json()
         except Exception:
-            logger.warning("[抖音-API] JSON 解析失败，回退 Playwright")
+            logger.warning("[抖音-API] 请求失败")
             return None
         aweme = data.get("aweme_detail", {})
         if not aweme:
@@ -296,149 +282,14 @@ class ReverseService:
     @classmethod
     def _extract_douyin(cls, url: str) -> dict:
         logger.info("[抖音] 解析: %s", url)
-
-        # 策略1: 短链 → API 直调
         video_id = cls._resolve_douyin_short(url)
-        if video_id:
-            logger.info("[抖音] video_id: %s", video_id)
-            result = cls._douyin_api_direct(video_id)
-            if result:
-                return result
-
-        # 策略2: Playwright 浏览器渲染 + API 拦截
-        return cls._extract_douyin_playwright(url)
-
-    @classmethod
-    def _extract_douyin_playwright(cls, raw_url: str) -> dict:
-        captured_api: dict | None = None
-        captured_urls: list[str] = []
-
-        with sync_playwright() as playwright:
-            browser = playwright.chromium.launch(
-                headless=True,
-                args=["--disable-blink-features=AutomationControlled", "--no-sandbox", "--disable-dev-shm-usage"],
-            )
-            context = browser.new_context(user_agent=UA, viewport={"width": 1536, "height": 864})
-            page = context.new_page()
-            page.add_init_script("Object.defineProperty(navigator, 'webdriver', { get: () => false });")
-
-            def on_response(resp):
-                nonlocal captured_api
-                rurl = resp.url
-                if "aweme/v1/web/aweme/detail" in rurl and not captured_api:
-                    try:
-                        body = resp.json()
-                        aweme = body.get("aweme_detail") or body.get("aweme_list")
-                        if isinstance(aweme, list) and aweme:
-                            aweme = aweme[0]
-                        if aweme:
-                            v = aweme.get("video", {})
-                            pa = v.get("play_addr", {}) or v.get("play_addr_h264", {})
-                            ul = pa.get("url_list", []) or v.get("download_addr", {}).get("url_list", [])
-                            if ul:
-                                captured_api = {"title": aweme.get("desc", ""), "videoUrl": ul[0], "cover": (v.get("cover", {}).get("url_list", [""])[0] or v.get("origin_cover", {}).get("url_list", [""])[0])}
-                                logger.info("[抖音] API 拦截: %s", captured_api["title"][:40])
-                    except Exception:
-                        pass
-                if any(t in rurl for t in (".mp4", "video", "playwm", "play/")) and not any(t in rurl for t in ("douyinstatic.com", "/obj/", "/static/", "live.douyin.com")):
-                    if any(t in rurl for t in ("douyinvod", "bytecdn", "snssdk", "vod", "ixigua")):
-                        captured_urls.append(rurl)
-
-            page.on("response", on_response)
-
-            try:
-                try:
-                    page.goto(raw_url, wait_until="domcontentloaded", timeout=60000)
-                except PlaywrightTimeout:
-                    logger.warning("[抖音] 页面加载超时，继续提取")
-
-                for _ in range(10):
-                    page.wait_for_timeout(1000)
-                    if captured_api:
-                        title = cls.sanitize_filename(captured_api["title"] or page.title() or "抖音视频")
-                        return {"title": title, "stream_url": captured_api["videoUrl"], "cover_url": captured_api.get("cover", ""), "referer": page.url or raw_url}
-                    if captured_urls:
-                        title = cls.sanitize_filename(page.title() or "抖音视频")
-                        return {"title": title, "stream_url": captured_urls[0], "cover_url": "", "referer": page.url or raw_url}
-                    vd = cls._extract_video_data_js(page)
-                    if vd and vd.get("videoUrl"):
-                        title = cls.sanitize_filename(vd.get("title") or page.title() or "抖音视频")
-                        stream_url = vd["videoUrl"]
-                        if stream_url.startswith("blob:"):
-                            blob_bytes = cls._fetch_blob(page, stream_url)
-                            return {"title": title, "cover_url": vd.get("cover", ""), "blob_bytes": blob_bytes, "content_type": "video/mp4", "content_length": str(len(blob_bytes))}
-                        return {"title": title, "stream_url": stream_url, "cover_url": vd.get("cover", ""), "referer": page.url or raw_url}
-
-                raise ValueError("抖音未提取到视频")
-            finally:
-                browser.close()
-
-    @staticmethod
-    def _extract_video_data_js(page) -> dict | None:
-        return page.evaluate("""
-            () => {
-                function firstStr(items) {
-                    if (!Array.isArray(items)) return '';
-                    for (const it of items) {
-                        if (typeof it === 'string' && it.startsWith('http')) return it;
-                        if (it && typeof it.src === 'string' && it.src.startsWith('http')) return it.src;
-                    }
-                    return '';
-                }
-                function extract(detail) {
-                    if (!detail) return null;
-                    const title = detail.desc || document.title || '';
-                    const dl = firstStr(detail.download?.urlList);
-                    const pl = firstStr(detail.video?.playAddr) || firstStr(detail.video?.bitRateList?.[0]?.playAddr);
-                    const vurl = dl || pl;
-                    const cover = firstStr(detail.video?.cover?.urlList) || firstStr(detail.video?.dynamicCover?.urlList) || firstStr(detail.video?.originCover?.urlList) || '';
-                    return vurl ? {title, videoUrl: vurl, cover} : null;
-                }
-                const rd = document.getElementById('RENDER_DATA');
-                if (rd && rd.textContent) {
-                    try {
-                        const raw = rd.textContent.trim();
-                        const decoded = raw.startsWith('%') ? decodeURIComponent(raw) : raw;
-                        const r = extract(JSON.parse(decoded)?.app?.videoDetail);
-                        if (r) { r.source = 'RENDER_DATA'; return r; }
-                    } catch(e) {}
-                }
-                const ssr = document.getElementById('SSR_HYDRATION_DATA');
-                if (ssr && ssr.textContent) {
-                    try {
-                        const r = extract(JSON.parse(ssr.textContent)?.app?.videoDetail);
-                        if (r) { r.source = 'SSR_HYDRATION'; return r; }
-                    } catch(e) {}
-                }
-                const scripts = document.querySelectorAll('script');
-                for (const s of scripts) {
-                    const t = s.textContent || s.innerHTML || '';
-                    if (!t || t.length < 100 || (!t.includes('video') && !t.includes('playAddr'))) continue;
-                    try {
-                        const r = extract(JSON.parse(t)?.app?.videoDetail || JSON.parse(t)?.props?.pageProps?.videoData || JSON.parse(t)?.serverRouter?.videoDetail);
-                        if (r) { r.source = 'script'; return r; }
-                    } catch(e) {}
-                }
-                return null;
-            }
-        """)
-
-    @staticmethod
-    def _fetch_blob(page, blob_url: str) -> bytes:
-        payload = page.evaluate(
-            f"""
-            async () => {{
-                const resp = await fetch({json.dumps(blob_url)});
-                const blob = await resp.blob();
-                const buf = await blob.arrayBuffer();
-                const bytes = new Uint8Array(buf);
-                let bin = '';
-                for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
-                return btoa(bin);
-            }}
-            """
-        )
-        return base64.b64decode(payload)
+        if not video_id:
+            raise ValueError(f"无法从抖音链接提取视频ID: {url}")
+        logger.info("[抖音] video_id: %s", video_id)
+        result = cls._douyin_api_direct(video_id)
+        if not result:
+            raise ValueError("抖音API未返回视频数据（可能需要有效cookies或代理）")
+        return result
 
     @classmethod
     def _douyin_video_info(cls, url: str) -> dict:
@@ -490,44 +341,6 @@ class ReverseService:
         except Exception:
             return {"title": "头条视频", "thumbnail": "", "cover_url": "", "formats": [{"preset": "fast", "label": "快速", "description": "优先 MP4"}]}
 
-    # ============================================================
-    #  快手 — Playwright 浏览器渲染
-    # ============================================================
-
-    @classmethod
-    def _extract_kuaishou(cls, url: str) -> dict:
-        logger.info("[快手] 解析: %s", url)
-        with sync_playwright() as playwright:
-            browser = playwright.chromium.launch(
-                headless=True,
-                args=["--disable-blink-features=AutomationControlled", "--no-sandbox", "--disable-dev-shm-usage"],
-            )
-            context = browser.new_context(user_agent=UA, viewport={"width": 1536, "height": 864})
-            page = context.new_page()
-            try:
-                page.goto(url, wait_until="domcontentloaded", timeout=30000)
-                for _ in range(8):
-                    page.wait_for_timeout(1000)
-                    video_el = page.query_selector("video")
-                    if video_el:
-                        src = video_el.get_attribute("src")
-                        if src and src.startswith("http"):
-                            title = page.title() or "快手视频"
-                            cover = video_el.get_attribute("poster") or ""
-                            logger.info("[快手] 标题: %s", title)
-                            return {"title": cls.sanitize_filename(title), "stream_url": src, "cover_url": cover, "referer": url}
-                raise ValueError("快手未提取到视频")
-            finally:
-                browser.close()
-
-    @classmethod
-    def _kuaishou_video_info(cls, url: str) -> dict:
-        try:
-            result = cls._extract_kuaishou(url)
-            return {"title": result["title"], "thumbnail": result.get("cover_url", ""), "cover_url": result.get("cover_url", ""), "formats": [{"preset": "fast", "label": "快速", "description": "优先 MP4"}]}
-        except Exception:
-            return {"title": "快手视频", "thumbnail": "", "cover_url": "", "formats": [{"preset": "fast", "label": "快速", "description": "优先 MP4"}]}
-
     @classmethod
     def _resolve_cookie(cls) -> str | None:
         import os
@@ -542,8 +355,3 @@ class ReverseService:
             if c.exists() and c.is_file():
                 return str(c)
         return None
-
-    @staticmethod
-    def bytes_to_stream(video_bytes: bytes, chunk_size: int = 65536) -> Iterator[bytes]:
-        for offset in range(0, len(video_bytes), chunk_size):
-            yield video_bytes[offset : offset + chunk_size]

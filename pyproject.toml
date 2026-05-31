@@ -8,7 +8,6 @@ dependencies = [
     "cryptography>=46.0.7",
     "fastapi>=0.135.2",
     "httpx>=0.28.1",
-    "playwright>=1.55.0",
     "pycryptodome>=3.23.0",
     "python-dotenv>=1.2.2",
     "python-jose>=3.5.0",
@@ -16,12 +15,15 @@ dependencies = [
     "redis[hiredis]>=7.4.0",
     "requests>=2.33.1",
     "uvicorn[standard]>=0.42.0",
-    "wechatpayv3[async]>=2.0.2",
     "yt-dlp>=2026.3.17",
-    # === 新增：PostgreSQL + ORM ===
+    # === PostgreSQL + ORM ===
     "sqlmodel[asyncio]>=0.0.24",
     "asyncpg>=0.30.0",
-    "alembic>=1.15.0",
-    # === 新增：定时任务调度 ===
+    # === 定时任务 ===
     "apscheduler>=3.10.4",
+]
+
+[project.optional-dependencies]
+dev = [
+    "alembic>=1.15.0",
 ]

@@ -184,14 +184,6 @@ class VideoService:
         video_title = stream_info["title"]
         platform = ReverseService.get_platform(video_url)
 
-        if "blob_bytes" in stream_info:
-            source_headers = {
-                "Content-Type": stream_info.get("content_type", "video/mp4"),
-                "Content-Length": stream_info.get("content_length", ""),
-            }
-            source_headers = {k: v for k, v in source_headers.items() if v}
-            return video_title, ReverseService.bytes_to_stream(stream_info["blob_bytes"]), source_headers
-
         stream_url = stream_info["stream_url"]
         referer = stream_info.get("referer", video_url)
 
@@ -201,7 +193,6 @@ class VideoService:
             "bilibili": "https://www.bilibili.com",
             "douyin": "https://www.douyin.com",
             "toutiao": "https://www.toutiao.com",
-            "kuaishou": "https://www.kuaishou.com",
         }
         if platform in origin_map:
             request_headers["Origin"] = origin_map[platform]

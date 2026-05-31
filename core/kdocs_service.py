@@ -20,7 +20,6 @@ from typing import Iterator
 from urllib.parse import urlparse
 
 import httpx
-from playwright.sync_api import sync_playwright
 
 logger = logging.getLogger(__name__)
 
@@ -230,93 +229,9 @@ def parse_doc(doc_data: dict, crawl_time: str) -> list[dict]:
 class KDocsService:
     @staticmethod
     def fetch_params_via_playwright(share_url: str) -> dict | None:
-        logger.info("[KDocs] Playwright 获取参数: %s", share_url)
-        with sync_playwright() as pw:
-            browser = pw.chromium.launch(
-                headless=True,
-                args=["--disable-blink-features=AutomationControlled", "--no-sandbox", "--disable-dev-shm-usage"],
-            )
-            context = browser.new_context(user_agent=UA, viewport={"width": 1536, "height": 864})
-            page = context.new_page()
-
-            captured_params = {}
-
-            def on_response(resp):
-                rurl = resp.url
-                if "/api/v3/office/session/" in rurl and "/otl" in rurl and resp.status == 200:
-                    try:
-                        body = resp.json()
-                        data = body.get("data", {})
-                        if data.get("connid"):
-                            captured_params["conn_id"] = data["connid"]
-                        if data.get("group"):
-                            captured_params["user_group"] = data["group"]
-                        if data.get("file_version") or data.get("frontVer"):
-                            captured_params["file_version"] = data.get("file_version") or data.get("frontVer")
-                        sid = data.get("sessionId", "")
-                        if sid and not captured_params.get("file_id"):
-                            m = re.search(r"edit/(\d+)", sid)
-                            if m:
-                                captured_params["file_id"] = m.group(1)
-                    except Exception:
-                        pass
-
-                if "/api/v3/office/collaboration/" in rurl and resp.status == 200:
-                    try:
-                        body = resp.json()
-                        data = body.get("data", {})
-                        if data.get("csrf_token"):
-                            captured_params["csrf_token"] = data["csrf_token"]
-                        if data.get("file_version"):
-                            captured_params["file_version"] = data["file_version"]
-                    except Exception:
-                        pass
-
-            page.on("response", on_response)
-
-            try:
-                page.goto(share_url, wait_until="domcontentloaded", timeout=60000)
-                for _ in range(15):
-                    page.wait_for_timeout(1000)
-                    if captured_params.get("conn_id") and captured_params.get("csrf_token"):
-                        break
-
-                if not captured_params.get("conn_id"):
-                    env_data = page.evaluate("""
-                        () => {
-                            const env = window.__WPSENV__ || {};
-                            return {
-                                conn_id: env.conn_id || env.connid || '',
-                                user_group: env.user_group || env.group || '',
-                                file_version: env.file_version || env.front_ver || 0,
-                                csrf_token: env.csrf_token || env.csrf_rand || '',
-                            };
-                        }
-                    """)
-                    if env_data.get("conn_id"):
-                        captured_params.update(env_data)
-
-                if not captured_params.get("conn_id"):
-                    logger.error("[KDocs] 未能获取 conn_id")
-                    return None
-
-                if not captured_params.get("file_id"):
-                    fid = page.evaluate("""() => {
-                        try {
-                            const app = window.app || window.App || {};
-                            const sid = app.sessionId || '';
-                            const m = sid.match(/edit\\/(\\d+)/);
-                            return m ? m[1] : '';
-                        } catch(e) { return ''; }
-                    }""")
-                    if fid:
-                        captured_params["file_id"] = fid
-
-                logger.info("[KDocs] 获取参数成功: conn_id=%s", captured_params.get("conn_id", "")[:12])
-                return captured_params
-
-            finally:
-                browser.close()
+        """已移除 Playwright 支持，KDocs 参数获取不可用"""
+        logger.warning("[KDocs] Playwright 已移除，跳过参数获取: %s", share_url)
+        return None
 
     @staticmethod
     def fetch_doc_via_api(share_code: str, file_id: str, share_url: str,
