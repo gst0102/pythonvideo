@@ -107,3 +107,6 @@ dump.rdb
 *.zip
 *.tar.gz
 *.rar
+
+# WorkBuddy project data
+.workbuddy/

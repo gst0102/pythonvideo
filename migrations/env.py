@@ -31,10 +31,10 @@ import models  # noqa: E402, F401
 # 目标 metadata
 target_metadata = SQLModel.metadata
 
-# 数据库 URL（优先用环境变量）
+# 数据库 URL（优先从环境变量读取；回退值仅用于本地开发）
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
-    "postgresql+asyncpg://postgres:w12345@127.0.0.1:5432/agent",
+    "postgresql+asyncpg://postgres:postgres@localhost:5432/agent",
 )
 
 

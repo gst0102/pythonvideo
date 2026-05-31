@@ -1,56 +1,40 @@
 # ========================================
-# 阶段1: 构建环境 (包含构建工具)
+# 阶段1: 构建依赖 (uv sync from lockfile)
 # ========================================
 FROM python:3.10-slim-bookworm AS builder
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PIP_NO_CACHE_DIR=1 \
-    PATH="/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/sbin:/root/.local/bin"
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy
 
 WORKDIR /build
 
-# 使用清华镜像源
-RUN if [ -f /etc/apt/sources.list ]; then \
-        sed -i 's|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list; \
-    elif [ -f /etc/apt/sources.list.d/debian.sources ]; then \
-        sed -i 's|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list.d/debian.sources; \
-    fi
-
+# 安装编译工具 + uv
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    build-essential \
+    build-essential curl \
     && rm -rf /var/lib/apt/lists/* \
-    && pip install --upgrade pip --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple/
+    && pip install uv --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple/
 
-# 使用 pip 安装 uv（官方脚本可能被墙，用 pip 更稳定）
-RUN pip install uv --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple/
-
+# 先复制依赖文件，利于 Docker 缓存
 COPY pyproject.toml uv.lock ./
 
-RUN uv pip compile pyproject.toml -o /tmp/requirements.txt \
-    && uv venv /opt/venv \
-    && uv pip install --python /opt/venv/bin/python -r /tmp/requirements.txt
+# 用 lockfile 精确安装（跳过项目本身，后面 COPY . 会带进来）
+RUN uv sync --frozen --no-dev --no-install-project
 
 
 # ========================================
-# 阶段2: 生产环境 (最小化运行时镜像)
+# 阶段2: 生产镜像 (最小化)
 # ========================================
 FROM python:3.10-slim-bookworm
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PATH="/opt/venv/bin:/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/sbin"
+    PATH="/app/.venv/bin:/usr/local/bin:/usr/bin:/bin"
 
 WORKDIR /app
 
-# 使用清华镜像源
-RUN if [ -f /etc/apt/sources.list ]; then \
-        sed -i 's|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list; \
-    elif [ -f /etc/apt/sources.list.d/debian.sources ]; then \
-        sed -i 's|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list.d/debian.sources; \
-    fi
-
+# 运行时系统依赖：ffmpeg + Playwright Chromium 运行库
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     curl \
@@ -70,22 +54,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libcairo2 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /opt/venv /opt/venv
+# 从构建阶段复制虚拟环境
+COPY --from=builder /build/.venv /app/.venv
 
+# 复制应用代码
 COPY . .
 
+# 创建运行时目录
 RUN mkdir -p /app/image /app/downloads /app/logs /app/certs \
     && useradd -m -u 1000 appuser \
-    && chown -R appuser:appuser /app /opt/venv
+    && chown -R appuser:appuser /app
 
 USER appuser
 
-# Playwright 浏览器必须用 appuser 身份安装，否则浏览器路径不匹配
-RUN /opt/venv/bin/playwright install chromium
+# 安装 Playwright Chromium 浏览器 (必须以 appuser 运行)
+RUN python -m playwright install chromium
 
 EXPOSE 8000
 
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4"]
