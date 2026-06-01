@@ -19,11 +19,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && pip install uv --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple/
 
-# 先复制依赖文件，利于 Docker 缓存（pyproject.toml 不变时复用此层）
-COPY pyproject.toml uv.lock ./
+# 复制完整源码 — uv sync 安装项目 + 所有依赖（确保 uvicorn console script 正确创建）
+COPY . .
 
-# 用 lockfile 精确安装（跳过项目本身，后面 COPY . 会带进来）
-RUN uv sync --frozen --no-dev --no-install-project
+RUN uv sync --frozen --no-dev \
+    && /build/.venv/bin/uvicorn --version
 
 
 # ========================================
