@@ -8,7 +8,7 @@ ENV PYTHONUNBUFFERED=1 \
     UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy
 
-WORKDIR /app
+WORKDIR /build
 
 # 清华 APT 镜像源（加速 ffmpeg 等包下载）
 RUN sed -i 's|http://deb.debian.org|http://mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list.d/debian.sources
@@ -23,7 +23,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY . .
 
 RUN uv sync --frozen --no-dev \
-    && /app/.venv/bin/uvicorn --version
+    && /build/.venv/bin/uvicorn --version
 
 
 # ========================================
@@ -62,7 +62,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # 从构建阶段复制虚拟环境
-COPY --from=builder /app/.venv /app/.venv
+COPY --from=builder /build/.venv /app/.venv
+
+# uv 在 builder 的 /build 下生成 console scripts，复制到 /app 后需要修正 shebang。
+RUN find /app/.venv/bin -maxdepth 1 -type f -exec \
+    sed -i '1s|^#!/build/.venv/bin/python.*$|#!/app/.venv/bin/python|' {} + \
+    && /app/.venv/bin/uvicorn --version
 
 # 复制应用代码（此层及之后会因代码变更重新构建）
 COPY . .
