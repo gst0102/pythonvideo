@@ -46,6 +46,18 @@ async def get_current_user(
   # print(payload)
   return payload['openid']
 
+async def get_current_claims(
+    cregentials:HTTPAuthorizationCredentials=Depends(security)
+) -> Dict[str, Any]:
+  token = cregentials.credentials
+  try:
+    payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+  except JWTError:
+    raise HTTPException(status_code=401, detail='token不合法')
+  if not payload or not payload.get('openid'):
+    raise HTTPException(status_code=401, detail='token不合法')
+  return payload
+
 # 解析token，websocket专用
 async def get_current_user_ws(websocket:WebSocket)-> str:
   token = websocket.headers.get('Authorization')

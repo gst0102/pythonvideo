@@ -13,7 +13,7 @@ import logging
 import os
 from datetime import datetime
 
-from sqlalchemy import delete as sql_delete, or_, select, update as sql_update
+from sqlalchemy import or_, select, update as sql_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.anime_resource import AnimeResource
@@ -29,11 +29,8 @@ async def _upsert_anime(session: AsyncSession, item: dict) -> None:
     baidu_url = (item.get("baidu_url") or "").strip()
     quark_url = (item.get("quark_url") or "").strip()
     k4_url = (item.get("4k_url") or "").strip()
-
-    if quark_url:
-        await session.execute(
-            sql_delete(AnimeResource).where(AnimeResource.quark_url == quark_url)
-        )
+    category = item.get("category", "anime")
+    anime_id = item.get("anime_id", "")
 
     raw_time = item.get("update_time") or item.get("updated_at")
     source_time = None
@@ -43,21 +40,50 @@ async def _upsert_anime(session: AsyncSession, item: dict) -> None:
         except (ValueError, TypeError):
             pass
 
-    resource = AnimeResource(
-        anime_id=item.get("anime_id", ""),
-        title=item.get("title", ""),
-        category=item.get("category", "anime"),
-        quality=item.get("quality"),
-        episode=item.get("episode"),
-        status=item.get("status"),
-        baidu_url=baidu_url or None,
-        baidu_password=item.get("baidu_password"),
-        quark_url=quark_url or None,
-        four_k_url=k4_url or None,
-        source_update_time=source_time,
-        is_active=True,
-    )
-    session.add(resource)
+    conditions = [
+        (AnimeResource.category == category) & (AnimeResource.anime_id == anime_id)
+    ]
+    if quark_url:
+        conditions.append(AnimeResource.quark_url == quark_url)
+    if baidu_url:
+        conditions.append(AnimeResource.baidu_url == baidu_url)
+
+    existing = None
+    if conditions:
+        result = await session.execute(select(AnimeResource).where(or_(*conditions)).limit(1))
+        existing = result.scalar_one_or_none()
+
+    if existing:
+        existing.anime_id = anime_id
+        existing.title = item.get("title", "") or existing.title
+        existing.category = category
+        existing.quality = item.get("quality")
+        existing.episode = item.get("episode")
+        existing.status = item.get("status")
+        existing.baidu_url = baidu_url or None
+        existing.baidu_password = item.get("baidu_password")
+        existing.quark_url = quark_url or None
+        existing.four_k_url = k4_url or None
+        existing.source_update_time = source_time
+        existing.is_active = True
+        existing.updated_at = datetime.utcnow()
+        session.add(existing)
+    else:
+        resource = AnimeResource(
+            anime_id=anime_id,
+            title=item.get("title", ""),
+            category=category,
+            quality=item.get("quality"),
+            episode=item.get("episode"),
+            status=item.get("status"),
+            baidu_url=baidu_url or None,
+            baidu_password=item.get("baidu_password"),
+            quark_url=quark_url or None,
+            four_k_url=k4_url or None,
+            source_update_time=source_time,
+            is_active=True,
+        )
+        session.add(resource)
 
 
 async def sync_anime_from_kdocs(types: list[str] | None = None) -> dict:

@@ -51,7 +51,10 @@ async def login(req: UserLoginRequest, session: AsyncSession = Depends(get_sessi
     )
 
     # 3. 生成 JWT
-    token = create_access_token({"openid": openid})
+    token = create_access_token({
+        "openid": openid,
+        "session_key": wx_data.get("session_key", ""),
+    })
 
     # 4. 组装响应
     profile = _build_profile(user)

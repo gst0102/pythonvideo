@@ -35,6 +35,13 @@ VIP_YEARLY_PRICE = float(os.getenv("VIP_YEARLY_PRICE", "88.80"))
 DEFAULT_CONFIGS = {
     "vip_settings": {
         "enabled": True,
+        "virtual_pay": {
+            "appid": os.getenv("VIRTUAL_PAY_APPID", os.getenv("APPID", "")),
+            "offer_id": os.getenv("VIRTUAL_PAY_OFFER_ID", ""),
+            "env": int(os.getenv("VIRTUAL_PAY_ENV", "0")),
+            "mode": os.getenv("VIRTUAL_PAY_MODE", "short_series_coin"),
+            "notify_url": os.getenv("VIRTUAL_PAY_NOTIFY_URL", ""),
+        },
         "packages": [
             {
                 "id": "month", "name": "月度会员",
@@ -144,7 +151,7 @@ class ConfigService:
     @staticmethod
     async def get_vip_packages(session: AsyncSession) -> Dict[str, Any]:
         """便捷方法：获取 VIP 套餐。测试模式下强制用 .env 价格"""
-        config = await ConfigService.get(session, "vip_settings")
+        config = _normalize_vip_settings(await ConfigService.get(session, "vip_settings"))
         if VIP_TEST_MODE and "packages" in config:
             for pkg in config["packages"]:
                 if pkg.get("id") == "month":
@@ -169,3 +176,49 @@ class ConfigService:
         stmt = select(SystemConfig).order_by(SystemConfig.type)
         result = await session.execute(stmt)
         return list(result.scalars().all())
+
+
+def _normalize_vip_settings(config: Dict[str, Any]) -> Dict[str, Any]:
+    normalized = dict(config or {})
+    if normalized.get("packages"):
+        return normalized
+
+    month_price = float(normalized.get("month_price", VIP_MONTHLY_PRICE))
+    quarter_price = float(normalized.get("quarter_price", VIP_QUARTERLY_PRICE))
+    year_price = float(normalized.get("year_price", VIP_YEARLY_PRICE))
+
+    normalized["enabled"] = normalized.get("enabled", True)
+    normalized["virtual_pay"] = {
+        "appid": normalized.get("virtual_pay_appid") or os.getenv("VIRTUAL_PAY_APPID", os.getenv("APPID", "")),
+        "offer_id": normalized.get("virtual_pay_offer_id") or os.getenv("VIRTUAL_PAY_OFFER_ID", ""),
+        "env": int(normalized.get("virtual_pay_env", os.getenv("VIRTUAL_PAY_ENV", "0"))),
+        "mode": normalized.get("virtual_pay_mode") or os.getenv("VIRTUAL_PAY_MODE", "short_series_coin"),
+        "notify_url": normalized.get("virtual_pay_notify_url") or os.getenv("VIRTUAL_PAY_NOTIFY_URL", ""),
+    }
+    normalized["packages"] = [
+        {
+            "id": "month",
+            "name": "月度会员",
+            "price": month_price,
+            "original_price": float(normalized.get("month_original_price", month_price)),
+            "duration_days": 30,
+            "benefits": ["免广告", "专属客服", "高清画质"],
+        },
+        {
+            "id": "quarter",
+            "name": "季度会员",
+            "price": quarter_price,
+            "original_price": float(normalized.get("quarter_original_price", quarter_price)),
+            "duration_days": 90,
+            "benefits": ["免广告", "专属客服", "高清画质", "优先处理"],
+        },
+        {
+            "id": "year",
+            "name": "年度会员",
+            "price": year_price,
+            "original_price": float(normalized.get("year_original_price", year_price)),
+            "duration_days": 365,
+            "benefits": ["全部权益", "年度特惠", "专属客服", "专属标识"],
+        },
+    ]
+    return normalized

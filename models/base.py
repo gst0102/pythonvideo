@@ -7,25 +7,48 @@
 
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import AsyncGenerator
+from urllib.parse import quote_plus
 
 from dotenv import load_dotenv
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel
 
-load_dotenv()
+BACKEND_DIR = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = BACKEND_DIR.parent
+load_dotenv(PROJECT_ROOT / ".env")
+load_dotenv(BACKEND_DIR / ".env", override=False)
 
 # ── 数据库连接 ─────────────────────────────────────────────
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql+asyncpg://postgres:postgres@localhost:5432/video_app",
-)
+def _build_database_url() -> str:
+    if os.getenv("DB_HOST") or os.getenv("DB_NAME"):
+        user = os.getenv("DB_USER", "postgres")
+        password = quote_plus(os.getenv("DB_PASSWORD", "postgres"))
+        host = os.getenv("DB_HOST", "localhost")
+        port = os.getenv("DB_PORT", "5432")
+        name = os.getenv("DB_NAME", "video_app")
+        return f"postgresql+asyncpg://{user}:{password}@{host}:{port}/{name}"
+
+    configured = os.getenv("DATABASE_URL")
+    if configured:
+        return configured
+
+    user = os.getenv("DB_USER", "postgres")
+    password = quote_plus(os.getenv("DB_PASSWORD", "postgres"))
+    host = os.getenv("DB_HOST", "localhost")
+    port = os.getenv("DB_PORT", "5432")
+    name = os.getenv("DB_NAME", "video_app")
+    return f"postgresql+asyncpg://{user}:{password}@{host}:{port}/{name}"
+
+
+DATABASE_URL = _build_database_url()
 
 # 默认启用 echo 便于调试（生产环境通过 .env 关闭）
 ECHO_SQL = os.getenv("DB_ECHO", "false").lower() == "true"
 
 # SSL 模式（本地开发用 disable，生产用 prefer）
-DB_SSL_MODE = os.getenv("DB_SSL_MODE", "prefer")
+DB_SSL_MODE = os.getenv("DB_SSL_MODE", "disable")
 _connect_args = {}
 if DB_SSL_MODE == "disable":
     _connect_args["ssl"] = False

@@ -10,6 +10,7 @@
 """
 
 import json
+import hashlib
 import logging
 import os
 import re
@@ -418,7 +419,8 @@ class KDocsService:
 
         results = []
         for idx, entry in enumerate(entries):
-            anime_id = f"{category}_{idx}_{hash(entry['name']) % 100000:05d}"
+            digest = hashlib.sha1(f"{category}:{entry['name']}".encode("utf-8")).hexdigest()[:12]
+            anime_id = f"{category}_{idx}_{digest}"
             results.append({
                 "anime_id": anime_id,
                 "title": entry["name"],
