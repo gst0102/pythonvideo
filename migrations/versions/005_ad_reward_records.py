@@ -1,7 +1,7 @@
 """add ad reward records
 
 Revision ID: 005_ad_reward_records
-Revises: 004_add_four_k_url
+Revises: 004
 Create Date: 2026-06-03
 """
 
@@ -11,7 +11,7 @@ from sqlalchemy.dialects import postgresql
 
 
 revision = "005_ad_reward_records"
-down_revision = "004_add_four_k_url"
+down_revision = "004"
 branch_labels = None
 depends_on = None
 
@@ -41,3 +41,4 @@ def downgrade() -> None:
     op.drop_index("ix_ad_reward_records_user_id", table_name="ad_reward_records")
     op.drop_index("ix_ad_reward_records_event_id", table_name="ad_reward_records")
     op.drop_table("ad_reward_records")
+
