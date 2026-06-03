@@ -1,13 +1,10 @@
 """
-提现服务 — withdrawal_service
+Withdrawal service.
 
-MVC 架构中的 Service 层，处理提现申请和转账回调。
-
-核心功能:
-  1. 提现申请（余额校验、冻结、调用微信商家转账API）
-  2. 转账成功回调（解冻、更新余额）
-  3. 转账失败回调（回滚、退回余额）
-  4. 提现记录查询
+This keeps the state flow consistent across:
+1. mini program apply
+2. admin submit/reject
+3. WeChat transfer callback
 """
 
 import logging
@@ -20,19 +17,25 @@ from typing import List, Optional, Tuple
 from uuid import UUID
 
 from dotenv import load_dotenv
-from sqlmodel import select, func, and_
+from sqlmodel import and_, func, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from core.wepay import WeChatPayV3
 from models.user import User
 from models.withdrawal import WithdrawalRecord
+from services.config_service import ConfigService
 
 load_dotenv()
 logger = logging.getLogger(__name__)
 
+PENDING_TRANSFER_STATES = {"WAIT_USER_CONFIRM", "ACCEPTED", "PROCESSING"}
+
+
+def _get_transfer_notify_url() -> str:
+    return (os.getenv("WECHAT_TRANSFER_NOTIFY_URL") or os.getenv("TRANSFER_NOTIFY_URL") or "").strip()
+
 
 def _get_wx_pay() -> WeChatPayV3:
-    """获取微信支付实例"""
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     return WeChatPayV3(
         mch_id=os.getenv("mchid", ""),
@@ -40,13 +43,11 @@ def _get_wx_pay() -> WeChatPayV3:
         api_v3_key=os.getenv("APIv3", ""),
         private_key_path=os.path.join(base_dir, "certs", "apiclient_key.pem"),
         serial_no=os.getenv("serial_no", ""),
-        notify_url=os.getenv("NOTIFY_URL", ""),
+        notify_url=_get_transfer_notify_url(),
     )
 
 
 class WithdrawalService:
-    """提现业务逻辑服务"""
-
     @staticmethod
     async def apply_withdrawal(
         session: AsyncSession,
@@ -55,45 +56,44 @@ class WithdrawalService:
         ip: Optional[str] = None,
         openid: Optional[str] = None,
     ) -> Tuple[Optional[WithdrawalRecord], Optional[str]]:
-        """
-        申请提现（含微信商家转账调用）。
-        参照云函数 merchantTransfer 逻辑：冻结 → 调API → 成功则解冻，失败则显式回滚。
+        amount = round(float(amount), 2)
 
-        Returns:
-            (WithdrawalRecord, error_msg)
-        """
-        amount = round(amount, 2)
+        transfer_notify_url = _get_transfer_notify_url()
+        if not transfer_notify_url:
+            return None, "WECHAT_TRANSFER_NOTIFY_URL is not configured"
 
-        # 1. 验证金额
-        if amount < 0.10:
-            return None, "最低提现 0.10 元"
-        if amount > 200.00:
-            return None, "单次最多提现 200.00 元"
+        config = await ConfigService.get_withdrawal_config(session)
+        if not config.get("enabled", True):
+            return None, "withdrawal is disabled"
 
-        # 1.5 日限额检查（今日已成功 + 处理中的提现总额 ≤ 100 元）
+        min_amount = round(float(config.get("min_amount", 0.10)), 2)
+        max_amount = round(float(config.get("max_amount", 200.00)), 2)
+        daily_limit = round(float(config.get("daily_limit", 100.00)), 2)
+
+        if amount < min_amount:
+            return None, f"minimum amount is {min_amount:.2f}"
+        if amount > max_amount:
+            return None, f"maximum amount is {max_amount:.2f}"
+
+        user = await session.get(User, user_id)
+        if not user:
+            return None, "user not found"
+
         today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-        daily_stmt = (
-            select(func.coalesce(func.sum(WithdrawalRecord.amount), 0))
-            .where(
+        daily_result = await session.execute(
+            select(func.coalesce(func.sum(WithdrawalRecord.amount), 0)).where(
                 and_(
                     WithdrawalRecord.user_id == user_id,
                     WithdrawalRecord.created_at >= today_start,
-                    WithdrawalRecord.status.in_(["success", "processing"]),
+                    WithdrawalRecord.status.in_(["processing", "success"]),
                 )
             )
         )
-        daily_result = await session.execute(daily_stmt)
         daily_total = round(float(daily_result.scalar() or 0), 2)
-        if daily_total + amount > 100.00:
-            return None, f"今日提现限额 100 元，已提 {daily_total:.2f} 元，本次 {amount:.2f} 元超出限额"
+        if daily_total + amount > daily_limit:
+            return None, f"daily limit exceeded, current total {daily_total:.2f}"
 
-        # 2. 查询用户
-        user = await session.get(User, user_id)
-        if not user:
-            return None, "用户不存在"
-
-        # 3. 检查是否有可复用的待处理提现（云函数模式：支持重试）
-        pending_stmt = (
+        pending_result = await session.execute(
             select(WithdrawalRecord)
             .where(
                 and_(
@@ -104,101 +104,109 @@ class WithdrawalService:
             .order_by(WithdrawalRecord.created_at.desc())
             .limit(1)
         )
-        pending_result = await session.execute(pending_stmt)
         pending = pending_result.scalar_one_or_none()
 
         is_retry = False
         if pending:
-            # 金额一致 → 复用上次的 batch_no，直接重试 API
             if abs(float(pending.amount) - amount) < 0.001:
-                batch_no = pending.batch_no
-                is_retry = True
                 record = pending
-                logger.info(f"[Withdrawal] 复用待确认记录: {batch_no} ({amount}元)")
+                is_retry = True
             else:
-                # 金额不一致 → 取消旧记录，解冻余额
-                logger.info(f"[Withdrawal] 金额不一致，回滚旧记录: {pending.batch_no} (旧:{pending.amount}, 新:{amount})")
-                user.balance += float(pending.amount)
-                user.frozen_balance = float(user.frozen_balance) - float(pending.amount)
+                user.balance = round(float(user.balance) + float(pending.amount), 2)
+                user.frozen_balance = round(float(user.frozen_balance) - float(pending.amount), 2)
                 pending.status = "failed"
-                pending.fail_reason = "用户发起新提现（金额不一致）"
+                pending.fail_reason = "amount_changed_by_user"
                 pending.updated_at = datetime.utcnow()
                 await session.flush()
 
         if not is_retry:
-            # 4. 检查余额（云函数方式：new_Inc - frozen_amount）
             available = round(float(user.balance) - float(user.frozen_balance), 2)
-            if available < amount:
-                return None, f"余额不足，可提现: {available:.2f} 元"
+            if amount > available:
+                return None, f"insufficient available balance: {available:.2f}"
 
-            # 5. 冻结余额
-            user.balance -= amount
+            user.balance = round(float(user.balance) - amount, 2)
             user.frozen_balance = round(float(user.frozen_balance) + amount, 2)
             user.updated_at = datetime.utcnow()
 
-            # 6. 创建提现记录
-            batch_no = _generate_batch_no()
             record = WithdrawalRecord(
                 user_id=user_id,
                 amount=amount,
                 status="processing",
-                batch_no=batch_no,
+                batch_no=_generate_batch_no(),
                 ip=ip,
             )
             session.add(record)
             await session.flush()
-            logger.info(f"[Withdrawal] 新订单已创建: {batch_no}, amount={amount}")
 
-        # 7. 调用微信商家转账 API
         target_openid = openid or user.openid
         if not target_openid:
-            # 显式回滚余额（不依赖事务）
             if not is_retry:
-                user.balance += amount
-                user.frozen_balance = round(float(user.frozen_balance) - amount, 2)
-                record.status = "failed"
-                record.fail_reason = "用户未绑定微信"
-            return None, "用户未绑定微信，无法提现"
+                await _rollback_balance(session, user, record, amount, "missing_openid")
+            return None, "missing openid"
 
-        try:
-            wx_pay = _get_wx_pay()
-            transfer_result = wx_pay.merchant_transfer(
-                out_bill_no=batch_no,
-                openid=target_openid,
-                amount=amount,
-                transfer_remark="收益提现",
+        submitted_record, error = await WithdrawalService.submit_processing_withdrawal(
+            session,
+            record.id,
+            openid=target_openid,
+            allow_existing_submission=is_retry,
+        )
+        if error:
+            if not is_retry:
+                await _rollback_balance(session, user, record, amount, error)
+            return None, error
+        return submitted_record, None
+
+    @staticmethod
+    async def submit_processing_withdrawal(
+        session: AsyncSession,
+        record_id: UUID,
+        openid: Optional[str] = None,
+        allow_existing_submission: bool = False,
+    ) -> Tuple[Optional[WithdrawalRecord], Optional[str]]:
+        record = await session.get(WithdrawalRecord, record_id)
+        if not record:
+            return None, "withdrawal record not found"
+        if record.status != "processing":
+            return None, "withdrawal is not in processing state"
+
+        user = await session.get(User, record.user_id)
+        if not user:
+            return None, "user not found"
+
+        target_openid = openid or user.openid
+        if not target_openid:
+            return None, "missing openid"
+
+        if record.transfer_bill_no and not allow_existing_submission:
+            return record, "transfer already submitted, waiting callback"
+
+        transfer_result = _get_wx_pay().merchant_transfer(
+            out_bill_no=record.batch_no,
+            openid=target_openid,
+            amount=float(record.amount),
+            transfer_remark="withdrawal",
+        )
+        state = str(transfer_result.get("state") or "")
+        transfer_bill_no = str(transfer_result.get("transfer_bill_no") or "")
+
+        if transfer_bill_no:
+            record.transfer_bill_no = transfer_bill_no
+        record.updated_at = datetime.utcnow()
+
+        if state == "SUCCESS":
+            await WithdrawalService.handle_transfer_success(
+                session,
+                record.batch_no,
+                transfer_bill_no or record.batch_no,
             )
-            state = transfer_result.get("state", "")
-            logger.info(f"[Withdrawal] 微信转账返回: state={state}")
+            await session.flush()
+            return record, None
 
-            # ⭐ 云函数逻辑：WAIT_USER_CONFIRM / ACCEPTED / SUCCESS → 直接解冻完成
-            if state in ("WAIT_USER_CONFIRM", "ACCEPTED", "SUCCESS"):
-                if transfer_result.get("transfer_bill_no"):
-                    record.transfer_bill_no = transfer_result["transfer_bill_no"]
+        if state in PENDING_TRANSFER_STATES:
+            await session.flush()
+            return record, None
 
-                # 解冻余额、累计提现
-                user.frozen_balance = round(float(user.frozen_balance) - amount, 2)
-                user.total_withdrawn = round(float(user.total_withdrawn) + amount, 2)
-                record.status = "success"
-                record.completed_at = datetime.utcnow()
-                record.updated_at = datetime.utcnow()
-                await session.flush()
-                logger.info(f"[Withdrawal] 转账成功: {batch_no}, amount={amount}")
-
-                return record, None
-
-            # API 返回非预期状态 → 显式回滚（云函数模式：rollbackBalance）
-            logger.error(f"[Withdrawal] 转账API返回非预期状态: {state}")
-            if not is_retry:
-                await _rollback_balance(session, user, record, amount, f"微信API返回异常状态: {state}")
-            return None, f"转账预下单失败: {state}"
-
-        except Exception as e:
-            logger.error(f"[Withdrawal] 微信转账调用异常: {e}")
-            # 显式回滚（云函数模式：API调用失败自动回滚）
-            if not is_retry:
-                await _rollback_balance(session, user, record, amount, f"API调用失败: {str(e)[:100]}")
-            return None, f"提现失败: {str(e)}"
+        return None, f"unexpected transfer state: {state or 'UNKNOWN'}"
 
     @staticmethod
     async def handle_transfer_success(
@@ -206,17 +214,12 @@ class WithdrawalService:
         batch_no: str,
         transfer_bill_no: str,
     ) -> bool:
-        """处理转账成功回调"""
-        stmt = select(WithdrawalRecord).where(WithdrawalRecord.batch_no == batch_no)
-        result = await session.execute(stmt)
+        result = await session.execute(select(WithdrawalRecord).where(WithdrawalRecord.batch_no == batch_no))
         record = result.scalar_one_or_none()
-
         if not record:
-            logger.warning(f"[Transfer] 提现记录不存在: {batch_no}")
             return False
-
         if record.status != "processing":
-            return True  # 幂等
+            return True
 
         record.status = "success"
         record.transfer_bill_no = transfer_bill_no
@@ -229,26 +232,20 @@ class WithdrawalService:
             user.frozen_balance = round(float(user.frozen_balance) - amount, 2)
             user.total_withdrawn = round(float(user.total_withdrawn) + amount, 2)
             user.updated_at = datetime.utcnow()
-
-        logger.info(f"[Transfer] 转账成功: {batch_no}, amount={record.amount}")
         return True
 
     @staticmethod
     async def handle_transfer_failed(
         session: AsyncSession,
         batch_no: str,
-        reason: str = "转账失败",
+        reason: str = "transfer_failed",
     ) -> bool:
-        """处理转账失败回调：退回冻结金额到余额"""
-        stmt = select(WithdrawalRecord).where(WithdrawalRecord.batch_no == batch_no)
-        result = await session.execute(stmt)
+        result = await session.execute(select(WithdrawalRecord).where(WithdrawalRecord.batch_no == batch_no))
         record = result.scalar_one_or_none()
-
         if not record:
             return False
-
         if record.status != "processing":
-            return True  # 幂等
+            return True
 
         record.status = "failed"
         record.fail_reason = reason
@@ -258,12 +255,9 @@ class WithdrawalService:
         user = await session.get(User, record.user_id)
         if user:
             amount = float(record.amount)
-            # 退回余额：balance +amount, frozen_balance -amount
             user.balance = round(float(user.balance) + amount, 2)
             user.frozen_balance = round(float(user.frozen_balance) - amount, 2)
             user.updated_at = datetime.utcnow()
-
-        logger.info(f"[Transfer] 转账失败已退回: {batch_no}, amount={record.amount}, reason={reason}")
         return True
 
     @staticmethod
@@ -271,66 +265,51 @@ class WithdrawalService:
         session: AsyncSession,
         user_id: UUID,
     ) -> Tuple[float, List[str], Optional[str]]:
-        """
-        清理用户被锁定的冻结金额（云函数 releaseFrozenAmount 的 Python 版本）。
-        用于修复"上一次提现错误，钱没有回调退回"导致冻结金额卡住的问题。
-
-        Returns:
-            (released_amount, cleared_batch_nos, error_msg)
-        """
         user = await session.get(User, user_id)
         if not user:
-            return 0, [], "用户不存在"
+            return 0, [], "user not found"
 
         frozen = round(float(user.frozen_balance), 2)
         if frozen <= 0:
-            return 0, [], None  # 没有冻结金额
+            return 0, [], None
 
-        # 查找所有 processing 状态的提现记录
-        stmt = (
-            select(WithdrawalRecord)
-            .where(
+        result = await session.execute(
+            select(WithdrawalRecord).where(
                 and_(
                     WithdrawalRecord.user_id == user_id,
                     WithdrawalRecord.status == "processing",
                 )
             )
         )
-        result = await session.execute(stmt)
         pending_records = result.scalars().all()
 
         if pending_records:
-            # 有处理中的记录 → 先检查是否超过24小时（云函数逻辑）
-            cleared = []
+            cleared_batch_nos: List[str] = []
             total_cleared = 0.0
-            for rec in pending_records:
-                rec_amount = float(rec.amount)
-                hours_since = 0
-                if rec.created_at:
-                    hours_since = (datetime.utcnow() - rec.created_at.replace(tzinfo=None)).total_seconds() / 3600
+            for record in pending_records:
+                if not record.created_at:
+                    continue
+                hours_since = (datetime.utcnow() - record.created_at.replace(tzinfo=None)).total_seconds() / 3600
+                if hours_since <= 24:
+                    continue
 
-                # 超过24小时的 processing 记录 → 标记失败并回滚
-                if hours_since > 24:
-                    user.balance = round(float(user.balance) + rec_amount, 2)
-                    user.frozen_balance = round(float(user.frozen_balance) - rec_amount, 2)
-                    rec.status = "failed"
-                    rec.fail_reason = "超过24小时未确认，自动退回"
-                    rec.completed_at = datetime.utcnow()
-                    rec.updated_at = datetime.utcnow()
-                    cleared.append(rec.batch_no)
-                    total_cleared += rec_amount
-                    logger.info(f"[ReleaseFrozen] 自动退回超时记录: {rec.batch_no} ({rec_amount}元, {hours_since:.1f}h)")
+                amount = float(record.amount)
+                user.balance = round(float(user.balance) + amount, 2)
+                user.frozen_balance = round(float(user.frozen_balance) - amount, 2)
+                record.status = "failed"
+                record.fail_reason = "timeout_auto_release"
+                record.completed_at = datetime.utcnow()
+                record.updated_at = datetime.utcnow()
+                cleared_batch_nos.append(record.batch_no)
+                total_cleared += amount
 
-            if cleared:
+            if cleared_batch_nos:
                 user.updated_at = datetime.utcnow()
                 await session.flush()
-                return round(total_cleared, 2), cleared, None
-            else:
-                # 有 processing 记录但都不足 24 小时 → 不允许强制释放
-                return 0, [], f"存在 {len(pending_records)} 条处理中的提现（不足24小时），无法强制释放"
+                return round(total_cleared, 2), cleared_batch_nos, None
 
-        # 没有 processing 记录但 frozen_balance > 0 → 直接释放（数据不一致修复）
-        logger.warning(f"[ReleaseFrozen] 无处理中记录但冻结金额={frozen}，执行修复释放")
+            return 0, [], f"{len(pending_records)} processing withdrawals are still within 24 hours"
+
         user.balance = round(float(user.balance) + frozen, 2)
         user.frozen_balance = 0
         user.updated_at = datetime.utcnow()
@@ -344,26 +323,19 @@ class WithdrawalService:
         page: int = 1,
         page_size: int = 20,
     ) -> Tuple[List[WithdrawalRecord], int]:
-        """获取用户的提现记录（分页）"""
-        count_stmt = (
-            select(func.count())
-            .select_from(WithdrawalRecord)
-            .where(WithdrawalRecord.user_id == user_id)
+        total_result = await session.execute(
+            select(func.count()).select_from(WithdrawalRecord).where(WithdrawalRecord.user_id == user_id)
         )
-        result = await session.execute(count_stmt)
-        total = result.scalar() or 0
+        total = total_result.scalar() or 0
 
-        list_stmt = (
+        list_result = await session.execute(
             select(WithdrawalRecord)
             .where(WithdrawalRecord.user_id == user_id)
             .order_by(WithdrawalRecord.created_at.desc())
             .offset((page - 1) * page_size)
             .limit(page_size)
         )
-        result = await session.execute(list_stmt)
-        records = result.scalars().all()
-
-        return list(records), total
+        return list(list_result.scalars().all()), total
 
 
 def _generate_batch_no() -> str:
@@ -379,13 +351,6 @@ async def _rollback_balance(
     amount: float,
     reason: str,
 ) -> None:
-    """
-    显式回滚冻结金额（云函数 rollbackBalance 的 Python 版本）。
-    不依赖 DB 事务回滚，直接修改字段值。
-    """
-    amount = round(amount, 2)
-    logger.info(f"[Rollback] 开始回滚: user={user.id}, amount={amount}, batch={record.batch_no}, reason={reason}")
-
     user.balance = round(float(user.balance) + amount, 2)
     user.frozen_balance = round(float(user.frozen_balance) - amount, 2)
     user.updated_at = datetime.utcnow()
@@ -396,4 +361,3 @@ async def _rollback_balance(
     record.updated_at = datetime.utcnow()
 
     await session.flush()
-    logger.info(f"[Rollback] 回滚完成: {record.batch_no}")

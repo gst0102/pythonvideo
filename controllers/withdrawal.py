@@ -1,150 +1,195 @@
-"""
-提现接口 — /withdrawal
-
-MVC 架构中的 Controller 层。
-
-迁移来源:
-  - 云函数 cloudfunctions/merchantTransfer/index.js
-  - 云函数 cloudfunctions/transferCallback/index.js
-"""
-
+import base64
+import json
 import logging
+import os
 
+from Crypto.Cipher import AES
 from fastapi import APIRouter, Depends, Query, Request
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from core.certKey import verify_signature
 from core.response import response
-from models.base import get_session
-from models.user import User
-from schemas.user import (
-    WithdrawalApplyRequest,
-    WithdrawalConfigResponse,
-    PaginatedResponse,
-)
-from services.withdrawal_service import WithdrawalService
-from services.config_service import ConfigService
 from jwt_create import get_current_user
+from models.base import get_session, get_session_ctx
+from models.user import User
+from schemas.user import PaginatedResponse, WithdrawalApplyRequest, WithdrawalConfigResponse
+from services.config_service import ConfigService
+from services.withdrawal_service import PENDING_TRANSFER_STATES, WithdrawalService
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/withdrawal", tags=["提现管理"])
+router = APIRouter(prefix="/withdrawal", tags=["withdrawal"])
 
 
-@router.get("/config", summary="提现配置")
+@router.get("/config", summary="withdrawal config")
 async def get_config(session: AsyncSession = Depends(get_session)):
-    """获取提现规则配置"""
     config = await ConfigService.get_withdrawal_config(session)
-    return response(data=WithdrawalConfigResponse(
-        min_amount=float(config.get("min_amount", 0.10)),
-        max_amount=float(config.get("max_amount", 200.00)),
-        tips=config.get("tips", ""),
-    ).model_dump())
+    return response(
+        data=WithdrawalConfigResponse(
+            min_amount=float(config.get("min_amount", 0.10)),
+            max_amount=float(config.get("max_amount", 200.00)),
+            tips=str(config.get("tips", "")),
+        ).model_dump()
+    )
 
 
-@router.post("/apply", summary="申请提现")
+@router.post("/apply", summary="apply withdrawal")
 async def apply_withdrawal(
     req: WithdrawalApplyRequest,
     request: Request,
     openid: str = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ):
-    """发起提现申请"""
-    # 获取用户
-    stmt = select(User).where(User.openid == openid)
-    result = await session.execute(stmt)
+    result = await session.execute(select(User).where(User.openid == openid))
     user = result.scalar_one_or_none()
-
     if not user:
-        return response([], 404, "用户不存在")
+        return response([], 404, "user not found")
 
-    # 执行提现（传入 openid 用于微信商家转账）
     record, error = await WithdrawalService.apply_withdrawal(
-        session, user.id, req.amount,
+        session,
+        user.id,
+        req.amount,
         openid=openid,
         ip=request.client.host if request.client else None,
     )
-
     if error:
         return response([], 400, error)
 
-    # 构建响应数据（参照云函数返回格式）
-    resp_data = {
-        "record_id": str(record.id),
-        "amount": float(record.amount),
-        "status": record.status,
-        "batch_no": record.batch_no,
-        "transfer_bill_no": record.transfer_bill_no or "",
-        "created_at": record.created_at.isoformat() if record.created_at else None,
-    }
+    return response(
+        data={
+            "record_id": str(record.id),
+            "amount": float(record.amount),
+            "status": record.status,
+            "batch_no": record.batch_no,
+            "transfer_bill_no": record.transfer_bill_no or "",
+            "created_at": record.created_at.isoformat() if record.created_at else None,
+        },
+        msg="withdrawal submitted",
+    )
 
-    return response(data=resp_data, msg="提现申请已提交")
 
-
-@router.get("/records", summary="提现记录")
+@router.get("/records", summary="withdrawal records")
 async def get_records(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     openid: str = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ):
-    """获取当前用户的提现记录"""
-    stmt = select(User).where(User.openid == openid)
-    result = await session.execute(stmt)
+    result = await session.execute(select(User).where(User.openid == openid))
     user = result.scalar_one_or_none()
-
     if not user:
-        return response([], 404, "用户不存在")
+        return response([], 404, "user not found")
 
     records, total = await WithdrawalService.get_records(session, user.id, page, page_size)
+    items = [
+        {
+            "id": str(record.id),
+            "amount": float(record.amount),
+            "status": record.status,
+            "batch_no": record.batch_no,
+            "transfer_bill_no": record.transfer_bill_no,
+            "fail_reason": record.fail_reason,
+            "created_at": record.created_at.isoformat() if record.created_at else None,
+            "completed_at": record.completed_at.isoformat() if record.completed_at else None,
+        }
+        for record in records
+    ]
+    return response(
+        data=PaginatedResponse(
+            list=items,
+            total=total,
+            page=page,
+            page_size=page_size,
+            has_more=((page - 1) * page_size + len(items)) < total,
+        ).model_dump()
+    )
 
-    items = [{
-        "id": str(r.id),
-        "amount": float(r.amount),
-        "status": r.status,
-        "batch_no": r.batch_no,
-        "fail_reason": r.fail_reason,
-        "created_at": r.created_at.isoformat() if r.created_at else None,
-        "completed_at": r.completed_at.isoformat() if r.completed_at else None,
-    } for r in records]
 
-    has_more = ((page - 1) * page_size + len(items)) < total
-
-    return response(data=PaginatedResponse(
-        list=items,
-        total=total,
-        page=page,
-        page_size=page_size,
-        has_more=has_more,
-    ).model_dump())
-
-
-@router.post("/release-frozen", summary="释放冻结金额（修复上次提现失败余额锁定）")
+@router.post("/release-frozen", summary="release frozen amount")
 async def release_frozen(
     openid: str = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ):
-    """
-    清理因上次提现失败导致被锁定的冻结金额。
-    参照云函数 releaseFrozenAmount：
-    - 无 processing 记录 → 直接释放所有冻结金额
-    - 有 processing 记录但超过24小时 → 标记失败并退回
-    - 有 processing 记录且不足24小时 → 不允许强制释放
-    """
-    stmt = select(User).where(User.openid == openid)
-    result = await session.execute(stmt)
+    result = await session.execute(select(User).where(User.openid == openid))
     user = result.scalar_one_or_none()
-
     if not user:
-        return response([], 404, "用户不存在")
+        return response([], 404, "user not found")
 
     released, cleared_nos, error = await WithdrawalService.release_frozen_amount(session, user.id)
-
     if error:
         return response(data={"released": 0, "frozen": float(user.frozen_balance)}, code=400, msg=error)
 
-    return response(data={
-        "released": released,
-        "cleared_batch_nos": cleared_nos,
-        "remaining_frozen": round(float(user.frozen_balance), 2),
-        "balance": round(float(user.balance), 2),
-    }, msg=f"已释放 {released:.2f} 元冻结金额")
+    return response(
+        data={
+            "released": released,
+            "cleared_batch_nos": cleared_nos,
+            "remaining_frozen": round(float(user.frozen_balance), 2),
+            "balance": round(float(user.balance), 2),
+        },
+        msg="frozen amount released",
+    )
+
+
+@router.post("/transfer/notify", summary="wechat transfer callback")
+async def transfer_notify(request: Request):
+    try:
+        body = await request.body()
+        body_str = body.decode("utf-8")
+        headers = request.headers
+
+        timestamp = headers.get("wechatpay-timestamp")
+        nonce = headers.get("wechatpay-nonce")
+        signature = headers.get("wechatpay-signature")
+        serial = headers.get("wechatpay-serial")
+        if not all([timestamp, nonce, signature, serial]):
+            logger.error("[TransferNotify] missing signature headers")
+            return {"code": "FAIL", "message": "missing signature headers"}
+
+        sign_str = f"{timestamp}\n{nonce}\n{body_str}\n"
+        if not await verify_signature(sign_str, signature, serial):
+            logger.error("[TransferNotify] invalid signature")
+            return {"code": "FAIL", "message": "invalid signature"}
+
+        notify_data = json.loads(body_str)
+        resource = notify_data.get("resource", {})
+        if resource.get("ciphertext"):
+            decrypted = _decrypt_transfer_resource(
+                resource["ciphertext"],
+                resource.get("nonce", ""),
+                os.getenv("APIv3", ""),
+                resource.get("associated_data", ""),
+            )
+            transfer_data = json.loads(decrypted)
+        else:
+            transfer_data = notify_data
+
+        batch_no = transfer_data.get("out_bill_no") or transfer_data.get("batch_no")
+        transfer_bill_no = transfer_data.get("transfer_bill_no") or ""
+        state = transfer_data.get("state") or transfer_data.get("batch_status") or ""
+        fail_reason = transfer_data.get("fail_reason") or transfer_data.get("message") or "transfer_failed"
+        if not batch_no:
+            return {"code": "FAIL", "message": "missing out_bill_no"}
+
+        async with get_session_ctx() as session:
+            if state in {"SUCCESS", "FINISHED"}:
+                await WithdrawalService.handle_transfer_success(session, batch_no, transfer_bill_no or batch_no)
+            elif state in {"FAIL", "CLOSED"}:
+                await WithdrawalService.handle_transfer_failed(session, batch_no, fail_reason)
+            elif state in PENDING_TRANSFER_STATES:
+                logger.info("[TransferNotify] pending batch=%s state=%s", batch_no, state)
+            else:
+                logger.warning("[TransferNotify] unknown state batch=%s state=%s", batch_no, state)
+
+        return {"code": "SUCCESS", "message": "processed"}
+    except Exception as exc:
+        logger.error("[TransferNotify] callback failed: %s", exc, exc_info=True)
+        return {"code": "SUCCESS", "message": "processed"}
+
+
+def _decrypt_transfer_resource(ciphertext: str, nonce: str, key: str, associated_data: str) -> str:
+    cipher = AES.new(key.encode("utf-8"), AES.MODE_GCM, nonce=nonce.encode("utf-8"))
+    cipher.update(associated_data.encode("utf-8"))
+    ciphertext_bytes = base64.b64decode(ciphertext)
+    tag = ciphertext_bytes[-16:]
+    encrypted_data = ciphertext_bytes[:-16]
+    return cipher.decrypt_and_verify(encrypted_data, tag).decode("utf-8")

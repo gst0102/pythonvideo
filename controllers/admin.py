@@ -1,337 +1,334 @@
-"""
-管理端接口 — /admin
-
-MVC 架构中的 Controller 层。
-
-迁移来源:
-  - 云函数 cloudfunctions/admin-api/index.js
-  - controllers/pcRouter.py（代理层，待删除）
-
-鉴权: 管理端需要 Admin Token
-"""
-
 import logging
 from datetime import datetime
 from typing import Optional
+from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, HTTPException, Request
-from sqlmodel import select, func, and_
+from fastapi import APIRouter, Depends, Query
+from sqlmodel import and_, func, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from core.response import response
 from models.base import get_session
-from models.user import User
-from models.order import Order
-from models.withdrawal import WithdrawalRecord
 from models.chat import ChatMessage
-from schemas.user import (
-    ConfigUpdateRequest,
-    AdminReplyRequest,
-    PaginatedResponse,
-)
-from services.config_service import ConfigService
+from models.user import User
+from models.withdrawal import WithdrawalRecord
+from schemas.user import AdminReplyRequest, AdminUserVipUpdateRequest, ConfigUpdateRequest, PaginatedResponse
 from services.chat_service import ChatService
+from services.config_service import ConfigService
+from services.withdrawal_service import WithdrawalService
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/admin", tags=["管理端"])
+router = APIRouter(prefix="/admin", tags=["admin"])
 
 
-# ═══════════════════════════════════════════════════════════════
-#  仪表盘
-# ═══════════════════════════════════════════════════════════════
-
-@router.get("/dashboard", summary="仪表盘统计")
+@router.get("/dashboard", summary="dashboard")
 async def get_dashboard(session: AsyncSession = Depends(get_session)):
-    """获取仪表盘关键指标"""
-    # 用户总数
-    user_count = (await session.execute(
-        select(func.count()).select_from(User)
-    )).scalar() or 0
-
-    # VIP 数
-    vip_count = (await session.execute(
-        select(func.count()).select_from(User).where(
-            and_(User.is_vip == True, User.vip_expire_at > datetime.utcnow())  # noqa: E712
+    user_count = (await session.execute(select(func.count()).select_from(User))).scalar() or 0
+    total_vip_count = (
+        await session.execute(select(func.count()).select_from(User).where(User.is_vip == True))  # noqa: E712
+    ).scalar() or 0
+    vip_count = (
+        await session.execute(
+            select(func.count()).select_from(User).where(
+                and_(User.is_vip == True, User.vip_expire_at > datetime.utcnow())  # noqa: E712
+            )
         )
-    )).scalar() or 0
-
-    # 今日新增
+    ).scalar() or 0
     today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-    today_new = (await session.execute(
-        select(func.count()).select_from(User).where(User.created_at >= today_start)
-    )).scalar() or 0
-
-    # 提现统计
-    pending_count = (await session.execute(
-        select(func.count()).select_from(WithdrawalRecord).where(
-            WithdrawalRecord.status == "processing"
+    today_new = (
+        await session.execute(select(func.count()).select_from(User).where(User.created_at >= today_start))
+    ).scalar() or 0
+    pending_count = (
+        await session.execute(
+            select(func.count()).select_from(WithdrawalRecord).where(WithdrawalRecord.status == "processing")
         )
-    )).scalar() or 0
+    ).scalar() or 0
+    success_amount = (
+        await session.execute(
+            select(func.coalesce(func.sum(WithdrawalRecord.amount), 0.0))
+            .select_from(WithdrawalRecord)
+            .where(WithdrawalRecord.status == "success")
+        )
+    ).scalar() or 0.0
+    pending_amount = (
+        await session.execute(
+            select(func.coalesce(func.sum(WithdrawalRecord.amount), 0.0))
+            .select_from(WithdrawalRecord)
+            .where(WithdrawalRecord.status == "processing")
+        )
+    ).scalar() or 0.0
+    total_income = (
+        await session.execute(select(func.coalesce(func.sum(User.total_income), 0.0)).select_from(User))
+    ).scalar() or 0.0
 
-    # 成功提现总额
-    success_amount = (await session.execute(
-        select(func.coalesce(func.sum(WithdrawalRecord.amount), 0.0))
-        .select_from(WithdrawalRecord)
-        .where(WithdrawalRecord.status == "success")
-    )).scalar() or 0.0
-
-    # 待处理提现总额
-    pending_amount = (await session.execute(
-        select(func.coalesce(func.sum(WithdrawalRecord.amount), 0.0))
-        .select_from(WithdrawalRecord)
-        .where(WithdrawalRecord.status == "processing")
-    )).scalar() or 0.0
-
-    # 总收益
-    total_income = (await session.execute(
-        select(func.coalesce(func.sum(User.total_income), 0.0))
-        .select_from(User)
-    )).scalar() or 0.0
-
-    return response(data={
-        "user_count": user_count,
-        "vip_count": vip_count,
-        "today_new_users": today_new,
-        "total_income": float(total_income),
-        "pending_withdrawals": pending_count,
-        "success_withdrawal_amount": float(success_amount),
-        "pending_withdrawal_amount": float(pending_amount),
-    })
+    return response(
+        data={
+            "user_count": user_count,
+            "total_vip_count": total_vip_count,
+            "vip_count": vip_count,
+            "today_new_users": today_new,
+            "total_income": float(total_income),
+            "pending_withdrawals": pending_count,
+            "success_withdrawal_amount": float(success_amount),
+            "pending_withdrawal_amount": float(pending_amount),
+        }
+    )
 
 
-# ═══════════════════════════════════════════════════════════════
-#  用户管理
-# ═══════════════════════════════════════════════════════════════
-
-@router.get("/users", summary="用户列表")
+@router.get("/users", summary="user list")
 async def get_users(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     keyword: Optional[str] = Query(None),
+    is_vip: Optional[bool] = Query(None),
     session: AsyncSession = Depends(get_session),
 ):
-    """获取用户列表（支持关键词搜索）"""
-    base_query = select(User)
-
+    query = select(User)
     if keyword and keyword.strip():
         kw = keyword.strip()
-        base_query = base_query.where(
-            (User.nickname.ilike(f"%{kw}%")) |
-            (User.invite_code.ilike(f"%{kw}%")) |
-            (User.openid.ilike(f"%{kw}%"))
+        query = query.where(
+            (User.nickname.ilike(f"%{kw}%"))
+            | (User.invite_code.ilike(f"%{kw}%"))
+            | (User.openid.ilike(f"%{kw}%"))
         )
+    if is_vip is not None:
+        query = query.where(User.is_vip == is_vip)
 
-    # 总数
-    count_query = select(func.count()).select_from(base_query.subquery())
-    total = (await session.execute(count_query)).scalar() or 0
+    total = (await session.execute(select(func.count()).select_from(query.subquery()))).scalar() or 0
+    users = (
+        await session.execute(query.order_by(User.created_at.desc()).offset((page - 1) * page_size).limit(page_size))
+    ).scalars().all()
 
-    # 列表
-    list_query = base_query.order_by(User.created_at.desc()).offset(
-        (page - 1) * page_size
-    ).limit(page_size)
-    users = (await session.execute(list_query)).scalars().all()
-
-    items = [_user_to_dict(u) for u in users]
-    has_more = ((page - 1) * page_size + len(items)) < total
-
-    return response(data=PaginatedResponse(
-        list=items, total=total, page=page, page_size=page_size, has_more=has_more,
-    ).model_dump())
+    items = [_user_to_dict(user) for user in users]
+    return response(
+        data=PaginatedResponse(
+            list=items,
+            total=total,
+            page=page,
+            page_size=page_size,
+            has_more=((page - 1) * page_size + len(items)) < total,
+        ).model_dump()
+    )
 
 
-@router.get("/users/{user_id}", summary="用户详情")
+@router.get("/users/{user_id}", summary="user detail")
 async def get_user_detail(user_id: str, session: AsyncSession = Depends(get_session)):
-    """获取单个用户的详细信息"""
-    from uuid import UUID
     try:
         uid = UUID(user_id)
     except ValueError:
-        return response([], 400, "无效的用户 ID")
+        return response([], 400, "invalid user id")
 
     user = await session.get(User, uid)
     if not user:
-        return response([], 404, "用户不存在")
+        return response([], 404, "user not found")
+    withdrawals = (
+        await session.execute(
+            select(WithdrawalRecord)
+            .where(WithdrawalRecord.user_id == uid)
+            .order_by(WithdrawalRecord.created_at.desc())
+            .limit(50)
+        )
+    ).scalars().all()
+    return response(
+        data={
+            **_user_to_dict(user),
+            "withdrawals": [_withdrawal_to_dict(record, user) for record in withdrawals],
+        }
+    )
 
-    return response(data=_user_to_dict(user))
 
-
-# ═══════════════════════════════════════════════════════════════
-#  配置管理
-# ═══════════════════════════════════════════════════════════════
-
-@router.get("/configs", summary="获取配置")
-async def get_config(
-    type: Optional[str] = Query(None),
+@router.put("/users/{user_id}/vip", summary="update user vip")
+async def update_user_vip(
+    user_id: str,
+    req: AdminUserVipUpdateRequest,
     session: AsyncSession = Depends(get_session),
 ):
-    """获取指定类型或所有系统配置"""
+    try:
+        uid = UUID(user_id)
+    except ValueError:
+        return response([], 400, "invalid user id")
+
+    user = await session.get(User, uid)
+    if not user:
+        return response([], 404, "user not found")
+
+    user.is_vip = req.is_vip
+    user.vip_expire_at = req.vip_expire_at if req.is_vip else None
+    user.updated_at = datetime.utcnow()
+    await session.flush()
+    return response(data=_user_to_dict(user), msg="vip updated")
+
+
+@router.get("/configs", summary="get config")
+async def get_config(type: Optional[str] = Query(None), session: AsyncSession = Depends(get_session)):
     if type:
-        data = await ConfigService.get(session, type)
-        return response(data=data)
+        return response(data=await ConfigService.get(session, type))
 
     configs = await ConfigService.get_all_config_types(session)
-    result = {c.type: c.config_data for c in configs}
-    return response(data=result)
+    return response(data={config.type: config.config_data for config in configs})
 
 
-@router.put("/configs", summary="更新配置")
-async def update_config(
-    req: ConfigUpdateRequest,
-    session: AsyncSession = Depends(get_session),
-):
-    """创建或更新系统配置"""
+@router.put("/configs", summary="update config")
+async def update_config(req: ConfigUpdateRequest, session: AsyncSession = Depends(get_session)):
     config = await ConfigService.set(session, req.type, req.config_data)
-    return response(data={"type": config.type, "updated_at": config.updated_at.isoformat()}, msg="配置已保存")
+    return response(data={"type": config.type, "updated_at": config.updated_at.isoformat()}, msg="config updated")
 
 
-# ═══════════════════════════════════════════════════════════════
-#  提现管理
-# ═══════════════════════════════════════════════════════════════
-
-@router.get("/withdrawals", summary="提现列表")
+@router.get("/withdrawals", summary="withdrawal list")
 async def get_withdrawals(
     status: Optional[str] = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=200),
     session: AsyncSession = Depends(get_session),
 ):
-    """查看所有用户的提现记录"""
-    base = select(WithdrawalRecord)
+    query = select(WithdrawalRecord)
     if status:
-        base = base.where(WithdrawalRecord.status == status)
+        query = query.where(WithdrawalRecord.status == status)
 
-    count_q = select(func.count()).select_from(base.subquery())
-    total = (await session.execute(count_q)).scalar() or 0
+    total = (await session.execute(select(func.count()).select_from(query.subquery()))).scalar() or 0
+    records = (
+        await session.execute(
+            query.order_by(WithdrawalRecord.created_at.desc()).offset((page - 1) * page_size).limit(page_size)
+        )
+    ).scalars().all()
 
-    list_q = base.order_by(WithdrawalRecord.created_at.desc()).offset(
-        (page - 1) * page_size
-    ).limit(page_size)
-    records = (await session.execute(list_q)).scalars().all()
+    user_ids = {record.user_id for record in records}
+    user_map = {}
+    if user_ids:
+        users = (await session.execute(select(User).where(User.id.in_(list(user_ids))))).scalars().all()
+        user_map = {user.id: user for user in users}
 
-    items = [_withdrawal_to_dict(r) for r in records]
-    has_more = ((page - 1) * page_size + len(items)) < total
+    items = [_withdrawal_to_dict(record, user_map.get(record.user_id)) for record in records]
+    return response(
+        data=PaginatedResponse(
+            list=items,
+            total=total,
+            page=page,
+            page_size=page_size,
+            has_more=((page - 1) * page_size + len(items)) < total,
+        ).model_dump()
+    )
 
-    return response(data=PaginatedResponse(
-        list=items, total=total, page=page, page_size=page_size, has_more=has_more,
-    ).model_dump())
 
-
-@router.post("/withdrawals/{record_id}/approve", summary="通过提现")
+@router.post("/withdrawals/{record_id}/approve", summary="submit transfer")
 async def approve_withdrawal(record_id: str, session: AsyncSession = Depends(get_session)):
-    """手动通过提现（调用微信转账）"""
-    from uuid import UUID
     try:
         rid = UUID(record_id)
     except ValueError:
-        return response([], 400, "无效的记录 ID")
+        return response([], 400, "invalid withdrawal id")
 
-    record = await session.get(WithdrawalRecord, rid)
-    if not record:
-        return response([], 404, "记录不存在")
+    record, error = await WithdrawalService.submit_processing_withdrawal(session, rid)
+    if error:
+        return response([], 400, error)
+    return response(
+        data={
+            "id": str(record.id),
+            "status": record.status,
+            "batch_no": record.batch_no,
+            "transfer_bill_no": record.transfer_bill_no,
+        },
+        msg="transfer submitted",
+    )
 
-    # TODO: 实际调用微信商家转账 API
-    record.status = "success"
-    record.completed_at = datetime.utcnow()
-    record.updated_at = datetime.utcnow()
-    await session.flush()
 
-    return response(msg="已通过（需集成微信转账 API）")
-
-
-@router.post("/withdrawals/{record_id}/reject", summary="拒绝提现")
+@router.post("/withdrawals/{record_id}/reject", summary="reject withdrawal")
 async def reject_withdrawal(
     record_id: str,
-    reason: Optional[str] = Query("管理员拒绝"),
+    reason: Optional[str] = Query("admin_rejected"),
     session: AsyncSession = Depends(get_session),
 ):
-    """拒绝提现并退回余额"""
-    from uuid import UUID
     try:
         rid = UUID(record_id)
     except ValueError:
-        return response([], 400, "无效的记录 ID")
+        return response([], 400, "invalid withdrawal id")
 
     record = await session.get(WithdrawalRecord, rid)
     if not record:
-        return response([], 404, "记录不存在")
-
+        return response([], 404, "withdrawal not found")
     if record.status != "processing":
-        return response([], 400, "只能拒绝处理中的提现")
+        return response([], 400, "withdrawal is not in processing state")
+    if record.transfer_bill_no:
+        return response([], 400, "transfer already submitted, wait for callback")
 
-    # 退回余额
-    user = await session.get(User, record.user_id)
-    if user:
-        user.balance += float(record.amount)
-        user.frozen_balance -= float(record.amount)
-        user.updated_at = datetime.utcnow()
-
-    record.status = "failed"
-    record.fail_reason = reason
-    record.completed_at = datetime.utcnow()
-    record.updated_at = datetime.utcnow()
-    await session.flush()
-
-    return response(msg="已拒绝并退回余额")
+    await WithdrawalService.handle_transfer_failed(session, record.batch_no, reason or "admin_rejected")
+    return response(msg="withdrawal rejected")
 
 
-# ═══════════════════════════════════════════════════════════════
-#  客服回复
-# ═══════════════════════════════════════════════════════════════
-
-@router.post("/chat/reply", summary="管理员回复")
-async def admin_reply(
-    req: AdminReplyRequest,
+@router.get("/chat/messages", summary="chat messages")
+async def get_chat_messages(
+    user_id: Optional[str] = Query(None),
     session: AsyncSession = Depends(get_session),
 ):
-    """管理员回复用户消息"""
-    from uuid import UUID
+    query = select(ChatMessage)
+    if user_id:
+        try:
+            uid = UUID(user_id)
+        except ValueError:
+            return response([], 400, "invalid user id")
+        query = query.where(ChatMessage.user_id == uid)
+
+    messages = (await session.execute(query.order_by(ChatMessage.created_at.asc()).limit(500))).scalars().all()
+    return response(
+        data=[
+            {
+                "id": str(msg.id),
+                "user_id": str(msg.user_id),
+                "sender": msg.sender,
+                "content": msg.content,
+                "msg_type": msg.msg_type,
+                "is_read": msg.is_read,
+                "created_at": msg.created_at.isoformat() if msg.created_at else None,
+            }
+            for msg in messages
+        ]
+    )
+
+
+@router.post("/chat/reply", summary="admin reply")
+async def admin_reply(req: AdminReplyRequest, session: AsyncSession = Depends(get_session)):
     try:
         uid = UUID(req.user_id)
     except ValueError:
-        return response([], 400, "无效的用户 ID")
+        return response([], 400, "invalid user id")
 
     msg = await ChatService.admin_reply(session, uid, req.content)
-
-    return response(data={
-        "id": str(msg.id),
-        "content": msg.content,
-        "created_at": msg.created_at.isoformat() if msg.created_at else None,
-    }, msg="回复成功")
+    return response(
+        data={"id": str(msg.id), "content": msg.content, "created_at": msg.created_at.isoformat()},
+        msg="reply sent",
+    )
 
 
-# ═══════════════════════════════════════════════════════════════
-#  工具函数
-# ═══════════════════════════════════════════════════════════════
-
-def _user_to_dict(u: User) -> dict:
+def _user_to_dict(user: User) -> dict:
     return {
-        "id": str(u.id),
-        "openid": u.openid,
-        "nickname": u.nickname,
-        "avatar": u.avatar,
-        "invite_code": u.invite_code,
-        "is_vip": u.is_vip,
-        "vip_expire_at": u.vip_expire_at.isoformat() if u.vip_expire_at else None,
-        "balance": float(u.balance),
-        "frozen_balance": float(u.frozen_balance),
-        "total_income": float(u.total_income),
-        "total_withdrawn": float(u.total_withdrawn),
-        "invite_count": u.invite_count,
-        "team_count": u.team_count,
-        "created_at": u.created_at.isoformat() if u.created_at else None,
+        "id": str(user.id),
+        "openid": user.openid,
+        "nickname": user.nickname,
+        "avatar": user.avatar,
+        "invite_code": user.invite_code,
+        "is_vip": user.is_vip,
+        "vip_expire_at": user.vip_expire_at.isoformat() if user.vip_expire_at else None,
+        "balance": float(user.balance),
+        "frozen_balance": float(user.frozen_balance),
+        "total_income": float(user.total_income),
+        "total_withdrawn": float(user.total_withdrawn),
+        "invite_count": user.invite_count,
+        "team_count": user.team_count,
+        "created_at": user.created_at.isoformat() if user.created_at else None,
     }
 
 
-def _withdrawal_to_dict(r: WithdrawalRecord) -> dict:
+def _withdrawal_to_dict(record: WithdrawalRecord, user: Optional[User] = None) -> dict:
     return {
-        "id": str(r.id),
-        "user_id": str(r.user_id),
-        "amount": float(r.amount),
-        "status": r.status,
-        "batch_no": r.batch_no,
-        "transfer_bill_no": r.transfer_bill_no,
-        "fail_reason": r.fail_reason,
-        "ip": r.ip,
-        "created_at": r.created_at.isoformat() if r.created_at else None,
-        "completed_at": r.completed_at.isoformat() if r.completed_at else None,
+        "id": str(record.id),
+        "user_id": str(record.user_id),
+        "nickname": user.nickname if user else "",
+        "avatar": user.avatar if user else "",
+        "amount": float(record.amount),
+        "status": record.status,
+        "batch_no": record.batch_no,
+        "transfer_bill_no": record.transfer_bill_no,
+        "fail_reason": record.fail_reason,
+        "ip": record.ip,
+        "created_at": record.created_at.isoformat() if record.created_at else None,
+        "completed_at": record.completed_at.isoformat() if record.completed_at else None,
     }

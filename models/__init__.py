@@ -29,6 +29,7 @@ from models.chat import ChatMessage
 from models.config import SystemConfig
 from models.anime_resource import AnimeResource
 from models.user_subscription import UserSubscription
+from models.ad_reward import AdRewardRecord
 
 # 所有表，供 Alembic 自动发现
 __all__ = [
@@ -40,6 +41,7 @@ __all__ = [
     "SystemConfig",
     "AnimeResource",
     "UserSubscription",
+    "AdRewardRecord",
     "get_session",
     "get_session_ctx",
     "init_db",
