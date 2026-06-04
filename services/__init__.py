@@ -13,6 +13,8 @@
 from services.user_service import UserService
 from services.checkin_service import CheckinService
 from services.game_task_service import GameTaskService
+from services.home_overview_service import HomeOverviewService
+from services.mine_assets_service import MineAssetsService
 from services.payment_service import PaymentService
 from services.points_account_service import PointsAccountService
 from services.task_overview_service import TaskOverviewService
@@ -25,6 +27,8 @@ __all__ = [
     "UserService",
     "CheckinService",
     "GameTaskService",
+    "HomeOverviewService",
+    "MineAssetsService",
     "PaymentService",
     "PointsAccountService",
     "TaskOverviewService",
