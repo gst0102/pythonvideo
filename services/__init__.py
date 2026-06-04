@@ -17,6 +17,7 @@ from services.home_overview_service import HomeOverviewService
 from services.mine_assets_service import MineAssetsService
 from services.payment_service import PaymentService
 from services.points_account_service import PointsAccountService
+from services.points_ledger_service import PointsLedgerService
 from services.task_overview_service import TaskOverviewService
 from services.withdrawal_service import WithdrawalService
 from services.commission_service import CommissionService
@@ -31,6 +32,7 @@ __all__ = [
     "MineAssetsService",
     "PaymentService",
     "PointsAccountService",
+    "PointsLedgerService",
     "TaskOverviewService",
     "WithdrawalService",
     "CommissionService",

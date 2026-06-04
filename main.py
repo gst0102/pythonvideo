@@ -32,6 +32,7 @@ from controllers.checkin import router as checkin_router
 from controllers.game import router as game_router
 from controllers.home import router as home_router
 from controllers.mine import router as mine_router
+from controllers.points import router as points_router
 from controllers.tasks import router as tasks_router
 # === 🆕 番剧订阅 ===
 from controllers.anime import router as anime_router
@@ -132,6 +133,7 @@ app.include_router(game_router)          # /game
 app.include_router(tasks_router)         # /tasks
 app.include_router(home_router)          # /home
 app.include_router(mine_router)          # /mine
+app.include_router(points_router)        # /points
 
 # === 旧版云函数代理（兼容过渡，完全迁移后删除）===
 app.include_router(database_router)      # /db → 云函数代理
