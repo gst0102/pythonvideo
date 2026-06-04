@@ -15,6 +15,7 @@ from services.checkin_service import CheckinService
 from services.game_task_service import GameTaskService
 from services.payment_service import PaymentService
 from services.points_account_service import PointsAccountService
+from services.task_overview_service import TaskOverviewService
 from services.withdrawal_service import WithdrawalService
 from services.commission_service import CommissionService
 from services.chat_service import ChatService
@@ -26,6 +27,7 @@ __all__ = [
     "GameTaskService",
     "PaymentService",
     "PointsAccountService",
+    "TaskOverviewService",
     "WithdrawalService",
     "CommissionService",
     "ChatService",
