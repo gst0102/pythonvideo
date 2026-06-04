@@ -9,6 +9,7 @@ from sqlalchemy import desc
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from models.ad_event import AdEventRecord
 from models.daily_task_stat import DailyTaskStat
 from models.game_round import GameRound
 from models.order import Order
@@ -76,6 +77,8 @@ class GameTaskService:
             raise ValueError("unsupported game code")
         if normalized_result not in VALID_RESULTS:
             raise ValueError("unsupported game result")
+        if ad_event_id and ad_event_id.strip():
+            raise ValueError("ad bonus must be claimed separately")
 
         today = datetime.utcnow().date()
         existing = await _get_game_round(session, round_id)
@@ -95,8 +98,8 @@ class GameTaskService:
             raise RuntimeError("daily game task limit reached")
 
         base_points = _resolve_base_points(points_config, normalized_result)
-        bonus_points = _resolve_bonus_points(points_config, base_points, ad_event_id)
-        total_points = base_points + bonus_points
+        bonus_points = 0
+        total_points = base_points
 
         ledger, account, _ = await PointsAccountService.add_points(
             session=session,
@@ -119,7 +122,7 @@ class GameTaskService:
             base_points=base_points,
             bonus_points=bonus_points,
             total_points=total_points,
-            ad_event_id=(ad_event_id or None),
+            ad_event_id=None,
             status="completed",
             ledger_id=ledger.id,
             played_date=today,
@@ -132,6 +135,129 @@ class GameTaskService:
 
         await session.flush()
         return _build_round_payload(account=account, stat=stat, round_record=round_record, ledger=ledger), True
+
+    @staticmethod
+    async def claim_round_ad_bonus(
+        session: AsyncSession,
+        user: User,
+        *,
+        round_id: str,
+        ad_event_id: str,
+    ) -> Tuple[Dict[str, Any], bool]:
+        normalized_round_id = round_id.strip()
+        normalized_ad_event_id = ad_event_id.strip()
+        if not normalized_round_id:
+            raise ValueError("round_id is required")
+        if not normalized_ad_event_id:
+            raise ValueError("ad_event_id is required")
+
+        round_record = await _get_game_round(session, normalized_round_id)
+        if not round_record or round_record.user_id != user.id:
+            raise RuntimeError("game round not found")
+
+        stat = await _get_or_create_daily_task_stat(session, user, datetime.utcnow().date())
+        account, _ = await PointsAccountService.ensure_user_account(session, user.id)
+        points_config = await _get_points_config(session)
+
+        existing_ledger = await PointsAccountService.get_ledger_by_idempotency_key(
+            session,
+            f"game_task_ad_bonus:{user.id}:{normalized_round_id}:{normalized_ad_event_id}",
+        )
+        if existing_ledger:
+            payload = _build_round_ad_bonus_payload(
+                account=account,
+                stat=stat,
+                round_record=round_record,
+                ledger=existing_ledger,
+                rewarded=False,
+            )
+            return payload, False
+
+        if int(round_record.bonus_points) > 0 or round_record.ad_event_id:
+            payload = _build_round_ad_bonus_payload(
+                account=account,
+                stat=stat,
+                round_record=round_record,
+                ledger=None,
+                rewarded=False,
+            )
+            return payload, False
+
+        completed_event = await _get_completed_ad_event(session, user.id, normalized_ad_event_id)
+        if not completed_event:
+            raise RuntimeError("ad event not completed")
+        if await _has_rewarded_ad_event(session, user.id, normalized_ad_event_id):
+            payload = _build_round_ad_bonus_payload(
+                account=account,
+                stat=stat,
+                round_record=round_record,
+                ledger=None,
+                rewarded=False,
+            )
+            return payload, False
+
+        bonus_points = _resolve_bonus_points(points_config, int(round_record.base_points), normalized_ad_event_id)
+        if bonus_points <= 0:
+            raise RuntimeError("ad bonus is disabled")
+
+        ledger, account, created = await PointsAccountService.add_points(
+            session=session,
+            user_id=user.id,
+            points=bonus_points,
+            source="game_task",
+            change_type="ad_bonus",
+            availability="withdrawable",
+            idempotency_key=f"game_task_ad_bonus:{user.id}:{normalized_round_id}:{normalized_ad_event_id}",
+            related_type="ad_event",
+            related_id=normalized_ad_event_id,
+            remark=f"{round_record.game_code} ad bonus",
+        )
+        if not created:
+            payload = _build_round_ad_bonus_payload(
+                account=account,
+                stat=stat,
+                round_record=round_record,
+                ledger=ledger,
+                rewarded=False,
+            )
+            return payload, False
+
+        round_record.bonus_points = int(round_record.bonus_points) + bonus_points
+        round_record.total_points = int(round_record.total_points) + bonus_points
+        round_record.ad_event_id = normalized_ad_event_id
+        round_record.updated_at = datetime.utcnow()
+
+        stat.today_points += bonus_points
+        stat.updated_at = datetime.utcnow()
+
+        session.add(
+            AdEventRecord(
+                event_id=normalized_ad_event_id,
+                user_id=user.id,
+                openid=user.openid,
+                module=completed_event.module,
+                section=completed_event.section,
+                scene=completed_event.scene,
+                ad_unit_id=completed_event.ad_unit_id,
+                event_type="reward",
+                is_completed=True,
+                reward_points=float(bonus_points),
+                reward_amount=0.0,
+                date_key=completed_event.date_key,
+                week_key=completed_event.week_key,
+                month_key=completed_event.month_key,
+            )
+        )
+
+        await session.flush()
+        payload = _build_round_ad_bonus_payload(
+            account=account,
+            stat=stat,
+            round_record=round_record,
+            ledger=ledger,
+            rewarded=True,
+        )
+        return payload, True
 
 
 async def _get_task_config(session: AsyncSession) -> Dict[str, Any]:
@@ -148,6 +274,31 @@ async def _get_game_round(session: AsyncSession, round_id: str) -> GameRound | N
     stmt = select(GameRound).where(GameRound.round_id == round_id)
     result = await session.execute(stmt)
     return result.scalar_one_or_none()
+
+
+async def _get_completed_ad_event(session: AsyncSession, user_id, ad_event_id: str) -> AdEventRecord | None:
+    stmt = (
+        select(AdEventRecord)
+        .where(
+            AdEventRecord.user_id == user_id,
+            AdEventRecord.event_id == ad_event_id,
+            AdEventRecord.scene == "game_jump",
+            ((AdEventRecord.event_type == "complete") | (AdEventRecord.is_completed.is_(True))),
+        )
+        .order_by(desc(AdEventRecord.created_at))
+    )
+    result = await session.execute(stmt)
+    return result.scalars().first()
+
+
+async def _has_rewarded_ad_event(session: AsyncSession, user_id, ad_event_id: str) -> bool:
+    stmt = select(AdEventRecord).where(
+        AdEventRecord.user_id == user_id,
+        AdEventRecord.event_id == ad_event_id,
+        AdEventRecord.event_type == "reward",
+    )
+    result = await session.execute(stmt)
+    return result.scalar_one_or_none() is not None
 
 
 async def _get_or_create_daily_task_stat(
@@ -258,4 +409,31 @@ def _build_round_payload(
         "account": _build_account_summary(account),
         "ledger_id": str(ledger.id) if ledger else str(round_record.ledger_id or ""),
         "created_at": round_record.created_at,
+    }
+
+
+def _build_round_ad_bonus_payload(
+    *,
+    account: UserAccount,
+    stat: DailyTaskStat,
+    round_record: GameRound,
+    ledger: PointsLedger | None,
+    rewarded: bool,
+) -> Dict[str, Any]:
+    remaining = max(int(stat.game_tasks_limit) - int(stat.game_tasks_used), 0)
+    return {
+        "rewarded": rewarded,
+        "round_id": round_record.round_id,
+        "ad_event_id": round_record.ad_event_id,
+        "points_added": int(ledger.points_delta) if ledger else 0,
+        "base_points": int(round_record.base_points),
+        "bonus_points": int(round_record.bonus_points),
+        "total_points": int(round_record.total_points),
+        "today_points": int(stat.today_points),
+        "today_used": int(stat.game_tasks_used),
+        "today_limit": int(stat.game_tasks_limit),
+        "today_remaining": remaining,
+        "account": _build_account_summary(account),
+        "ledger_id": str(ledger.id) if ledger else "",
+        "created_at": round_record.updated_at,
     }

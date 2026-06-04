@@ -53,3 +53,32 @@ class GameRoundCompleteResponse(BaseModel):
     account: CheckinAccountSummary
     ledger_id: str
     created_at: datetime | None = None
+
+
+class GameRoundAdBonusRequest(BaseModel):
+    round_id: str
+    ad_event_id: str
+
+    @field_validator("round_id", "ad_event_id", mode="before")
+    @classmethod
+    def validate_ad_bonus_required_str(cls, value: object) -> object:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("field is required")
+        return value.strip()
+
+
+class GameRoundAdBonusResponse(BaseModel):
+    rewarded: bool = True
+    round_id: str
+    ad_event_id: str | None = None
+    points_added: int = 0
+    base_points: int = 0
+    bonus_points: int = 0
+    total_points: int = 0
+    today_points: int = 0
+    today_used: int = 0
+    today_limit: int = 0
+    today_remaining: int = 0
+    account: CheckinAccountSummary
+    ledger_id: str = ""
+    created_at: datetime | None = None

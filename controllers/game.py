@@ -9,6 +9,8 @@ from jwt_create import get_current_user
 from models.base import get_session
 from models.user import User
 from schemas.game import (
+    GameRoundAdBonusRequest,
+    GameRoundAdBonusResponse,
     GameRoundCompleteRequest,
     GameRoundCompleteResponse,
     GameTaskStatusResponse,
@@ -67,4 +69,33 @@ async def complete_game_round(
     return response(
         data=GameRoundCompleteResponse(**payload).model_dump(mode="json"),
         msg="game reward success",
+    )
+
+
+@router.post("/rounds/ad-bonus", summary="claim game round ad bonus")
+async def claim_game_round_ad_bonus(
+    req: GameRoundAdBonusRequest,
+    openid: str = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    result = await session.execute(select(User).where(User.openid == openid))
+    user = result.scalar_one_or_none()
+    if not user:
+        return response([], 404, "user not found")
+
+    try:
+        payload, rewarded = await GameTaskService.claim_round_ad_bonus(
+            session,
+            user,
+            round_id=req.round_id,
+            ad_event_id=req.ad_event_id,
+        )
+    except ValueError as exc:
+        return response([], 400, str(exc))
+    except RuntimeError as exc:
+        return response([], 400, str(exc))
+
+    return response(
+        data=GameRoundAdBonusResponse(**payload).model_dump(mode="json"),
+        msg="game ad bonus success" if rewarded else "game ad bonus already granted",
     )
