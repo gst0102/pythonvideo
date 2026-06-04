@@ -11,6 +11,7 @@
 """
 
 from services.user_service import UserService
+from services.checkin_service import CheckinService
 from services.payment_service import PaymentService
 from services.points_account_service import PointsAccountService
 from services.withdrawal_service import WithdrawalService
@@ -20,6 +21,7 @@ from services.config_service import ConfigService
 
 __all__ = [
     "UserService",
+    "CheckinService",
     "PaymentService",
     "PointsAccountService",
     "WithdrawalService",

@@ -28,6 +28,7 @@ from controllers.withdrawal import router as withdrawal_router
 from controllers.chat import router as chat_router
 from controllers.admin import router as admin_router
 
+from controllers.checkin import router as checkin_router
 # === 🆕 番剧订阅 ===
 from controllers.anime import router as anime_router
 
@@ -122,6 +123,7 @@ app.include_router(withdrawal_router)    # 🆕 /withdrawal
 app.include_router(chat_router)          # 🆕 /chat
 app.include_router(admin_router)         # 🆕 /admin
 app.include_router(anime_router)         # 🆕 /anime（番剧订阅）
+app.include_router(checkin_router)       # /checkin
 
 # === 旧版云函数代理（兼容过渡，完全迁移后删除）===
 app.include_router(database_router)      # /db → 云函数代理
