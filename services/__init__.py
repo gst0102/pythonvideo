@@ -12,6 +12,7 @@
 
 from services.user_service import UserService
 from services.payment_service import PaymentService
+from services.points_account_service import PointsAccountService
 from services.withdrawal_service import WithdrawalService
 from services.commission_service import CommissionService
 from services.chat_service import ChatService
@@ -20,6 +21,7 @@ from services.config_service import ConfigService
 __all__ = [
     "UserService",
     "PaymentService",
+    "PointsAccountService",
     "WithdrawalService",
     "CommissionService",
     "ChatService",

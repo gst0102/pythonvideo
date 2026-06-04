@@ -27,6 +27,11 @@ if config.config_file_name is not None:
 # ── 导入所有模型（确保 SQLModel.metadata 包含所有表） ──
 # 必须导入所有模型类，Alembic 才能通过 metadata 发现它们
 import models  # noqa: E402, F401
+from models.checkin_record import CheckinRecord  # noqa: E402, F401
+from models.daily_task_stat import DailyTaskStat  # noqa: E402, F401
+from models.game_round import GameRound  # noqa: E402, F401
+from models.points_ledger import PointsLedger  # noqa: E402, F401
+from models.user_account import UserAccount  # noqa: E402, F401
 
 # 目标 metadata
 target_metadata = SQLModel.metadata

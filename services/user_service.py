@@ -25,6 +25,7 @@ from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from models.user import User
+from services.points_account_service import PointsAccountService
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -85,6 +86,7 @@ class UserService:
             existing_user.avatar = avatar
             existing_user.updated_at = datetime.utcnow()
             await session.flush()
+            await PointsAccountService.ensure_user_account(session, existing_user.id)
             return existing_user, False
 
         # 2. 新用户：注册
@@ -118,6 +120,7 @@ class UserService:
         if grand_parent_id:
             await _inc_invite_stats(session, grand_parent_id, is_direct=False)
 
+        await PointsAccountService.ensure_user_account(session, user.id)
         return user, True
 
     @staticmethod
