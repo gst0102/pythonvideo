@@ -1,0 +1,261 @@
+"""Stage 2 game task reward service."""
+
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Any, Dict, Tuple
+
+from sqlalchemy import desc
+from sqlmodel import select
+from sqlmodel.ext.asyncio.session import AsyncSession
+
+from models.daily_task_stat import DailyTaskStat
+from models.game_round import GameRound
+from models.order import Order
+from models.points_ledger import PointsLedger
+from models.user import User
+from models.user_account import UserAccount
+from services.config_service import ConfigService
+from services.points_account_service import PointsAccountService
+
+VALID_GAME_CODES = {"rps"}
+VALID_RESULTS = {"win", "lose", "draw"}
+DEFAULT_TASK_CONFIG = {
+    "daily_game_task_limit_normal": 10,
+    "daily_game_task_limit_member_month": 100,
+    "daily_game_task_limit_member_quarter": 150,
+    "daily_game_task_limit_member_year": 200,
+}
+DEFAULT_POINTS_CONFIG = {
+    "game_base_points_min": 1,
+    "game_base_points_max": 2,
+    "game_ad_multiplier": 2,
+}
+
+
+class GameTaskService:
+    """Game task query and reward service."""
+
+    @staticmethod
+    async def get_status(session: AsyncSession, user: User) -> Dict[str, Any]:
+        today = datetime.utcnow().date()
+        account, _ = await PointsAccountService.ensure_user_account(session, user.id)
+        stat = await _get_or_create_daily_task_stat(session, user, today)
+
+        return {
+            "today": today,
+            "today_points": int(stat.today_points),
+            "today_used": int(stat.game_tasks_used),
+            "today_limit": int(stat.game_tasks_limit),
+            "today_remaining": max(int(stat.game_tasks_limit) - int(stat.game_tasks_used), 0),
+            "member_bonus_enabled": bool(user.is_vip),
+            "account": _build_account_summary(account),
+            "games": [
+                {
+                    "code": "rps",
+                    "name": "石头剪刀布",
+                    "status": "available",
+                    "points_range": _build_points_range(await _get_points_config(session)),
+                }
+            ],
+        }
+
+    @staticmethod
+    async def complete_round(
+        session: AsyncSession,
+        user: User,
+        *,
+        game_code: str,
+        round_id: str,
+        result: str,
+        ad_event_id: str | None = None,
+    ) -> Tuple[Dict[str, Any], bool]:
+        normalized_game_code = game_code.strip().lower()
+        normalized_result = result.strip().lower()
+        if normalized_game_code not in VALID_GAME_CODES:
+            raise ValueError("unsupported game code")
+        if normalized_result not in VALID_RESULTS:
+            raise ValueError("unsupported game result")
+
+        today = datetime.utcnow().date()
+        existing = await _get_game_round(session, round_id)
+        account, _ = await PointsAccountService.ensure_user_account(session, user.id)
+        stat = await _get_or_create_daily_task_stat(session, user, today)
+        points_config = await _get_points_config(session)
+
+        if existing:
+            ledger = await PointsAccountService.get_ledger_by_idempotency_key(
+                session,
+                f"game_task:{user.id}:{round_id}",
+            )
+            payload = _build_round_payload(account=account, stat=stat, round_record=existing, ledger=ledger)
+            return payload, False
+
+        if stat.game_tasks_used >= stat.game_tasks_limit:
+            raise RuntimeError("daily game task limit reached")
+
+        base_points = _resolve_base_points(points_config, normalized_result)
+        bonus_points = _resolve_bonus_points(points_config, base_points, ad_event_id)
+        total_points = base_points + bonus_points
+
+        ledger, account, _ = await PointsAccountService.add_points(
+            session=session,
+            user_id=user.id,
+            points=total_points,
+            source="game_task",
+            change_type="earn",
+            availability="withdrawable",
+            idempotency_key=f"game_task:{user.id}:{round_id}",
+            related_type="game_round",
+            related_id=round_id,
+            remark=f"{normalized_game_code} reward",
+        )
+
+        round_record = GameRound(
+            user_id=user.id,
+            round_id=round_id,
+            game_code=normalized_game_code,
+            result=normalized_result,
+            base_points=base_points,
+            bonus_points=bonus_points,
+            total_points=total_points,
+            ad_event_id=(ad_event_id or None),
+            status="completed",
+            ledger_id=ledger.id,
+            played_date=today,
+        )
+        session.add(round_record)
+
+        stat.game_tasks_used += 1
+        stat.today_points += total_points
+        stat.updated_at = datetime.utcnow()
+
+        await session.flush()
+        return _build_round_payload(account=account, stat=stat, round_record=round_record, ledger=ledger), True
+
+
+async def _get_task_config(session: AsyncSession) -> Dict[str, Any]:
+    config = await ConfigService.get(session, "stage2_task_config")
+    return {**DEFAULT_TASK_CONFIG, **(config or {})}
+
+
+async def _get_points_config(session: AsyncSession) -> Dict[str, Any]:
+    config = await ConfigService.get(session, "stage2_points_config")
+    return {**DEFAULT_POINTS_CONFIG, **(config or {})}
+
+
+async def _get_game_round(session: AsyncSession, round_id: str) -> GameRound | None:
+    stmt = select(GameRound).where(GameRound.round_id == round_id)
+    result = await session.execute(stmt)
+    return result.scalar_one_or_none()
+
+
+async def _get_or_create_daily_task_stat(
+    session: AsyncSession,
+    user: User,
+    stat_day,
+) -> DailyTaskStat:
+    stmt = select(DailyTaskStat).where(
+        DailyTaskStat.user_id == user.id,
+        DailyTaskStat.stat_date == stat_day,
+    )
+    result = await session.execute(stmt)
+    stat = result.scalar_one_or_none()
+    if stat:
+        expected_limit = await _resolve_daily_limit(session, user)
+        if stat.game_tasks_limit != expected_limit:
+            stat.game_tasks_limit = expected_limit
+            stat.updated_at = datetime.utcnow()
+            await session.flush()
+        return stat
+
+    stat = DailyTaskStat(
+        user_id=user.id,
+        stat_date=stat_day,
+        game_tasks_limit=await _resolve_daily_limit(session, user),
+    )
+    session.add(stat)
+    await session.flush()
+    return stat
+
+
+async def _resolve_daily_limit(session: AsyncSession, user: User) -> int:
+    config = await _get_task_config(session)
+    if not user.is_vip:
+        return int(config["daily_game_task_limit_normal"])
+
+    period = await _resolve_vip_period(session, user.id)
+    if period == "year":
+        return int(config["daily_game_task_limit_member_year"])
+    if period == "quarter":
+        return int(config["daily_game_task_limit_member_quarter"])
+    return int(config["daily_game_task_limit_member_month"])
+
+
+async def _resolve_vip_period(session: AsyncSession, user_id) -> str:
+    stmt = (
+        select(Order)
+        .where(Order.user_id == user_id, Order.status == "paid")
+        .order_by(desc(Order.paid_at), desc(Order.created_at))
+    )
+    result = await session.execute(stmt)
+    order = result.scalars().first()
+    if not order or not order.period:
+        return "month"
+    period = str(order.period).strip().lower()
+    if period not in {"month", "quarter", "year"}:
+        return "month"
+    return period
+
+
+def _resolve_base_points(config: Dict[str, Any], result: str) -> int:
+    min_points = int(config["game_base_points_min"])
+    max_points = int(config["game_base_points_max"])
+    if result == "win":
+        return max_points
+    return min_points
+
+
+def _resolve_bonus_points(config: Dict[str, Any], base_points: int, ad_event_id: str | None) -> int:
+    if not ad_event_id:
+        return 0
+    multiplier = max(int(config.get("game_ad_multiplier", 2)), 1)
+    return base_points * (multiplier - 1)
+
+
+def _build_points_range(config: Dict[str, Any]) -> str:
+    return f"{int(config['game_base_points_min'])}-{int(config['game_base_points_max'])}"
+
+
+def _build_account_summary(account: UserAccount) -> Dict[str, int]:
+    return {
+        "total_points": int(account.total_points),
+        "withdrawable_points": int(account.withdrawable_points),
+        "frozen_points": int(account.frozen_points),
+        "consumable_points": int(account.consumable_points),
+    }
+
+
+def _build_round_payload(
+    *,
+    account: UserAccount,
+    stat: DailyTaskStat,
+    round_record: GameRound,
+    ledger: PointsLedger | None,
+) -> Dict[str, Any]:
+    remaining = max(int(stat.game_tasks_limit) - int(stat.game_tasks_used), 0)
+    return {
+        "success": True,
+        "game_code": round_record.game_code,
+        "round_id": round_record.round_id,
+        "result": round_record.result,
+        "points_added": int(round_record.total_points),
+        "base_points": int(round_record.base_points),
+        "bonus_points": int(round_record.bonus_points),
+        "today_used": int(stat.game_tasks_used),
+        "today_limit": int(stat.game_tasks_limit),
+        "today_remaining": remaining,
+        "account": _build_account_summary(account),
+        "ledger_id": str(ledger.id) if ledger else str(round_record.ledger_id or ""),
+        "created_at": round_record.created_at,
+    }

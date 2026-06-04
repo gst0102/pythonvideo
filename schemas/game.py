@@ -1,0 +1,55 @@
+"""Schemas for stage 2 game task endpoints."""
+
+from datetime import date, datetime
+
+from pydantic import BaseModel, Field, field_validator
+
+from schemas.checkin import CheckinAccountSummary
+
+
+class GameTaskItem(BaseModel):
+    code: str
+    name: str
+    status: str = "available"
+    points_range: str
+
+
+class GameTaskStatusResponse(BaseModel):
+    today: date
+    today_points: int = 0
+    today_used: int = 0
+    today_limit: int = 0
+    today_remaining: int = 0
+    member_bonus_enabled: bool = False
+    account: CheckinAccountSummary
+    games: list[GameTaskItem] = Field(default_factory=list)
+
+
+class GameRoundCompleteRequest(BaseModel):
+    game_code: str
+    round_id: str
+    result: str
+    ad_event_id: str | None = None
+
+    @field_validator("game_code", "round_id", "result", mode="before")
+    @classmethod
+    def validate_required_str(cls, value: object) -> object:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("field is required")
+        return value.strip()
+
+
+class GameRoundCompleteResponse(BaseModel):
+    success: bool = True
+    game_code: str
+    round_id: str
+    result: str
+    points_added: int
+    base_points: int
+    bonus_points: int = 0
+    today_used: int
+    today_limit: int
+    today_remaining: int
+    account: CheckinAccountSummary
+    ledger_id: str
+    created_at: datetime | None = None
