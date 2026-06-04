@@ -121,7 +121,7 @@ async def update_profile(
     user.updated_at = datetime.datetime.utcnow()
     await session.flush()
     account, _ = await PointsAccountService.ensure_user_account(session, user.id)
-    return response(data=_build_profile(user, account).model_dump(mode="json"), msg="????")
+    return response(data=_build_profile(user, account).model_dump(mode="json"), msg="更新成功")
 
 
 # ═══════════════════════════════════════════════════════════════
