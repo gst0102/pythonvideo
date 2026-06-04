@@ -6,20 +6,30 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field, field_validator
+from schemas.checkin import CheckinAccountSummary
 
 
 class UserLoginRequest(BaseModel):
     code: str
-    avatar: str
-    nickname: str
+    avatar: str = ""
+    nickname: str = ""
     invite_code: Optional[str] = None
 
-    @field_validator("code", "avatar", "nickname", mode="before")
+    @field_validator("code", mode="before")
     @classmethod
-    def check_not_empty(cls, value: Any) -> Any:
+    def check_code_not_empty(cls, value: Any) -> Any:
         if not isinstance(value, str) or not value.strip():
             raise ValueError("field is required")
         return value
+
+    @field_validator("avatar", "nickname", mode="before")
+    @classmethod
+    def normalize_optional_text(cls, value: Any) -> str:
+        if value is None:
+            return ""
+        if not isinstance(value, str):
+            raise ValueError("field must be string")
+        return value.strip()
 
 
 class UserProfile(BaseModel):
@@ -37,6 +47,7 @@ class UserProfile(BaseModel):
     invite_count: int
     team_count: int
     created_at: Optional[datetime] = None
+    account: CheckinAccountSummary = Field(default_factory=CheckinAccountSummary)
 
 
 class UserLoginResponse(BaseModel):

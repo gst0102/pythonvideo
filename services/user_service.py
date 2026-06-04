@@ -76,14 +76,18 @@ class UserService:
             (User, is_new_user)
         """
         # 1. 查询是否已存在
+        normalized_nickname = _normalize_nickname(nickname, openid)
+        normalized_avatar = _normalize_avatar(avatar)
         stmt = select(User).where(User.openid == openid)
         result = await session.execute(stmt)
         existing_user = result.scalar_one_or_none()
 
         if existing_user:
             # 老用户：更新资料
-            existing_user.nickname = nickname
-            existing_user.avatar = avatar
+            if nickname and nickname.strip():
+                existing_user.nickname = normalized_nickname
+            if avatar and avatar.strip():
+                existing_user.avatar = normalized_avatar
             existing_user.updated_at = datetime.utcnow()
             await session.flush()
             await PointsAccountService.ensure_user_account(session, existing_user.id)
@@ -105,8 +109,8 @@ class UserService:
         # 4. 创建用户
         user = User(
             openid=openid,
-            nickname=nickname,
-            avatar=avatar,
+            nickname=normalized_nickname,
+            avatar=normalized_avatar,
             invite_code=new_invite_code,
             parent_id=parent_id,
             grand_parent_id=grand_parent_id,
@@ -149,6 +153,18 @@ class UserService:
 def _generate_invite_code(length: int = 10) -> str:
     """生成加密安全的随机邀请码"""
     return secrets.token_hex(length // 2)[:length]
+
+
+def _normalize_nickname(nickname: str, openid: str) -> str:
+    cleaned = (nickname or "").strip()
+    if cleaned:
+        return cleaned
+    suffix = (openid or "")[-6:]
+    return f"微信用户{suffix}" if suffix else "微信用户"
+
+
+def _normalize_avatar(avatar: str) -> str:
+    return (avatar or "").strip()
 
 
 async def _find_user_by_invite_code(session: AsyncSession, invite_code: str) -> Optional[User]:

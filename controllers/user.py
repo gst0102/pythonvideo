@@ -22,8 +22,11 @@ from schemas.user import (
     UserUpdateRequest,
 )
 from models.user import User
+from models.user_account import UserAccount
 from models.base import get_session
+from schemas.checkin import CheckinAccountSummary
 from services.user_service import UserService
+from services.points_account_service import PointsAccountService
 from jwt_create import create_access_token, get_current_user
 
 logger = logging.getLogger(__name__)
@@ -50,14 +53,14 @@ async def login(req: UserLoginRequest, session: AsyncSession = Depends(get_sessi
         session, openid, req.nickname, req.avatar, req.invite_code,
     )
 
-    # 3. 生成 JWT
+    # 3. Generate JWT
     token = create_access_token({
         "openid": openid,
-        "session_key": wx_data.get("session_key", ""),
     })
 
-    # 4. 组装响应
-    profile = _build_profile(user)
+    # 4. Build response
+    account, _ = await PointsAccountService.ensure_user_account(session, user.id)
+    profile = _build_profile(user, account)
     return response(
         data=UserLoginResponse(
             token=token,
@@ -88,7 +91,8 @@ async def get_profile(
     if not user:
         return response([], 404, "用户不存在")
 
-    return response(data=_build_profile(user).model_dump(mode="json"))
+    account, _ = await PointsAccountService.ensure_user_account(session, user.id)
+    return response(data=_build_profile(user, account).model_dump(mode="json"))
 
 
 @router.put("/profile", summary="更新用户信息")
@@ -116,8 +120,8 @@ async def update_profile(
     import datetime
     user.updated_at = datetime.datetime.utcnow()
     await session.flush()
-
-    return response(data=_build_profile(user).model_dump(mode="json"), msg="更新成功")
+    account, _ = await PointsAccountService.ensure_user_account(session, user.id)
+    return response(data=_build_profile(user, account).model_dump(mode="json"), msg="????")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -135,7 +139,7 @@ async def upload_image(file: UploadFile):
 #  工具函数
 # ═══════════════════════════════════════════════════════════════
 
-def _build_profile(user: User) -> UserProfile:
+def _build_profile(user: User, account: UserAccount) -> UserProfile:
     """从 User 模型构建响应对象"""
     return UserProfile(
         id=str(user.id),
@@ -152,6 +156,12 @@ def _build_profile(user: User) -> UserProfile:
         invite_count=user.invite_count,
         team_count=user.team_count,
         created_at=user.created_at,
+        account=CheckinAccountSummary(
+            total_points=int(account.total_points),
+            withdrawable_points=int(account.withdrawable_points),
+            frozen_points=int(account.frozen_points),
+            consumable_points=int(account.consumable_points),
+        ),
     )
 
 
