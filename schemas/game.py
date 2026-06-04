@@ -25,6 +25,17 @@ class GameTaskStatusResponse(BaseModel):
     games: list[GameTaskItem] = Field(default_factory=list)
 
 
+class GameAdSlotResponse(BaseModel):
+    available: bool = False
+    scene: str
+    ad_event_id: str | None = None
+    ad_unit_id: str | None = None
+    ad_code: str | None = None
+    message: str | None = None
+    daily_user_show_limit: int | None = None
+    daily_user_complete_limit: int | None = None
+
+
 class GameRoundCompleteRequest(BaseModel):
     game_code: str
     round_id: str

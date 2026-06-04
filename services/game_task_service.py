@@ -150,6 +150,8 @@ class GameTaskService:
             raise ValueError("round_id is required")
         if not normalized_ad_event_id:
             raise ValueError("ad_event_id is required")
+        if f":{normalized_round_id}:" not in normalized_ad_event_id:
+            raise RuntimeError("ad event does not match game round")
 
         round_record = await _get_game_round(session, normalized_round_id)
         if not round_record or round_record.user_id != user.id:
@@ -277,12 +279,15 @@ async def _get_game_round(session: AsyncSession, round_id: str) -> GameRound | N
 
 
 async def _get_completed_ad_event(session: AsyncSession, user_id, ad_event_id: str) -> AdEventRecord | None:
+    scene_prefix = ad_event_id.split(":", 1)[0].strip().lower()
+    allowed_scenes = {"game_bonus", "game_jump"}
+    scene_name = scene_prefix if scene_prefix in allowed_scenes else "game_bonus"
     stmt = (
         select(AdEventRecord)
         .where(
             AdEventRecord.user_id == user_id,
             AdEventRecord.event_id == ad_event_id,
-            AdEventRecord.scene == "game_jump",
+            AdEventRecord.scene == scene_name,
             ((AdEventRecord.event_type == "complete") | (AdEventRecord.is_completed.is_(True))),
         )
         .order_by(desc(AdEventRecord.created_at))
