@@ -13,6 +13,11 @@ from core.response import response
 from jwt_create import get_current_user
 from models.base import get_session, get_session_ctx
 from models.user import User
+from schemas.points import (
+    PointsWithdrawalApplyRequest,
+    PointsWithdrawalApplyResponse,
+    PointsWithdrawalSummaryResponse,
+)
 from schemas.user import PaginatedResponse, WithdrawalApplyRequest, WithdrawalConfigResponse
 from services.config_service import ConfigService
 from services.withdrawal_service import PENDING_TRANSFER_STATES, WithdrawalService
@@ -65,6 +70,57 @@ async def apply_withdrawal(
             "created_at": record.created_at.isoformat() if record.created_at else None,
         },
         msg="withdrawal submitted",
+    )
+
+
+@router.get("/points/summary", summary="points withdrawal summary")
+async def get_points_withdrawal_summary(
+    openid: str = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    result = await session.execute(select(User).where(User.openid == openid))
+    user = result.scalar_one_or_none()
+    if not user:
+        return response([], 404, "user not found")
+
+    payload = await WithdrawalService.get_points_withdrawal_summary(session, user.id)
+    return response(data=PointsWithdrawalSummaryResponse(**payload).model_dump(mode="json"))
+
+
+@router.post("/points/apply", summary="apply points withdrawal")
+async def apply_points_withdrawal(
+    req: PointsWithdrawalApplyRequest,
+    request: Request,
+    openid: str = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    result = await session.execute(select(User).where(User.openid == openid))
+    user = result.scalar_one_or_none()
+    if not user:
+        return response([], 404, "user not found")
+
+    record, account, error = await WithdrawalService.apply_points_withdrawal(
+        session,
+        user.id,
+        req.points_amount,
+        openid=openid,
+        ip=request.client.host if request.client else None,
+    )
+    if error or not record or not account:
+        return response([], 400, error or "withdrawal failed")
+
+    return response(
+        data=PointsWithdrawalApplyResponse(
+            record_id=str(record.id),
+            points_amount=req.points_amount,
+            amount=float(record.amount),
+            status=record.status,
+            batch_no=record.batch_no,
+            transfer_bill_no=record.transfer_bill_no or "",
+            created_at=record.created_at.isoformat() if record.created_at else None,
+            account=account,
+        ).model_dump(mode="json"),
+        msg="points withdrawal submitted",
     )
 
 

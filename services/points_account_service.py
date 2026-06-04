@@ -95,3 +95,135 @@ class PointsAccountService:
         session.add(ledger)
         await session.flush()
         return ledger, account, True
+
+    @staticmethod
+    async def move_withdrawable_to_locked(
+        session: AsyncSession,
+        user_id: UUID,
+        points: int,
+        idempotency_key: str,
+        related_type: str,
+        related_id: str,
+        remark: str | None = None,
+    ) -> Tuple[PointsLedger, UserAccount, bool]:
+        existing = await PointsAccountService.get_ledger_by_idempotency_key(session, idempotency_key)
+        account, _ = await PointsAccountService.ensure_user_account(session, user_id)
+        if existing:
+            return existing, account, False
+
+        delta = int(points)
+        if delta <= 0:
+            raise ValueError("points must be positive")
+        if int(account.withdrawable_points) < delta:
+            raise ValueError("insufficient withdrawable points")
+
+        account.withdrawable_points -= delta
+        account.locked_withdraw_points += delta
+        account.updated_at = datetime.utcnow()
+
+        ledger = PointsLedger(
+            user_id=user_id,
+            account_id=account.id,
+            change_type="withdraw_lock",
+            source="withdraw",
+            availability="withdrawable",
+            points_delta=-delta,
+            balance_withdrawable_after=int(account.withdrawable_points),
+            balance_frozen_after=int(account.frozen_points),
+            balance_consumable_after=int(account.consumable_points),
+            related_type=related_type,
+            related_id=related_id,
+            idempotency_key=idempotency_key,
+            remark=remark,
+        )
+        session.add(ledger)
+        await session.flush()
+        return ledger, account, True
+
+    @staticmethod
+    async def settle_locked_withdrawal(
+        session: AsyncSession,
+        user_id: UUID,
+        points: int,
+        idempotency_key: str,
+        related_type: str,
+        related_id: str,
+        remark: str | None = None,
+    ) -> Tuple[PointsLedger, UserAccount, bool]:
+        existing = await PointsAccountService.get_ledger_by_idempotency_key(session, idempotency_key)
+        account, _ = await PointsAccountService.ensure_user_account(session, user_id)
+        if existing:
+            return existing, account, False
+
+        delta = int(points)
+        if delta <= 0:
+            raise ValueError("points must be positive")
+        if int(account.locked_withdraw_points) < delta:
+            raise ValueError("insufficient locked withdraw points")
+
+        account.locked_withdraw_points -= delta
+        account.withdrawn_points += delta
+        account.updated_at = datetime.utcnow()
+
+        ledger = PointsLedger(
+            user_id=user_id,
+            account_id=account.id,
+            change_type="withdraw_success",
+            source="withdraw",
+            availability="withdrawable",
+            points_delta=-delta,
+            balance_withdrawable_after=int(account.withdrawable_points),
+            balance_frozen_after=int(account.frozen_points),
+            balance_consumable_after=int(account.consumable_points),
+            related_type=related_type,
+            related_id=related_id,
+            idempotency_key=idempotency_key,
+            remark=remark,
+        )
+        session.add(ledger)
+        await session.flush()
+        return ledger, account, True
+
+    @staticmethod
+    async def return_locked_withdrawal(
+        session: AsyncSession,
+        user_id: UUID,
+        points: int,
+        idempotency_key: str,
+        related_type: str,
+        related_id: str,
+        remark: str | None = None,
+    ) -> Tuple[PointsLedger, UserAccount, bool]:
+        existing = await PointsAccountService.get_ledger_by_idempotency_key(session, idempotency_key)
+        account, _ = await PointsAccountService.ensure_user_account(session, user_id)
+        if existing:
+            return existing, account, False
+
+        delta = int(points)
+        if delta <= 0:
+            raise ValueError("points must be positive")
+        if int(account.locked_withdraw_points) < delta:
+            raise ValueError("insufficient locked withdraw points")
+
+        account.locked_withdraw_points -= delta
+        account.withdrawable_points += delta
+        account.updated_at = datetime.utcnow()
+
+        ledger = PointsLedger(
+            user_id=user_id,
+            account_id=account.id,
+            change_type="withdraw_reject_return",
+            source="withdraw",
+            availability="withdrawable",
+            points_delta=delta,
+            balance_withdrawable_after=int(account.withdrawable_points),
+            balance_frozen_after=int(account.frozen_points),
+            balance_consumable_after=int(account.consumable_points),
+            related_type=related_type,
+            related_id=related_id,
+            idempotency_key=idempotency_key,
+            remark=remark,
+        )
+        session.add(ledger)
+        await session.flush()
+        return ledger, account, True

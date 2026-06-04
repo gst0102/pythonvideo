@@ -8,6 +8,7 @@ This keeps the state flow consistent across:
 """
 
 import logging
+import math
 import os
 import random
 import string
@@ -21,9 +22,11 @@ from sqlmodel import and_, func, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from core.wepay import WeChatPayV3
+from models.points_ledger import PointsLedger
 from models.user import User
 from models.withdrawal import WithdrawalRecord
 from services.config_service import ConfigService
+from services.points_account_service import PointsAccountService
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -48,6 +51,152 @@ def _get_wx_pay() -> WeChatPayV3:
 
 
 class WithdrawalService:
+    @staticmethod
+    async def get_points_withdrawal_summary(
+        session: AsyncSession,
+        user_id: UUID,
+    ) -> dict:
+        user = await session.get(User, user_id)
+        if not user:
+            return {}
+
+        account, _ = await PointsAccountService.ensure_user_account(session, user_id)
+        withdrawal_config = await ConfigService.get_withdrawal_config(session)
+        points_config = await ConfigService.get(session, "stage2_points_config")
+        exchange_rate = _get_points_exchange_rate(points_config)
+        min_amount = await _get_points_min_withdraw_amount(session, user, withdrawal_config)
+        max_amount = round(float(withdrawal_config.get("max_amount", 200.00)), 2)
+
+        return {
+            "exchange_rate": exchange_rate,
+            "withdrawable_points": int(account.withdrawable_points),
+            "withdrawable_amount": round(int(account.withdrawable_points) / exchange_rate, 2),
+            "min_withdraw_amount": min_amount,
+            "min_withdraw_points": _amount_to_points(min_amount, exchange_rate),
+            "max_withdraw_amount": max_amount,
+            "max_withdraw_points": _amount_to_points(max_amount, exchange_rate),
+            "is_first_withdraw": await _is_first_withdraw(session, user_id),
+            "is_member": bool(user.is_vip),
+            "tips": str(withdrawal_config.get("tips", "")),
+            "account": _account_summary(account),
+        }
+
+    @staticmethod
+    async def apply_points_withdrawal(
+        session: AsyncSession,
+        user_id: UUID,
+        points_amount: int,
+        ip: Optional[str] = None,
+        openid: Optional[str] = None,
+    ) -> Tuple[Optional[WithdrawalRecord], Optional[dict], Optional[str]]:
+        points_amount = int(points_amount)
+        if points_amount <= 0:
+            return None, None, "points_amount must be positive"
+
+        transfer_notify_url = _get_transfer_notify_url()
+        if not transfer_notify_url:
+            return None, None, "WECHAT_TRANSFER_NOTIFY_URL is not configured"
+
+        config = await ConfigService.get_withdrawal_config(session)
+        if not config.get("enabled", True):
+            return None, None, "withdrawal is disabled"
+
+        user = await session.get(User, user_id)
+        if not user:
+            return None, None, "user not found"
+
+        points_config = await ConfigService.get(session, "stage2_points_config")
+        exchange_rate = _get_points_exchange_rate(points_config)
+        amount = round(points_amount / exchange_rate, 2)
+        min_amount = await _get_points_min_withdraw_amount(session, user, config)
+        max_amount = round(float(config.get("max_amount", 200.00)), 2)
+        daily_limit = round(float(config.get("daily_limit", 100.00)), 2)
+        min_points = _amount_to_points(min_amount, exchange_rate)
+        max_points = _amount_to_points(max_amount, exchange_rate)
+
+        if points_amount < min_points:
+            return None, None, f"minimum withdrawal points is {min_points}"
+        if points_amount > max_points:
+            return None, None, f"maximum withdrawal points is {max_points}"
+
+        today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        daily_result = await session.execute(
+            select(func.coalesce(func.sum(WithdrawalRecord.amount), 0)).where(
+                and_(
+                    WithdrawalRecord.user_id == user_id,
+                    WithdrawalRecord.created_at >= today_start,
+                    WithdrawalRecord.status.in_(["processing", "success"]),
+                )
+            )
+        )
+        daily_total = round(float(daily_result.scalar() or 0), 2)
+        if daily_total + amount > daily_limit:
+            return None, None, f"daily limit exceeded, current total {daily_total:.2f}"
+
+        pending_result = await session.execute(
+            select(WithdrawalRecord)
+            .where(
+                and_(
+                    WithdrawalRecord.user_id == user_id,
+                    WithdrawalRecord.status == "processing",
+                )
+            )
+            .order_by(WithdrawalRecord.created_at.desc())
+            .limit(1)
+        )
+        if pending_result.scalar_one_or_none():
+            return None, None, "existing withdrawal is processing"
+
+        account, _ = await PointsAccountService.ensure_user_account(session, user_id)
+        if int(account.withdrawable_points) < points_amount:
+            return None, None, f"insufficient withdrawable points: {int(account.withdrawable_points)}"
+
+        record = WithdrawalRecord(
+            user_id=user_id,
+            amount=amount,
+            status="processing",
+            batch_no=_generate_batch_no(),
+            ip=ip,
+        )
+        session.add(record)
+        await session.flush()
+
+        related_id = str(record.id)
+        try:
+            _, account, _ = await PointsAccountService.move_withdrawable_to_locked(
+                session=session,
+                user_id=user_id,
+                points=points_amount,
+                idempotency_key=f"withdraw_lock:{related_id}",
+                related_type="withdraw_record",
+                related_id=related_id,
+                remark=f"withdrawal apply {amount:.2f}",
+            )
+        except ValueError as exc:
+            record.status = "failed"
+            record.fail_reason = str(exc)
+            record.completed_at = datetime.utcnow()
+            record.updated_at = datetime.utcnow()
+            await session.flush()
+            return None, None, str(exc)
+
+        target_openid = openid or user.openid
+        if not target_openid:
+            await _rollback_points_withdrawal(session, record, points_amount, "missing_openid")
+            return None, None, "missing openid"
+
+        submitted_record, error = await WithdrawalService.submit_processing_withdrawal(
+            session,
+            record.id,
+            openid=target_openid,
+        )
+        if error:
+            await _rollback_points_withdrawal(session, record, points_amount, error)
+            return None, None, error
+
+        latest_account, _ = await PointsAccountService.ensure_user_account(session, user_id)
+        return submitted_record, _account_summary(latest_account), None
+
     @staticmethod
     async def apply_withdrawal(
         session: AsyncSession,
@@ -229,7 +378,19 @@ class WithdrawalService:
         user = await session.get(User, record.user_id)
         if user:
             amount = float(record.amount)
-            user.frozen_balance = round(float(user.frozen_balance) - amount, 2)
+            points_amount = await _get_points_withdrawal_amount(session, record)
+            if points_amount:
+                await PointsAccountService.settle_locked_withdrawal(
+                    session=session,
+                    user_id=record.user_id,
+                    points=points_amount,
+                    idempotency_key=f"withdraw_success:{record.id}",
+                    related_type="withdraw_record",
+                    related_id=str(record.id),
+                    remark=f"withdrawal success {amount:.2f}",
+                )
+            else:
+                user.frozen_balance = round(float(user.frozen_balance) - amount, 2)
             user.total_withdrawn = round(float(user.total_withdrawn) + amount, 2)
             user.updated_at = datetime.utcnow()
         return True
@@ -255,8 +416,20 @@ class WithdrawalService:
         user = await session.get(User, record.user_id)
         if user:
             amount = float(record.amount)
-            user.balance = round(float(user.balance) + amount, 2)
-            user.frozen_balance = round(float(user.frozen_balance) - amount, 2)
+            points_amount = await _get_points_withdrawal_amount(session, record)
+            if points_amount:
+                await PointsAccountService.return_locked_withdrawal(
+                    session=session,
+                    user_id=record.user_id,
+                    points=points_amount,
+                    idempotency_key=f"withdraw_reject:{record.id}",
+                    related_type="withdraw_record",
+                    related_id=str(record.id),
+                    remark=f"withdrawal returned: {reason}",
+                )
+            else:
+                user.balance = round(float(user.balance) + amount, 2)
+                user.frozen_balance = round(float(user.frozen_balance) - amount, 2)
             user.updated_at = datetime.utcnow()
         return True
 
@@ -268,10 +441,6 @@ class WithdrawalService:
         user = await session.get(User, user_id)
         if not user:
             return 0, [], "user not found"
-
-        frozen = round(float(user.frozen_balance), 2)
-        if frozen <= 0:
-            return 0, [], None
 
         result = await session.execute(
             select(WithdrawalRecord).where(
@@ -294,8 +463,20 @@ class WithdrawalService:
                     continue
 
                 amount = float(record.amount)
-                user.balance = round(float(user.balance) + amount, 2)
-                user.frozen_balance = round(float(user.frozen_balance) - amount, 2)
+                points_amount = await _get_points_withdrawal_amount(session, record)
+                if points_amount:
+                    await PointsAccountService.return_locked_withdrawal(
+                        session=session,
+                        user_id=record.user_id,
+                        points=points_amount,
+                        idempotency_key=f"withdraw_reject:{record.id}",
+                        related_type="withdraw_record",
+                        related_id=str(record.id),
+                        remark="withdrawal returned: timeout_auto_release",
+                    )
+                else:
+                    user.balance = round(float(user.balance) + amount, 2)
+                    user.frozen_balance = round(float(user.frozen_balance) - amount, 2)
                 record.status = "failed"
                 record.fail_reason = "timeout_auto_release"
                 record.completed_at = datetime.utcnow()
@@ -309,6 +490,10 @@ class WithdrawalService:
                 return round(total_cleared, 2), cleared_batch_nos, None
 
             return 0, [], f"{len(pending_records)} processing withdrawals are still within 24 hours"
+
+        frozen = round(float(user.frozen_balance), 2)
+        if frozen <= 0:
+            return 0, [], None
 
         user.balance = round(float(user.balance) + frozen, 2)
         user.frozen_balance = 0
@@ -360,4 +545,89 @@ async def _rollback_balance(
     record.completed_at = datetime.utcnow()
     record.updated_at = datetime.utcnow()
 
+    await session.flush()
+
+
+def _get_points_exchange_rate(config: dict) -> int:
+    value = config.get("exchange_rate") or config.get("points_exchange_rate") or 100
+    return max(int(value or 100), 1)
+
+
+def _amount_to_points(amount: float, exchange_rate: int) -> int:
+    return int(math.ceil(round(float(amount), 2) * exchange_rate))
+
+
+async def _is_first_withdraw(session: AsyncSession, user_id: UUID) -> bool:
+    result = await session.execute(
+        select(func.count())
+        .select_from(WithdrawalRecord)
+        .where(
+            and_(
+                WithdrawalRecord.user_id == user_id,
+                WithdrawalRecord.status == "success",
+            )
+        )
+    )
+    return int(result.scalar() or 0) == 0
+
+
+async def _get_points_min_withdraw_amount(
+    session: AsyncSession,
+    user: User,
+    config: dict,
+) -> float:
+    if await _is_first_withdraw(session, user.id):
+        return round(float(config.get("withdraw_min_first", config.get("min_first_amount", 1.00))), 2)
+    if user.is_vip:
+        return round(float(config.get("withdraw_min_member", config.get("min_member_amount", 1.00))), 2)
+    return round(float(config.get("withdraw_min_normal", config.get("min_amount", 5.00))), 2)
+
+
+def _account_summary(account) -> dict:
+    return {
+        "total_points": int(account.total_points),
+        "withdrawable_points": int(account.withdrawable_points),
+        "frozen_points": int(account.frozen_points),
+        "consumable_points": int(account.consumable_points),
+        "locked_withdraw_points": int(account.locked_withdraw_points),
+        "withdrawn_points": int(account.withdrawn_points),
+    }
+
+
+async def _get_points_withdrawal_amount(
+    session: AsyncSession,
+    record: WithdrawalRecord,
+) -> int:
+    result = await session.execute(
+        select(PointsLedger).where(
+            and_(
+                PointsLedger.related_type == "withdraw_record",
+                PointsLedger.related_id == str(record.id),
+                PointsLedger.change_type == "withdraw_lock",
+            )
+        )
+    )
+    ledger = result.scalar_one_or_none()
+    return abs(int(ledger.points_delta)) if ledger else 0
+
+
+async def _rollback_points_withdrawal(
+    session: AsyncSession,
+    record: WithdrawalRecord,
+    points_amount: int,
+    reason: str,
+) -> None:
+    record.status = "failed"
+    record.fail_reason = reason
+    record.completed_at = datetime.utcnow()
+    record.updated_at = datetime.utcnow()
+    await PointsAccountService.return_locked_withdrawal(
+        session=session,
+        user_id=record.user_id,
+        points=points_amount,
+        idempotency_key=f"withdraw_reject:{record.id}",
+        related_type="withdraw_record",
+        related_id=str(record.id),
+        remark=f"withdrawal returned: {reason}",
+    )
     await session.flush()
