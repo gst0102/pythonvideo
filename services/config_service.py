@@ -18,6 +18,9 @@ VIP_TEST_MODE = os.getenv("VIP_TEST_MODE", "false").lower() == "true"
 VIP_MONTHLY_PRICE = float(os.getenv("VIP_MONTHLY_PRICE", "9.90"))
 VIP_QUARTERLY_PRICE = float(os.getenv("VIP_QUARTERLY_PRICE", "26.90"))
 VIP_YEARLY_PRICE = float(os.getenv("VIP_YEARLY_PRICE", "88.80"))
+VIP_PACKAGE_GIFT_POINTS = {"month": 199, "quarter": 599, "year": 1299}
+VIP_PACKAGE_DAILY_LIMITS = {"month": 100, "quarter": 150, "year": 200}
+VIP_PACKAGE_WITHDRAW_MIN_AMOUNT = 1.00
 
 DEFAULT_CONFIGS: Dict[str, Dict[str, Any]] = {
     "vip_settings": {
@@ -36,6 +39,9 @@ DEFAULT_CONFIGS: Dict[str, Dict[str, Any]] = {
                 "price": VIP_MONTHLY_PRICE if VIP_TEST_MODE else 9.90,
                 "original_price": 0.50 if VIP_TEST_MODE else 19.90,
                 "duration_days": 30,
+                "gift_points": VIP_PACKAGE_GIFT_POINTS["month"],
+                "daily_game_task_limit": VIP_PACKAGE_DAILY_LIMITS["month"],
+                "withdraw_min_amount": VIP_PACKAGE_WITHDRAW_MIN_AMOUNT,
                 "benefits": ["免广告", "专属客服", "高清画质"],
             },
             {
@@ -44,6 +50,9 @@ DEFAULT_CONFIGS: Dict[str, Dict[str, Any]] = {
                 "price": VIP_QUARTERLY_PRICE if VIP_TEST_MODE else 26.90,
                 "original_price": 1.00 if VIP_TEST_MODE else 59.70,
                 "duration_days": 90,
+                "gift_points": VIP_PACKAGE_GIFT_POINTS["quarter"],
+                "daily_game_task_limit": VIP_PACKAGE_DAILY_LIMITS["quarter"],
+                "withdraw_min_amount": VIP_PACKAGE_WITHDRAW_MIN_AMOUNT,
                 "benefits": ["免广告", "专属客服", "高清画质", "优先处理"],
             },
             {
@@ -52,6 +61,9 @@ DEFAULT_CONFIGS: Dict[str, Dict[str, Any]] = {
                 "price": VIP_YEARLY_PRICE if VIP_TEST_MODE else 88.80,
                 "original_price": 2.00 if VIP_TEST_MODE else 238.80,
                 "duration_days": 365,
+                "gift_points": VIP_PACKAGE_GIFT_POINTS["year"],
+                "daily_game_task_limit": VIP_PACKAGE_DAILY_LIMITS["year"],
+                "withdraw_min_amount": VIP_PACKAGE_WITHDRAW_MIN_AMOUNT,
                 "benefits": ["全部权益", "年度优惠", "专属客服", "专属标识"],
             },
         ],
@@ -146,6 +158,14 @@ class ConfigService:
 def _normalize_vip_settings(config: Dict[str, Any]) -> Dict[str, Any]:
     normalized = dict(config or {})
     if normalized.get("packages"):
+        normalized["enabled"] = normalized.get("enabled", True)
+        normalized["page_title"] = normalized.get("page_title", DEFAULT_CONFIGS["vip_settings"].get("page_title"))
+        normalized["page_subtitle"] = normalized.get(
+            "page_subtitle",
+            DEFAULT_CONFIGS["vip_settings"].get("page_subtitle"),
+        )
+        normalized["order_title"] = normalized.get("order_title", DEFAULT_CONFIGS["vip_settings"].get("order_title"))
+        normalized["packages"] = [_enrich_vip_package(pkg) for pkg in normalized["packages"]]
         return normalized
 
     month_price = float(normalized.get("month_price", VIP_MONTHLY_PRICE))
@@ -167,6 +187,9 @@ def _normalize_vip_settings(config: Dict[str, Any]) -> Dict[str, Any]:
             "price": month_price,
             "original_price": float(normalized.get("month_original_price", month_price)),
             "duration_days": 30,
+            "gift_points": VIP_PACKAGE_GIFT_POINTS["month"],
+            "daily_game_task_limit": VIP_PACKAGE_DAILY_LIMITS["month"],
+            "withdraw_min_amount": VIP_PACKAGE_WITHDRAW_MIN_AMOUNT,
             "benefits": ["免广告", "专属客服", "高清画质"],
         },
         {
@@ -175,6 +198,9 @@ def _normalize_vip_settings(config: Dict[str, Any]) -> Dict[str, Any]:
             "price": quarter_price,
             "original_price": float(normalized.get("quarter_original_price", quarter_price)),
             "duration_days": 90,
+            "gift_points": VIP_PACKAGE_GIFT_POINTS["quarter"],
+            "daily_game_task_limit": VIP_PACKAGE_DAILY_LIMITS["quarter"],
+            "withdraw_min_amount": VIP_PACKAGE_WITHDRAW_MIN_AMOUNT,
             "benefits": ["免广告", "专属客服", "高清画质", "优先处理"],
         },
         {
@@ -183,7 +209,27 @@ def _normalize_vip_settings(config: Dict[str, Any]) -> Dict[str, Any]:
             "price": year_price,
             "original_price": float(normalized.get("year_original_price", year_price)),
             "duration_days": 365,
+            "gift_points": VIP_PACKAGE_GIFT_POINTS["year"],
+            "daily_game_task_limit": VIP_PACKAGE_DAILY_LIMITS["year"],
+            "withdraw_min_amount": VIP_PACKAGE_WITHDRAW_MIN_AMOUNT,
             "benefits": ["全部权益", "年度优惠", "专属客服", "专属标识"],
         },
     ]
     return normalized
+
+
+def _enrich_vip_package(package: Dict[str, Any]) -> Dict[str, Any]:
+    enriched = dict(package or {})
+    package_id = str(enriched.get("id") or "month").strip().lower()
+    if package_id not in VIP_PACKAGE_GIFT_POINTS:
+        package_id = "month"
+
+    enriched["gift_points"] = int(enriched.get("gift_points") or VIP_PACKAGE_GIFT_POINTS[package_id])
+    enriched["daily_game_task_limit"] = int(
+        enriched.get("daily_game_task_limit") or VIP_PACKAGE_DAILY_LIMITS[package_id]
+    )
+    enriched["withdraw_min_amount"] = round(
+        float(enriched.get("withdraw_min_amount") or VIP_PACKAGE_WITHDRAW_MIN_AMOUNT),
+        2,
+    )
+    return enriched

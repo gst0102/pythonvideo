@@ -10,6 +10,8 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from models.commission import CommissionRecord
 from models.order import Order
 from models.user import User
+from services.config_service import ConfigService
+from services.points_account_service import PointsAccountService
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +47,7 @@ class PaymentService:
         await session.flush()
 
         await _activate_vip(session, order.user_id, order.period, order.duration_days)
+        await _grant_vip_gift_points(session, order)
         await _calculate_commission(session, order)
         return True
 
@@ -96,6 +99,36 @@ async def _calculate_commission(session: AsyncSession, order: Order) -> None:
             round(amount * COMMISSION_LEVEL2_RATE, 2),
             2,
         )
+
+
+async def _grant_vip_gift_points(session: AsyncSession, order: Order) -> None:
+    package = await _get_vip_package(session, order.period)
+    gift_points = int(package.get("gift_points") or 0)
+    if gift_points <= 0:
+        return
+
+    await PointsAccountService.add_points(
+        session=session,
+        user_id=order.user_id,
+        points=gift_points,
+        source="vip",
+        change_type="vip_gift",
+        availability="withdrawable",
+        idempotency_key=f"vip_gift:{order.id}",
+        related_type="order",
+        related_id=str(order.id),
+        remark=f"vip gift points: {order.period}",
+    )
+
+
+async def _get_vip_package(session: AsyncSession, period: str) -> dict:
+    config = await ConfigService.get_vip_packages(session)
+    packages = config.get("packages") or []
+    normalized_period = str(period or "month").strip().lower()
+    for package in packages:
+        if str(package.get("id") or "").strip().lower() == normalized_period:
+            return package
+    return {"gift_points": 0}
 
 
 async def _create_commission_record(
