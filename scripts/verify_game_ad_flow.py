@@ -110,8 +110,17 @@ async def verify() -> None:
             session.add(user)
             await session.flush()
 
+            bonus_user = User(
+                openid=f"{marker}-bonus",
+                nickname="Stage2 Game Bonus Verify",
+                avatar="",
+                invite_code=f"{marker}bn"[-10:],
+            )
+            session.add(bonus_user)
+            await session.flush()
+
             await _verify_slot_rotation(session, user, marker)
-            await _verify_ad_bonus_idempotency(session, user, marker)
+            await _verify_ad_bonus_idempotency(session, bonus_user, marker)
 
             print("Game ad flow verification passed")
             print("checks=rotation, exhaustion, ad_event_id idempotency, round idempotency")
@@ -185,7 +194,7 @@ async def _verify_ad_bonus_idempotency(session, user: User, marker: str) -> None
         ad_event_id=str(slot["ad_event_id"]),
     )
     _assert_equal("same ad_event_id rewarded once", second_rewarded, False)
-    _assert_equal("same ad_event_id bonus points", int(second_payload["points_added"]), 0)
+    _assert_equal("same ad_event_id keeps original bonus points", int(second_payload["points_added"]), first_bonus)
 
     next_slot = await GameAdService.select_available_slot(session, user, round_id=round_id)
     await _record_complete_event(
