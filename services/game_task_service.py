@@ -43,14 +43,17 @@ class GameTaskService:
         today = datetime.utcnow().date()
         account, _ = await PointsAccountService.ensure_user_account(session, user.id)
         stat = await _get_or_create_daily_task_stat(session, user, today)
+        today_estimated_points = await _get_today_estimated_points(session, user.id, today)
 
         return {
             "today": today,
-            "today_points": int(stat.today_points),
+            "today_points": int(today_estimated_points),
+            "today_estimated_points": int(today_estimated_points),
             "today_used": int(stat.game_tasks_used),
             "today_limit": int(stat.game_tasks_limit),
             "today_remaining": max(int(stat.game_tasks_limit) - int(stat.game_tasks_used), 0),
             "member_bonus_enabled": bool(user.is_vip),
+            "reward_notice": "小游戏积分为预估积分，完整观看广告后领取，次日下午结算。",
             "account": _build_account_summary(account),
             "games": [
                 {
@@ -100,20 +103,6 @@ class GameTaskService:
 
         base_points = _resolve_base_points(points_config, normalized_result)
         bonus_points = 0
-        total_points = base_points
-
-        ledger, account, _ = await PointsAccountService.add_points(
-            session=session,
-            user_id=user.id,
-            points=total_points,
-            source="game_task",
-            change_type="earn",
-            availability="withdrawable",
-            idempotency_key=f"game_task:{user.id}:{round_id}",
-            related_type="game_round",
-            related_id=round_id,
-            remark=f"{normalized_game_code} reward",
-        )
 
         round_record = GameRound(
             user_id=user.id,
@@ -122,20 +111,19 @@ class GameTaskService:
             result=normalized_result,
             base_points=base_points,
             bonus_points=bonus_points,
-            total_points=total_points,
+            total_points=0,
             ad_event_id=None,
-            status="completed",
-            ledger_id=ledger.id,
+            status="pending_ad" if base_points > 0 else "completed_no_reward",
+            ledger_id=None,
             played_date=today,
         )
         session.add(round_record)
 
         stat.game_tasks_used += 1
-        stat.today_points += total_points
         stat.updated_at = datetime.utcnow()
 
         await session.flush()
-        return _build_round_payload(account=account, stat=stat, round_record=round_record, ledger=ledger), True
+        return _build_round_payload(account=account, stat=stat, round_record=round_record, ledger=None), True
 
     @staticmethod
     async def claim_round_ad_bonus(
@@ -160,7 +148,6 @@ class GameTaskService:
 
         stat = await _get_or_create_daily_task_stat(session, user, datetime.utcnow().date())
         account, _ = await PointsAccountService.ensure_user_account(session, user.id)
-        points_config = await _get_points_config(session)
 
         existing_ledger = await PointsAccountService.get_ledger_by_idempotency_key(
             session,
@@ -176,7 +163,7 @@ class GameTaskService:
             )
             return payload, False
 
-        if int(round_record.bonus_points) > 0 or round_record.ad_event_id:
+        if int(round_record.total_points) > 0 or round_record.ad_event_id:
             payload = _build_round_ad_bonus_payload(
                 account=account,
                 stat=stat,
@@ -199,21 +186,28 @@ class GameTaskService:
             )
             return payload, False
 
-        bonus_points = _resolve_bonus_points(points_config, int(round_record.base_points), normalized_ad_event_id)
-        if bonus_points <= 0:
-            raise RuntimeError("ad bonus is disabled")
+        estimated_points = int(round_record.base_points)
+        if estimated_points <= 0:
+            payload = _build_round_ad_bonus_payload(
+                account=account,
+                stat=stat,
+                round_record=round_record,
+                ledger=None,
+                rewarded=False,
+            )
+            return payload, False
 
         ledger, account, created = await PointsAccountService.add_points(
             session=session,
             user_id=user.id,
-            points=bonus_points,
-            source="game_task",
-            change_type="ad_bonus",
-            availability="withdrawable",
+            points=estimated_points,
+            source="game",
+            change_type="estimated_earn",
+            availability="consumable",
             idempotency_key=_build_ad_bonus_idempotency_key(user.id, normalized_round_id, normalized_ad_event_id),
-            related_type="ad_event",
-            related_id=normalized_ad_event_id,
-            remark=f"{round_record.game_code} ad bonus",
+            related_type="game_round",
+            related_id=round_record.round_id,
+            remark=f"{round_record.game_code} estimated reward",
         )
         if not created:
             payload = _build_round_ad_bonus_payload(
@@ -225,12 +219,11 @@ class GameTaskService:
             )
             return payload, False
 
-        round_record.bonus_points = int(round_record.bonus_points) + bonus_points
-        round_record.total_points = int(round_record.total_points) + bonus_points
+        round_record.total_points = estimated_points
         round_record.ad_event_id = normalized_ad_event_id
+        round_record.ledger_id = ledger.id
+        round_record.status = "estimated_rewarded"
         round_record.updated_at = datetime.utcnow()
-
-        stat.today_points += bonus_points
         stat.updated_at = datetime.utcnow()
 
         session.add(
@@ -244,7 +237,7 @@ class GameTaskService:
                 ad_unit_id=completed_event.ad_unit_id,
                 event_type="reward",
                 is_completed=True,
-                reward_points=float(bonus_points),
+                reward_points=float(estimated_points),
                 reward_amount=0.0,
                 date_key=completed_event.date_key,
                 week_key=completed_event.week_key,
@@ -370,14 +363,25 @@ def _resolve_base_points(config: Dict[str, Any], result: str) -> int:
     max_points = int(config["game_base_points_max"])
     if result == "win":
         return max_points
-    return min_points
+    if result == "draw":
+        return min_points
+    return 0
 
 
-def _resolve_bonus_points(config: Dict[str, Any], base_points: int, ad_event_id: str | None) -> int:
-    if not ad_event_id:
-        return 0
-    multiplier = max(int(config.get("game_ad_multiplier", 2)), 1)
-    return base_points * (multiplier - 1)
+async def _get_today_estimated_points(session: AsyncSession, user_id, today) -> int:
+    start_at = datetime.combine(today, datetime.min.time())
+    end_at = datetime.combine(today, datetime.max.time())
+    stmt = select(PointsLedger).where(
+        PointsLedger.user_id == user_id,
+        PointsLedger.source == "game",
+        PointsLedger.availability == "consumable",
+        PointsLedger.related_type == "game_round",
+        PointsLedger.created_at >= start_at,
+        PointsLedger.created_at <= end_at,
+    )
+    result = await session.execute(stmt)
+    rows = result.scalars().all()
+    return sum(int(row.points_delta) for row in rows)
 
 
 def _build_ad_bonus_idempotency_key(user_id, round_id: str, ad_event_id: str) -> str:
@@ -407,14 +411,20 @@ def _build_round_payload(
     ledger: PointsLedger | None,
 ) -> Dict[str, Any]:
     remaining = max(int(stat.game_tasks_limit) - int(stat.game_tasks_used), 0)
+    estimated_points = int(round_record.base_points)
+    rewarded = bool(ledger or round_record.ledger_id or int(round_record.total_points) > 0)
     return {
         "success": True,
         "game_code": round_record.game_code,
         "round_id": round_record.round_id,
         "result": round_record.result,
-        "points_added": int(round_record.total_points),
-        "base_points": int(round_record.base_points),
+        "points_added": int(ledger.points_delta) if ledger else int(round_record.total_points),
+        "base_points": estimated_points,
         "bonus_points": int(round_record.bonus_points),
+        "estimated_points": estimated_points,
+        "ad_required": estimated_points > 0,
+        "rewarded": rewarded,
+        "today_points": int(account.consumable_points),
         "today_used": int(stat.game_tasks_used),
         "today_limit": int(stat.game_tasks_limit),
         "today_remaining": remaining,
@@ -441,7 +451,8 @@ def _build_round_ad_bonus_payload(
         "base_points": int(round_record.base_points),
         "bonus_points": int(round_record.bonus_points),
         "total_points": int(round_record.total_points),
-        "today_points": int(stat.today_points),
+        "today_points": int(account.consumable_points),
+        "today_estimated_points": int(account.consumable_points),
         "today_used": int(stat.game_tasks_used),
         "today_limit": int(stat.game_tasks_limit),
         "today_remaining": remaining,

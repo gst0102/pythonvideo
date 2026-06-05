@@ -17,10 +17,12 @@ class GameTaskItem(BaseModel):
 class GameTaskStatusResponse(BaseModel):
     today: date
     today_points: int = 0
+    today_estimated_points: int = 0
     today_used: int = 0
     today_limit: int = 0
     today_remaining: int = 0
     member_bonus_enabled: bool = False
+    reward_notice: str = ""
     account: CheckinAccountSummary
     games: list[GameTaskItem] = Field(default_factory=list)
 
@@ -58,6 +60,10 @@ class GameRoundCompleteResponse(BaseModel):
     points_added: int
     base_points: int
     bonus_points: int = 0
+    estimated_points: int = 0
+    ad_required: bool = False
+    rewarded: bool = False
+    today_points: int = 0
     today_used: int
     today_limit: int
     today_remaining: int
@@ -87,6 +93,7 @@ class GameRoundAdBonusResponse(BaseModel):
     bonus_points: int = 0
     total_points: int = 0
     today_points: int = 0
+    today_estimated_points: int = 0
     today_used: int = 0
     today_limit: int = 0
     today_remaining: int = 0
