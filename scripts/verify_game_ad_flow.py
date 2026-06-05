@@ -16,7 +16,7 @@ import argparse
 import asyncio
 import sys
 import uuid
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from sqlalchemy import inspect
@@ -273,7 +273,7 @@ async def _record_event(
             date_key=date_key,
             week_key=week_key,
             month_key=month_key,
-            created_at=datetime.now(UTC),
+            created_at=datetime.now(timezone.utc),
         )
     )
     await session.flush()

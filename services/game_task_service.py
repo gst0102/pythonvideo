@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime
 from typing import Any, Dict, Tuple
 
@@ -163,7 +164,7 @@ class GameTaskService:
 
         existing_ledger = await PointsAccountService.get_ledger_by_idempotency_key(
             session,
-            f"game_task_ad_bonus:{user.id}:{normalized_round_id}:{normalized_ad_event_id}",
+            _build_ad_bonus_idempotency_key(user.id, normalized_round_id, normalized_ad_event_id),
         )
         if existing_ledger:
             payload = _build_round_ad_bonus_payload(
@@ -209,7 +210,7 @@ class GameTaskService:
             source="game_task",
             change_type="ad_bonus",
             availability="withdrawable",
-            idempotency_key=f"game_task_ad_bonus:{user.id}:{normalized_round_id}:{normalized_ad_event_id}",
+            idempotency_key=_build_ad_bonus_idempotency_key(user.id, normalized_round_id, normalized_ad_event_id),
             related_type="ad_event",
             related_id=normalized_ad_event_id,
             remark=f"{round_record.game_code} ad bonus",
@@ -377,6 +378,12 @@ def _resolve_bonus_points(config: Dict[str, Any], base_points: int, ad_event_id:
         return 0
     multiplier = max(int(config.get("game_ad_multiplier", 2)), 1)
     return base_points * (multiplier - 1)
+
+
+def _build_ad_bonus_idempotency_key(user_id, round_id: str, ad_event_id: str) -> str:
+    raw = f"{user_id}:{round_id}:{ad_event_id}"
+    digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()
+    return f"game_task_ad_bonus:{digest}"
 
 
 def _build_points_range(config: Dict[str, Any]) -> str:
