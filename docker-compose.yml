@@ -11,6 +11,8 @@ services:
       args:
         UV_INDEX_URL: ${UV_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}
         PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}
+        PLAYWRIGHT_DOWNLOAD_HOST: ${PLAYWRIGHT_DOWNLOAD_HOST:-https://cdn.playwright.dev}
+        PLAYWRIGHT_DOWNLOAD_CONNECTION_TIMEOUT: ${PLAYWRIGHT_DOWNLOAD_CONNECTION_TIMEOUT:-1200000}
         APP_VERSION: ${APP_VERSION:-local}
         VCS_REF: ${VCS_REF:-local}
         BUILD_DATE: ${BUILD_DATE:-unknown}
