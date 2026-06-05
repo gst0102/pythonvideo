@@ -1,35 +1,53 @@
+# syntax=docker/dockerfile:1.7
+
 # ========================================
-# 阶段1: 构建依赖 (uv sync from lockfile)
+# Stage 1: build dependencies with uv lockfile
 # ========================================
 FROM python:3.10-slim-bookworm AS builder
+
+ARG UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     UV_COMPILE_BYTECODE=1 \
-    UV_LINK_MODE=copy
+    UV_LINK_MODE=copy \
+    UV_INDEX_URL=${UV_INDEX_URL} \
+    PIP_INDEX_URL=${PIP_INDEX_URL}
 
 WORKDIR /build
 
-# 清华 APT 镜像源（加速 ffmpeg 等包下载）
+# Speed up Debian package downloads for China-based hosts.
 RUN sed -i 's|http://deb.debian.org|http://mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list.d/debian.sources
 
-# 安装编译工具 + uv
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential curl \
+    build-essential \
+    curl \
     && rm -rf /var/lib/apt/lists/* \
-    && pip install uv --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple/
+    && pip install uv --no-cache-dir -i "${PIP_INDEX_URL}"
 
-# 复制完整源码 — uv sync 安装项目 + 所有依赖（确保 uvicorn console script 正确创建）
+# Copy the lockfiles first so dependency resolution stays cached across code-only changes.
+COPY pyproject.toml uv.lock README.md ./
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev --no-install-project \
+    && /build/.venv/bin/python --version
+
 COPY . .
 
-RUN uv sync --frozen --no-dev \
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev \
     && /build/.venv/bin/uvicorn --version
 
 
 # ========================================
-# 阶段2: 生产镜像 (最小化)
+# Stage 2: runtime image
 # ========================================
-FROM python:3.10-slim-bookworm
+FROM python:3.10-slim-bookworm AS runtime
+
+ARG APP_VERSION=dev
+ARG VCS_REF=local
+ARG BUILD_DATE=unknown
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -37,11 +55,14 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# 清华 APT 镜像源
+LABEL org.opencontainers.image.title="pythonvideo-app" \
+      org.opencontainers.image.version="${APP_VERSION}" \
+      org.opencontainers.image.revision="${VCS_REF}" \
+      org.opencontainers.image.created="${BUILD_DATE}"
+
 RUN sed -i 's|http://deb.debian.org|http://mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list.d/debian.sources
 
-# 运行时系统依赖：ffmpeg + Playwright Chromium 运行库
-# 此层在 COPY . . 之前，代码变更不会导致重复下载
+# Runtime system packages for ffmpeg and Playwright Chromium.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     curl \
@@ -61,19 +82,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libcairo2 \
     && rm -rf /var/lib/apt/lists/*
 
-# 从构建阶段复制虚拟环境
 COPY --from=builder /build/.venv /app/.venv
 
-# uv 在 builder 的 /build 下生成 console scripts，复制到 /app 后需要修正 shebang。
+# Rewrite console-script shebangs after copying the venv from /build to /app.
 RUN find /app/.venv/bin -maxdepth 1 -type f -exec \
     sed -i '1s|^#!/build/.venv/bin/python.*$|#!/app/.venv/bin/python|' {} + \
     && /app/.venv/bin/uvicorn --version
 
-# 复制应用代码（此层及之后会因代码变更重新构建）
 COPY . .
 
-# 创建运行时目录 & 非 root 用户
-# 不依赖 useradd/passwd 包 — 直接写 /etc/passwd & /etc/group，任何 slim 镜像都可用
 RUN mkdir -p /app/image /app/downloads /app/logs /app/certs /home/appuser \
     && echo 'appuser:x:1000:1000::/home/appuser:/bin/sh' >> /etc/passwd \
     && echo 'appuser:x:1000:' >> /etc/group \
@@ -81,7 +98,6 @@ RUN mkdir -p /app/image /app/downloads /app/logs /app/certs /home/appuser \
 
 USER 1000:1000
 
-# 安装 Playwright Chromium 浏览器 (必须以 appuser 运行)
 RUN python -m playwright install chromium
 
 EXPOSE 8000

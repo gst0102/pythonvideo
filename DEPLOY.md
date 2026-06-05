@@ -1,134 +1,230 @@
-# 服务器部署操作指南
+# 部署说明
 
----
+最后更新：2026-06-05
 
-## 前置条件
+## 适用范围
 
-- 服务器 IP: `81.70.84.35`
-- SSH 用户: `root` 或 `ubuntu`
-- 项目路径: 假设放在 `/opt/video-service/`（按你实际情况调整）
+当前线上环境按以下信息为准：
 
----
+- 服务器 IP：`81.70.84.35`
+- SSH 用户：`ubuntu`
+- 后端目录：`/opt/pythonvideo`
+- PC 管理端目录：`/opt/pc-frontend`
+- 后端正式发布分支：`feature/yuexiang-stage2-mvp`
+- PC 管理端分支：`main`
 
-## 零、一次性配置：Docker Hub 镜像加速（仅需一次）
+如果历史文档与这里不一致，以服务器实际目录和当前仓库状态为准。
 
-```bash
-# 在服务器上执行，之后 docker pull 会走清华镜像
-sudo mkdir -p /etc/docker
-sudo tee /etc/docker/daemon.json <<'EOF'
-{
-  "registry-mirrors": ["https://docker.1ms.run"]
-}
-EOF
-sudo systemctl daemon-reload
-sudo systemctl restart docker
+## 当前部署原则
+
+后端从现在开始不再依赖“容器内热同步代码”作为常规发布手段。
+
+标准流程应为：
+
+1. 基于 Git 提交构建正式镜像
+2. 给镜像打明确 tag
+3. 生产环境只拉镜像并重建容器
+4. 发布后执行 Alembic 迁移和健康检查
+
+推荐镜像 tag 格式：
+
+```text
+pythonvideo-app:stage2-<git-sha>
 ```
 
-> `docker.1ms.run` 是目前可用的 Docker Hub 代理。如果挂了，换 `https://mirror.ccs.tencentyun.com`（腾讯云）、`https://hub-mirror.c.163.com`（网易）。
+例如：
 
----
-
-## 一、拉取最新代码
-
-```bash
-ssh root@81.70.84.35
-cd /opt/video-service
-git pull origin master
+```text
+pythonvideo-app:stage2-7070f9e
 ```
 
----
+## 本地 / 构建机构建
 
-## 二、确保 .env 配置正确
-
-`.env` 不会被 Git 跟踪，服务器上的 `.env` 不会受影响。确认以下变量存在且正确：
+进入仓库：
 
 ```bash
-vim /opt/video-service/.env
+cd /opt/pythonvideo
+git fetch origin
+git checkout feature/yuexiang-stage2-mvp
+git pull --ff-only origin feature/yuexiang-stage2-mvp
 ```
 
-**需确认的环境变量：**
-
-| 变量名 | 说明 | 服务器建议值 |
-|--------|------|-------------|
-| `DATABASE_URL` | PostgreSQL 连接 | `postgresql+asyncpg://postgres:你的密码@postgres:5432/agent` |
-| `REDIS_URL` | Redis 连接 | `redis://redis:6379/0` |
-| `NOTIFY_URL` | 微信支付回调 | `https://api.lifelove.top/wxpay/api/pay/notify` |
-| `DOMAIN` | 域名 | `api.lifelove.top` |
-| `CORS_ORIGINS` | 跨域白名单 | `https://api.lifelove.top,https://www.lifelove.top` |
-| `DB_ECHO` | SQL 调试 | `false` |
-| `DB_SSL_MODE` | SSL 模式 | `prefer` |
-| `DB_PASSWORD` | 数据库密码 | docker-compose.yml 引用此变量 |
-
-> **重要：`DATABASE_URL` 的 host 必须是 `postgres`（容器名），不是 `127.0.0.1`。**
-
----
-
-## 三、重建并重启（利用 Docker 层缓存，不动的不重下）
+设置本次镜像变量：
 
 ```bash
-cd /opt/video-service
+export APP_IMAGE=pythonvideo-app:stage2-7070f9e
+export APP_VERSION=stage2-7070f9e
+export VCS_REF=7070f9e
+export BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+export UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+export PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+```
 
-# 构建（不用 --no-cache，Docker 层缓存会复用未变更的层）
-# ffmpeg 层在 COPY . . 之前，代码改了也不重新下载
+构建镜像：
+
+```bash
 docker compose build app
-
-# 重启
-docker compose up -d
-
-# 看日志确认
-docker compose logs -f app --tail 50
+docker image inspect "$APP_IMAGE"
 ```
 
-**缓存解释：**
-
-```
-Dockerfile 层顺序          每次代码变更后？
-────────────────────────────────────────
-apt 镜像配置              ✅ 缓存复用（不重跑）
-ffmpeg + 系统库安装       ✅ 缓存复用（不重下）
-COPY --from=builder venv  ✅ 缓存复用（pyproject.toml 不变）
-COPY . .                  ❌ 代码变 → 此层及之后重新构建
-mkdir + useradd           重新跑（很快）
-playwright install        重新跑（但浏览器二进制在 Docker 层缓存里，增量下载）
-```
-
-> 只有 `pyproject.toml` / `uv.lock` 变了，uv sync 层才会重建。平时改代码只重建 COPY 之后的层。
-
-> 如果 `cookies.txt.dan` 在服务器上不存在，先在 `docker-compose.yml` 里注释对应行。
-
----
-
-## 四、数据库迁移（如有表结构变更）
+如果要推送到镜像仓库，先按团队实际仓库地址重新打 tag，例如：
 
 ```bash
-docker compose exec app alembic upgrade head
-docker compose exec app alembic current
+docker tag "$APP_IMAGE" registry.example.com/pythonvideo-app:stage2-7070f9e
+docker push registry.example.com/pythonvideo-app:stage2-7070f9e
 ```
 
----
+## 生产环境发布
 
-## 五、验证
+### 1. 登录并确认仓库状态
 
 ```bash
-curl http://localhost:8000/health
-# 应返回: {"status":"ok","message":"服务运行正常"}
+ssh ubuntu@81.70.84.35
+cd /opt/pythonvideo
+git status --short
+git branch --show-current
+git rev-parse --short HEAD
 ```
 
----
+如果服务器工作区有本地脏改动，不要直接覆盖，先确认来源。
 
-## 六、关键变更说明
+### 2. 使用明确镜像 tag
 
-### Dockerfile
+生产环境建议通过环境变量指定镜像：
 
-1. `uv sync --frozen` 替代 `uv pip compile`，lockfile 精确安装
-2. 清华 APT 镜像源（apt 包走清华，pip 包也走清华）
-3. ffmpeg 等系统依赖放在 COPY . . 之前，利用 Docker 层缓存
+```bash
+export APP_IMAGE=pythonvideo-app:stage2-7070f9e
+export APP_VERSION=stage2-7070f9e
+export VCS_REF=7070f9e
+export BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+```
 
-### docker-compose.yml
+如果镜像来自远端仓库，先拉取：
 
-- **移除了 `./:/app` 整项目挂载**，代码由 Docker 镜像决定
-- 只挂载数据目录：image/downloads/logs/certs/cookies.txt/.env
+```bash
+docker pull "$APP_IMAGE"
+```
 
-### 安全
+### 3. 重建应用容器
 
-- `alembic.ini` 和 `migrations/env.py` 的硬编码密码已清除
+```bash
+cd /opt/pythonvideo
+docker compose up -d --no-build app
+docker compose exec -T app alembic upgrade head
+docker compose exec -T app alembic current
+```
+
+### 4. 发布后检查
+
+```bash
+curl -s http://localhost:8000/health
+curl -i -s http://localhost:8000/game/tasks/status
+curl -i -s http://localhost:8000/admin/ad/game-bonus-config
+docker compose ps
+docker compose logs --tail=100 app
+```
+
+健康检查应返回：
+
+```json
+{"status":"ok","message":"服务运行正常"}
+```
+
+## docker-compose 改造说明
+
+当前 `docker-compose.yml` 已支持以下发布方式：
+
+### 方式 A：本地直接构建
+
+```bash
+export APP_IMAGE=pythonvideo-app:stage2-7070f9e
+export APP_VERSION=stage2-7070f9e
+export VCS_REF=7070f9e
+docker compose build app
+docker compose up -d app
+```
+
+### 方式 B：只使用预构建镜像
+
+```bash
+export APP_IMAGE=pythonvideo-app:stage2-7070f9e
+docker compose up -d --no-build app
+```
+
+`docker-compose.yml` 中 `app` 服务已经显式声明：
+
+- `image: ${APP_IMAGE:-pythonvideo-app:stage2-local}`
+- `build.target: runtime`
+- `build.args.APP_VERSION`
+- `build.args.VCS_REF`
+- `build.args.BUILD_DATE`
+
+这意味着：
+
+1. 同一套 compose 既能构建，也能使用外部已构建镜像
+2. 生产环境不再需要依赖 `pythonvideo-app:latest`
+3. 镜像版本和 Git 提交可以直接对应
+
+## Dockerfile 改造说明
+
+当前 `Dockerfile` 已做以下收敛优化：
+
+1. 使用多阶段构建，运行镜像只保留必要产物
+2. 先复制 `pyproject.toml` 和 `uv.lock`，让依赖层尽量命中缓存
+3. `uv sync` 使用缓存挂载，减少重复下载
+4. 注入 `APP_VERSION` / `VCS_REF` / `BUILD_DATE` OCI 标签
+5. 保留 Playwright Chromium 安装，但不再让普通代码改动频繁击穿依赖层缓存
+
+## Alembic 注意事项
+
+数据库名仍然是：
+
+```text
+agent
+```
+
+检查数据库时使用：
+
+```bash
+docker compose exec -T postgres psql -U postgres -d agent
+```
+
+迁移完成后确认：
+
+```bash
+docker compose exec -T app alembic current
+```
+
+## 不推荐的做法
+
+以下方式只适合应急救火，不适合作为后续正式升级流程：
+
+1. 直接把代码复制进正在运行的容器
+2. 继续依赖旧 `pythonvideo-app:latest`
+3. 在生产机上长时间反复试构建但不固定镜像版本
+4. 不记录镜像 tag 就直接重启服务
+
+## 回滚建议
+
+如果新镜像发布异常，优先按“旧镜像 tag + 旧 Git 分支”回退：
+
+```bash
+cd /opt/pythonvideo
+git checkout backup/prod-pre-stage2-20260605
+export APP_IMAGE=<previous-stable-image>
+docker compose up -d --no-build app
+```
+
+如果只是业务代码问题，但镜像可用，也可以只把 `APP_IMAGE` 切回上一个稳定 tag。
+
+## 当前已知生产基线
+
+- 生产仓库分支：`feature/yuexiang-stage2-mvp`
+- 生产仓库基线提交：`5ae17ec`
+- 生产回退分支：`backup/prod-pre-stage2-20260605`
+- 当前真实广告位：
+  - `adunit-e66ca7039925b740`
+  - `adunit-7c61b0922792ddc9`
+  - `adunit-a921c4e0383a451f`
+
+后续每次正式发布后，都应把本文件里的“当前已知生产基线”同步到最新 tag 和提交号。

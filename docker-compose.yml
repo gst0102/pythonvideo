@@ -1,51 +1,56 @@
 services:
   # ========================================
-  # FastAPI 应用
+  # FastAPI application
   # ========================================
   app:
+    image: ${APP_IMAGE:-pythonvideo-app:stage2-local}
     build:
       context: .
       dockerfile: Dockerfile
+      target: runtime
+      args:
+        UV_INDEX_URL: ${UV_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}
+        APP_VERSION: ${APP_VERSION:-local}
+        VCS_REF: ${VCS_REF:-local}
+        BUILD_DATE: ${BUILD_DATE:-unknown}
     container_name: video-service-app
     expose:
       - "8000"
     ports:
       - "8000:8000"
     environment:
-      # ── Redis ──
+      # Redis
       - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
-      # ── PostgreSQL ──
+      # PostgreSQL
       - DATABASE_URL=${DATABASE_URL:-postgresql+asyncpg://postgres:${DB_PASSWORD:-postgres}@postgres:5432/agent}
       - DB_ECHO=${DB_ECHO:-false}
       - DB_SSL_MODE=${DB_SSL_MODE:-prefer}
-      # ── 应用 ──
+      # App
       - DOMAIN=${DOMAIN:-}
       - CORS_ORIGINS=${CORS_ORIGINS:-*}
       - NOTIFY_URL=${NOTIFY_URL:-}
-      # ── 代理 / Cookie ──
+      # Proxy / Cookie
       - PROXY_URL=${PROXY_URL:-}
       - COOKIE_FILE=${COOKIE_FILE:-}
-      # ── 番剧同步 ──
+      # Browser automation guard
+      - BROWSER_AUTOMATION_CONCURRENCY=${BROWSER_AUTOMATION_CONCURRENCY:-1}
+      - BROWSER_AUTOMATION_QUEUE_TIMEOUT=${BROWSER_AUTOMATION_QUEUE_TIMEOUT:-120}
+      - BROWSER_FORCE_CLEANUP=${BROWSER_FORCE_CLEANUP:-true}
+      # Anime sync
       - ANIME_SYNC_ENABLED=${ANIME_SYNC_ENABLED:-true}
       - ANIME_SYNC_INTERVAL=${ANIME_SYNC_INTERVAL:-15}
-      # ── 微信配置 ──
+      # WeChat
       - WECHAT_APPID=${WECHAT_APPID:-}
       - WECHAT_SECRET=${WECHAT_SECRET:-}
-      # ── 其他密钥 ──
+      # Other secrets
       - SECRET_KEY=${SECRET_KEY:-}
       - API_KEY=${API_KEY:-}
     volumes:
-      # 数据持久化目录
       - ./image:/app/image
       - ./downloads:/app/downloads
       - ./logs:/app/logs
-      # 证书 (只读)
       - ./certs:/app/certs:ro
-      # Cookie 文件
-      # - ./cookies.txt:/app/cookies.txt
-      # 备用 cookie（服务器上才有的文件，本地部署请注释此行）
-      # - ./cookies.txt.dan:/app/cookies.txt.dan:ro
-      # 环境变量 (只读)
       - ./.env:/app/.env:ro
     depends_on:
       redis:
@@ -58,10 +63,10 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '2'
+          cpus: "2"
           memory: 2G
         reservations:
-          cpus: '0.5'
+          cpus: "0.5"
           memory: 512M
     logging:
       driver: "json-file"
@@ -70,13 +75,13 @@ services:
         max-file: "3"
 
   # ========================================
-  # Nginx 反向代理
+  # Nginx reverse proxy
   # ========================================
   nginx:
     image: nginx:alpine
     container_name: video-service-nginx
-    # ⚠️ 如果服务器宿主机已有 nginx 占用 80/443，注释掉 ports
-    # 改为在宿主机 nginx 里配置反向代理到 app:8000
+    # If the host machine already serves 80/443 with another nginx,
+    # keep ports commented and reverse-proxy to app:8000 from the host nginx.
     # ports:
     #   - "80:80"
     #   - "443:443"
@@ -97,7 +102,7 @@ services:
         max-file: "3"
 
   # ========================================
-  # SSL 证书自动续期 (Let's Encrypt)
+  # SSL certificate auto-renewal
   # ========================================
   certbot:
     image: certbot/certbot
@@ -116,7 +121,7 @@ services:
         max-file: "2"
 
   # ========================================
-  # Redis 缓存
+  # Redis cache
   # ========================================
   redis:
     image: redis:7-alpine
@@ -137,7 +142,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '0.5'
+          cpus: "0.5"
           memory: 512M
     logging:
       driver: "json-file"
@@ -146,7 +151,7 @@ services:
         max-file: "3"
 
   # ========================================
-  # PostgreSQL 数据库
+  # PostgreSQL database
   # ========================================
   postgres:
     image: postgres:16-alpine
@@ -170,7 +175,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '1'
+          cpus: "1"
           memory: 1G
     logging:
       driver: "json-file"
@@ -178,9 +183,6 @@ services:
         max-size: "20m"
         max-file: "3"
 
-# ========================================
-# 持久化存储
-# ========================================
 volumes:
   redis_data:
     driver: local
