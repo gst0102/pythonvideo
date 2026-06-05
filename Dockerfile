@@ -27,7 +27,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && pip install uv --no-cache-dir -i "${PIP_INDEX_URL}"
 
 # Copy the lockfiles first so dependency resolution stays cached across code-only changes.
-COPY pyproject.toml uv.lock README.md ./
+COPY pyproject.toml uv.lock ./
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --no-install-project \
