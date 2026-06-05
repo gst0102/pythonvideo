@@ -24,7 +24,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     curl \
     && rm -rf /var/lib/apt/lists/* \
-    && pip install uv --no-cache-dir -i "${PIP_INDEX_URL}"
+    && curl -LsSf https://astral.sh/uv/install.sh | sh -s -- --no-modify-path \
+    && ln -s /root/.local/bin/uv /usr/local/bin/uv
 
 # Copy the lockfiles first so dependency resolution stays cached across code-only changes.
 COPY pyproject.toml uv.lock ./
