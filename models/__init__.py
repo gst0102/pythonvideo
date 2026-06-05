@@ -30,6 +30,7 @@ from models.config import SystemConfig
 from models.anime_resource import AnimeResource
 from models.user_subscription import UserSubscription
 from models.ad_reward import AdRewardRecord
+from models.ad_event import AdEventRecord
 
 # 所有表，供 Alembic 自动发现
 __all__ = [
@@ -42,6 +43,7 @@ __all__ = [
     "AnimeResource",
     "UserSubscription",
     "AdRewardRecord",
+    "AdEventRecord",
     "get_session",
     "get_session_ctx",
     "init_db",

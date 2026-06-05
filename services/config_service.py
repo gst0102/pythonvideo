@@ -25,6 +25,9 @@ VIP_PACKAGE_WITHDRAW_MIN_AMOUNT = 1.00
 DEFAULT_CONFIGS: Dict[str, Dict[str, Any]] = {
     "vip_settings": {
         "enabled": True,
+        "page_title": "开通会员",
+        "page_subtitle": "享受更多专属权益",
+        "order_title": "VIP 会员",
         "virtual_pay": {
             "appid": os.getenv("VIRTUAL_PAY_APPID", os.getenv("APPID", "")),
             "offer_id": os.getenv("VIRTUAL_PAY_OFFER_ID", ""),
@@ -36,6 +39,7 @@ DEFAULT_CONFIGS: Dict[str, Dict[str, Any]] = {
             {
                 "id": "month",
                 "name": "月度会员",
+                "period_label": "月度会员",
                 "price": VIP_MONTHLY_PRICE if VIP_TEST_MODE else 9.90,
                 "original_price": 0.50 if VIP_TEST_MODE else 19.90,
                 "duration_days": 30,
@@ -47,6 +51,7 @@ DEFAULT_CONFIGS: Dict[str, Dict[str, Any]] = {
             {
                 "id": "quarter",
                 "name": "季度会员",
+                "period_label": "季度会员",
                 "price": VIP_QUARTERLY_PRICE if VIP_TEST_MODE else 26.90,
                 "original_price": 1.00 if VIP_TEST_MODE else 59.70,
                 "duration_days": 90,
@@ -58,6 +63,7 @@ DEFAULT_CONFIGS: Dict[str, Dict[str, Any]] = {
             {
                 "id": "year",
                 "name": "年度会员",
+                "period_label": "年度会员",
                 "price": VIP_YEARLY_PRICE if VIP_TEST_MODE else 88.80,
                 "original_price": 2.00 if VIP_TEST_MODE else 238.80,
                 "duration_days": 365,
@@ -100,6 +106,27 @@ DEFAULT_CONFIGS: Dict[str, Dict[str, Any]] = {
         "autoplay": True,
         "interval": 3000,
         "banners": [],
+    },
+    "ad_revenue_settings": {
+        "default_ecpm": 30.0,
+        "items": [],
+    },
+    "ad_reward_settings": {
+        "points_per_reward": 5.0,
+        "cash_per_reward": 0.05,
+    },
+    "stage2_game_bonus_ad_config": {
+        "scene": "game_bonus",
+        "instances": [
+            {
+                "ad_code": "reward_game_01",
+                "ad_unit_id": os.getenv("WX_REWARDED_AD_GAME_BONUS_1", "adunit-e66ca7039925b740"),
+                "status": "active",
+                "weight": 100,
+                "daily_user_show_limit": 5,
+                "daily_user_complete_limit": 5,
+            }
+        ],
     },
 }
 
@@ -173,6 +200,9 @@ def _normalize_vip_settings(config: Dict[str, Any]) -> Dict[str, Any]:
     year_price = float(normalized.get("year_price", VIP_YEARLY_PRICE))
 
     normalized["enabled"] = normalized.get("enabled", True)
+    normalized["page_title"] = normalized.get("page_title", "开通会员")
+    normalized["page_subtitle"] = normalized.get("page_subtitle", "享受更多专属权益")
+    normalized["order_title"] = normalized.get("order_title", "VIP 会员")
     normalized["virtual_pay"] = {
         "appid": normalized.get("virtual_pay_appid") or os.getenv("VIRTUAL_PAY_APPID", os.getenv("APPID", "")),
         "offer_id": normalized.get("virtual_pay_offer_id") or os.getenv("VIRTUAL_PAY_OFFER_ID", ""),
@@ -184,6 +214,7 @@ def _normalize_vip_settings(config: Dict[str, Any]) -> Dict[str, Any]:
         {
             "id": "month",
             "name": "月度会员",
+            "period_label": "月度会员",
             "price": month_price,
             "original_price": float(normalized.get("month_original_price", month_price)),
             "duration_days": 30,
@@ -195,6 +226,7 @@ def _normalize_vip_settings(config: Dict[str, Any]) -> Dict[str, Any]:
         {
             "id": "quarter",
             "name": "季度会员",
+            "period_label": "季度会员",
             "price": quarter_price,
             "original_price": float(normalized.get("quarter_original_price", quarter_price)),
             "duration_days": 90,
@@ -206,6 +238,7 @@ def _normalize_vip_settings(config: Dict[str, Any]) -> Dict[str, Any]:
         {
             "id": "year",
             "name": "年度会员",
+            "period_label": "年度会员",
             "price": year_price,
             "original_price": float(normalized.get("year_original_price", year_price)),
             "duration_days": 365,

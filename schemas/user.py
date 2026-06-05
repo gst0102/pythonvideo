@@ -61,6 +61,37 @@ class UserUpdateRequest(BaseModel):
     nickname: Optional[str] = None
 
 
+class AdRewardGrantRequest(BaseModel):
+    event_id: str
+    scene: str = "game_jump"
+    reward_points: float = Field(gt=0)
+    is_ended: bool = False
+    module: str = ""
+    section: str = ""
+    ad_unit_id: str = ""
+
+
+class AdRewardGrantResponse(BaseModel):
+    event_id: str
+    reward_points: float
+    reward_amount: float
+    balance: float
+    total_income: float
+    credited: bool = True
+
+
+class AdEventCreateRequest(BaseModel):
+    event_id: str
+    scene: str
+    module: str = ""
+    section: str = ""
+    ad_unit_id: str = ""
+    event_type: str
+    is_completed: bool = False
+    reward_points: float = 0.0
+    reward_amount: float = 0.0
+
+
 class VipPackage(BaseModel):
     id: str
     name: str
