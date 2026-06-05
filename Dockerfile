@@ -5,14 +5,10 @@
 # ========================================
 FROM python:3.10-slim-bookworm AS builder
 
-ARG UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    UV_COMPILE_BYTECODE=1 \
-    UV_LINK_MODE=copy \
-    UV_INDEX_URL=${UV_INDEX_URL} \
     PIP_INDEX_URL=${PIP_INDEX_URL}
 
 WORKDIR /build
@@ -23,22 +19,20 @@ RUN sed -i 's|http://deb.debian.org|http://mirrors.tuna.tsinghua.edu.cn|g' /etc/
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     curl \
-    && rm -rf /var/lib/apt/lists/* \
-    && curl -LsSf https://astral.sh/uv/install.sh | sh -s -- --no-modify-path \
-    && ln -s /root/.local/bin/uv /usr/local/bin/uv
+    && rm -rf /var/lib/apt/lists/*
 
-# Copy the lockfiles first so dependency resolution stays cached across code-only changes.
-COPY pyproject.toml uv.lock ./
+# Copy the locked dependency manifest first so dependency installation stays cached.
+COPY requirements.lock.txt ./
 
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev --no-install-project \
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python -m venv /build/.venv \
+    && /build/.venv/bin/pip install --upgrade pip \
+    && /build/.venv/bin/pip install --require-hashes -r requirements.lock.txt \
     && /build/.venv/bin/python --version
 
 COPY . .
 
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev \
-    && /build/.venv/bin/uvicorn --version
+RUN /build/.venv/bin/uvicorn --version
 
 
 # ========================================
