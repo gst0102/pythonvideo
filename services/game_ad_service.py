@@ -22,11 +22,53 @@ DEFAULT_GAME_BONUS_AD_CONFIG: dict[str, Any] = {
         {
             "ad_code": "reward_game_01",
             "ad_unit_id": os.getenv("WX_REWARDED_AD_GAME_BONUS_1", "adunit-e66ca7039925b740"),
+            "ad_type": "rewarded_video",
             "status": "active",
+            "priority": 100,
             "weight": 100,
             "daily_user_show_limit": 5,
             "daily_user_complete_limit": 5,
         }
+    ],
+}
+
+GAME_BONUS_AD_CONFIG_FORM_SCHEMA: dict[str, Any] = {
+    "title": "Stage 2 Game Bonus Ad Config",
+    "description": "Configure rewarded ad instances for the game bonus flow.",
+    "scene_options": ["game_bonus"],
+    "instance_fields": [
+        {"key": "ad_code", "label": "Ad Code", "type": "text", "required": True},
+        {"key": "ad_unit_id", "label": "Ad Unit ID", "type": "text", "required": True},
+        {
+            "key": "ad_type",
+            "label": "Ad Type",
+            "type": "select",
+            "required": True,
+            "options": ["rewarded_video"],
+        },
+        {
+            "key": "status",
+            "label": "Status",
+            "type": "select",
+            "required": True,
+            "options": ["active", "inactive"],
+        },
+        {"key": "priority", "label": "Priority", "type": "number", "required": False, "min": 1},
+        {"key": "weight", "label": "Weight", "type": "number", "required": False, "min": 1},
+        {
+            "key": "daily_user_show_limit",
+            "label": "Daily User Show Limit",
+            "type": "number",
+            "required": False,
+            "min": 1,
+        },
+        {
+            "key": "daily_user_complete_limit",
+            "label": "Daily User Complete Limit",
+            "type": "number",
+            "required": False,
+            "min": 1,
+        },
     ],
 }
 
@@ -87,6 +129,24 @@ class GameAdService:
         }
 
 
+def build_game_bonus_ad_config_payload(raw_config: dict[str, Any] | None = None) -> dict[str, Any]:
+    normalized = normalize_game_bonus_ad_config(raw_config)
+    return {
+        "config_type": "stage2_game_bonus_ad_config",
+        "config": normalized,
+        "form_schema": GAME_BONUS_AD_CONFIG_FORM_SCHEMA,
+    }
+
+
+def normalize_game_bonus_ad_config(raw_config: dict[str, Any] | None = None) -> dict[str, Any]:
+    raw = raw_config or {}
+    scene = str(raw.get("scene") or DEFAULT_GAME_BONUS_AD_CONFIG["scene"]).strip() or "game_bonus"
+    return {
+        "scene": scene,
+        "instances": _normalize_instances(raw.get("instances")),
+    }
+
+
 def _normalize_instances(raw_instances: Any) -> list[dict[str, Any]]:
     instances = raw_instances if isinstance(raw_instances, list) and raw_instances else DEFAULT_GAME_BONUS_AD_CONFIG["instances"]
     normalized: list[dict[str, Any]] = []
@@ -101,7 +161,9 @@ def _normalize_instances(raw_instances: Any) -> list[dict[str, Any]]:
             {
                 "ad_code": str(item.get("ad_code") or f"reward_game_{index + 1:02d}").strip(),
                 "ad_unit_id": ad_unit_id,
+                "ad_type": str(item.get("ad_type") or "rewarded_video").strip() or "rewarded_video",
                 "status": status,
+                "priority": max(int(item.get("priority") or 100), 1),
                 "weight": max(int(item.get("weight") or 1), 1),
                 "daily_user_show_limit": _normalize_optional_positive_int(item.get("daily_user_show_limit")),
                 "daily_user_complete_limit": _normalize_optional_positive_int(item.get("daily_user_complete_limit")),

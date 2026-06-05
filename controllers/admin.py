@@ -15,6 +15,7 @@ from models.withdrawal import WithdrawalRecord
 from schemas.user import AdminReplyRequest, AdminUserVipUpdateRequest, ConfigUpdateRequest, PaginatedResponse
 from services.chat_service import ChatService
 from services.config_service import ConfigService
+from services.game_ad_service import build_game_bonus_ad_config_payload, normalize_game_bonus_ad_config
 from services.withdrawal_service import WithdrawalService
 
 logger = logging.getLogger(__name__)
@@ -172,6 +173,22 @@ async def get_config(type: Optional[str] = Query(None), session: AsyncSession = 
 async def update_config(req: ConfigUpdateRequest, session: AsyncSession = Depends(get_session)):
     config = await ConfigService.set(session, req.type, req.config_data)
     return response(data={"type": config.type, "updated_at": config.updated_at.isoformat()}, msg="config updated")
+
+
+@router.get("/ad/game-bonus-config", summary="get stage2 game bonus ad config")
+async def get_game_bonus_ad_config(session: AsyncSession = Depends(get_session)):
+    config = await ConfigService.get(session, "stage2_game_bonus_ad_config")
+    return response(data=build_game_bonus_ad_config_payload(config))
+
+
+@router.put("/ad/game-bonus-config", summary="update stage2 game bonus ad config")
+async def update_game_bonus_ad_config(req: ConfigUpdateRequest, session: AsyncSession = Depends(get_session)):
+    normalized = normalize_game_bonus_ad_config(req.config_data)
+    config = await ConfigService.set(session, "stage2_game_bonus_ad_config", normalized)
+    return response(
+        data=build_game_bonus_ad_config_payload(config.config_data),
+        msg="game bonus ad config updated",
+    )
 
 
 @router.get("/withdrawals", summary="withdrawal list")
