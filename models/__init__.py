@@ -31,6 +31,13 @@ from models.anime_resource import AnimeResource
 from models.user_subscription import UserSubscription
 from models.ad_reward import AdRewardRecord
 from models.ad_event import AdEventRecord
+from models.user_account import UserAccount
+from models.points_ledger import PointsLedger
+from models.checkin_record import CheckinRecord
+from models.game_round import GameRound
+from models.daily_task_stat import DailyTaskStat
+from models.game_settlement_batch import GameSettlementBatch
+from models.game_user_settlement import GameUserSettlement
 
 # 所有表，供 Alembic 自动发现
 __all__ = [
@@ -44,6 +51,13 @@ __all__ = [
     "UserSubscription",
     "AdRewardRecord",
     "AdEventRecord",
+    "UserAccount",
+    "PointsLedger",
+    "CheckinRecord",
+    "GameRound",
+    "DailyTaskStat",
+    "GameSettlementBatch",
+    "GameUserSettlement",
     "get_session",
     "get_session_ctx",
     "init_db",

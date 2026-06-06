@@ -202,7 +202,7 @@ class GameTaskService:
             user_id=user.id,
             points=estimated_points,
             source="game",
-            change_type="estimated_earn",
+            change_type="game_estimated",
             availability="consumable",
             idempotency_key=_build_ad_bonus_idempotency_key(user.id, normalized_round_id, normalized_ad_event_id),
             related_type="game_round",

@@ -9,6 +9,7 @@ from sqlalchemy import and_, func
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from models.game_user_settlement import GameUserSettlement
 from models.points_ledger import PointsLedger
 
 
@@ -20,7 +21,7 @@ class PointsSummaryService:
         current_day = today or datetime.utcnow().date()
         yesterday = current_day - timedelta(days=1)
 
-        today_estimated_points = await _sum_positive_points(
+        today_estimated_points = await _sum_positive_ledger_points(
             session,
             user_id,
             start=_start_of_day(current_day),
@@ -29,12 +30,9 @@ class PointsSummaryService:
             availability="consumable",
         )
         yesterday_settled_points = await _sum_positive_points(
-            session,
-            user_id,
-            start=_start_of_day(yesterday),
-            end=_end_of_day(yesterday),
-            availability="withdrawable",
-            exclude_source="withdraw",
+            session=session,
+            user_id=user_id,
+            settlement_day=yesterday,
         )
 
         return {
@@ -52,6 +50,20 @@ def _end_of_day(day: date) -> datetime:
 
 
 async def _sum_positive_points(
+    session: AsyncSession,
+    user_id,
+    *,
+    settlement_day: date,
+) -> int:
+    settlement_stmt = select(func.coalesce(func.sum(GameUserSettlement.settled_points), 0)).where(
+        GameUserSettlement.user_id == user_id,
+        GameUserSettlement.settlement_date == settlement_day,
+    )
+    settlement_result = await session.execute(settlement_stmt)
+    return int(settlement_result.scalar_one() or 0)
+
+
+async def _sum_positive_ledger_points(
     session: AsyncSession,
     user_id,
     *,

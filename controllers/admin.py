@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 from uuid import UUID
 
@@ -12,10 +12,12 @@ from models.base import get_session
 from models.chat import ChatMessage
 from models.user import User
 from models.withdrawal import WithdrawalRecord
+from schemas.admin_settlement import AdminGameSettlementTriggerRequest, AdminGameSettlementUpsertRequest
 from schemas.user import AdminReplyRequest, AdminUserVipUpdateRequest, ConfigUpdateRequest, PaginatedResponse
 from services.chat_service import ChatService
 from services.config_service import ConfigService
 from services.game_ad_service import build_game_bonus_ad_config_payload, normalize_game_bonus_ad_config
+from services.game_settlement_service import GameSettlementService
 from services.withdrawal_service import WithdrawalService
 
 logger = logging.getLogger(__name__)
@@ -191,6 +193,52 @@ async def update_game_bonus_ad_config(req: ConfigUpdateRequest, session: AsyncSe
     )
 
 
+@router.get("/game-settlements/daily", summary="get stage2 game settlement detail")
+async def get_game_settlement_detail(
+    settlement_date: Optional[str] = Query(None),
+    session: AsyncSession = Depends(get_session),
+):
+    target_day = _parse_settlement_date_or_default(settlement_date)
+    if not target_day:
+        return response([], 400, "invalid settlement_date")
+    data = await GameSettlementService.get_daily_detail(session, target_day)
+    return response(data=data)
+
+
+@router.put("/game-settlements/daily", summary="upsert stage2 game settlement input")
+async def upsert_game_settlement_input(
+    req: AdminGameSettlementUpsertRequest,
+    session: AsyncSession = Depends(get_session),
+):
+    data = await GameSettlementService.save_daily_input(
+        session,
+        settlement_day=req.settlement_date,
+        ecpm_value=req.ecpm_value,
+        ad_pv=req.ad_pv,
+        valid_clicks=req.valid_clicks,
+        total_revenue=req.total_revenue,
+        note=req.note,
+    )
+    return response(data=data, msg="game settlement input updated")
+
+
+@router.post("/game-settlements/daily/trigger", summary="trigger stage2 game settlement")
+async def trigger_game_settlement(
+    req: AdminGameSettlementTriggerRequest,
+    session: AsyncSession = Depends(get_session),
+):
+    try:
+        data = await GameSettlementService.trigger_daily_settlement(
+            session,
+            settlement_day=req.settlement_date,
+            allow_fallback=req.allow_fallback,
+            force_recalculate=req.force_recalculate,
+        )
+    except ValueError as exc:
+        return response([], 400, str(exc))
+    return response(data=data, msg="game settlement triggered")
+
+
 @router.get("/withdrawals", summary="withdrawal list")
 async def get_withdrawals(
     status: Optional[str] = Query(None),
@@ -349,3 +397,12 @@ def _withdrawal_to_dict(record: WithdrawalRecord, user: Optional[User] = None) -
         "created_at": record.created_at.isoformat() if record.created_at else None,
         "completed_at": record.completed_at.isoformat() if record.completed_at else None,
     }
+
+
+def _parse_settlement_date_or_default(raw: Optional[str]):
+    if not raw:
+        return (datetime.utcnow() - timedelta(days=1)).date()
+    try:
+        return datetime.strptime(raw, "%Y-%m-%d").date()
+    except ValueError:
+        return None
