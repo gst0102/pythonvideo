@@ -16,6 +16,8 @@ class HomeWelfareCard(BaseModel):
     continuous_days: int = 0
     total_points: int = 0
     today_points: int = 0
+    today_estimated_points: int = 0
+    yesterday_settled_points: int = 0
     game_remaining: int = 0
     game_limit: int = 0
     next_checkin_points: int = 0

@@ -77,7 +77,7 @@ class WithdrawalService:
             "max_withdraw_points": _amount_to_points(max_amount, exchange_rate),
             "is_first_withdraw": await _is_first_withdraw(session, user_id),
             "is_member": bool(user.is_vip),
-            "tips": str(withdrawal_config.get("tips", "")),
+            "tips": _build_points_withdrawal_tips(withdrawal_config),
             "account": _account_summary(account),
         }
 
@@ -555,6 +555,16 @@ def _get_points_exchange_rate(config: dict) -> int:
 
 def _amount_to_points(amount: float, exchange_rate: int) -> int:
     return int(math.ceil(round(float(amount), 2) * exchange_rate))
+
+
+def _build_points_withdrawal_tips(config: dict) -> str:
+    extra = str(config.get("tips", "") or "").strip()
+    base = "仅昨日已结算并进入可提现账户的积分支持提现，今日预估积分和待结算积分不可提现。"
+    if not extra:
+        return base
+    if extra == base:
+        return extra
+    return f"{base} {extra}"
 
 
 async def _is_first_withdraw(session: AsyncSession, user_id: UUID) -> bool:

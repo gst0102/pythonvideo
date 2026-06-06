@@ -7,6 +7,7 @@ from typing import Any, Dict
 from models.user import User
 from services.config_service import ConfigService
 from services.points_account_service import PointsAccountService
+from services.points_summary_service import PointsSummaryService
 from services.task_overview_service import TaskOverviewService
 
 
@@ -18,6 +19,7 @@ class MineAssetsService:
         overview = await TaskOverviewService.get_overview(session, user)
         account_model, _ = await PointsAccountService.ensure_user_account(session, user.id)
         points_config = await ConfigService.get(session, "stage2_points_config")
+        summary = await PointsSummaryService.build_summary(session, user.id, today=overview["today"])
 
         exchange_rate = max(int(points_config.get("exchange_rate", 100) or 100), 1)
         display_unit = str(points_config.get("display_unit") or "积分")
@@ -38,9 +40,13 @@ class MineAssetsService:
                 "display_unit": display_unit,
                 "exchange_rate": exchange_rate,
                 "total_points": int(account_model.total_points),
+                "today_estimated_points": int(summary["today_estimated_points"]),
+                "yesterday_settled_points": int(summary["yesterday_settled_points"]),
                 "withdrawable_points": withdrawable_points,
                 "frozen_points": int(account_model.frozen_points),
+                "locked_withdraw_points": int(account_model.locked_withdraw_points),
                 "consumable_points": int(account_model.consumable_points),
+                "withdrawn_points": int(account_model.withdrawn_points),
                 "convertible_amount": round(withdrawable_points / exchange_rate, 2),
                 "withdrawable_amount": round(withdrawable_points / exchange_rate, 2),
             },
@@ -54,7 +60,7 @@ class MineAssetsService:
                 {
                     "code": "withdrawal",
                     "title": "立即提现",
-                    "subtitle": f"可兑换 {round(withdrawable_points / exchange_rate, 2):.2f} 元",
+                    "subtitle": f"仅已结算积分可提现，当前约 {round(withdrawable_points / exchange_rate, 2):.2f} 元",
                 },
                 {
                     "code": "vip",

@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Dict
 
 from models.user import User
+from services.points_summary_service import PointsSummaryService
 from services.task_overview_service import TaskOverviewService
 
 
@@ -17,6 +18,7 @@ class HomeOverviewService:
         checkin = overview["checkin"]
         game_task = overview["game_task"]
         account = overview["account"]
+        summary = await PointsSummaryService.build_summary(session, user.id, today=overview["today"])
 
         return {
             "today": overview["today"],
@@ -27,7 +29,9 @@ class HomeOverviewService:
                 "checked_in": bool(checkin["checked_in"]),
                 "continuous_days": int(checkin["continuous_days"]),
                 "total_points": int(account["total_points"]),
-                "today_points": int(overview["today_points"]),
+                "today_points": int(summary["today_estimated_points"]),
+                "today_estimated_points": int(summary["today_estimated_points"]),
+                "yesterday_settled_points": int(summary["yesterday_settled_points"]),
                 "game_remaining": int(game_task["today_remaining"]),
                 "game_limit": int(game_task["today_limit"]),
                 "next_checkin_points": int(checkin["total_points"]),

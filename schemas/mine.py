@@ -18,9 +18,13 @@ class MinePointsWallet(BaseModel):
     display_unit: str = "积分"
     exchange_rate: int = 100
     total_points: int = 0
+    today_estimated_points: int = 0
+    yesterday_settled_points: int = 0
     withdrawable_points: int = 0
     frozen_points: int = 0
+    locked_withdraw_points: int = 0
     consumable_points: int = 0
+    withdrawn_points: int = 0
     convertible_amount: float = 0.0
     withdrawable_amount: float = 0.0
 
