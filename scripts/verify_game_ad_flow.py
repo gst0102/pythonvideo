@@ -167,7 +167,9 @@ async def _verify_slot_rotation(session, user: User, marker: str) -> None:
 
 async def _verify_ad_bonus_idempotency(session, user: User, marker: str) -> None:
     round_id = f"{marker}-bonus-1"
-    await GameTaskService.complete_round(session, user, game_code="rps", round_id=round_id, result="win")
+    round_payload, _ = await GameTaskService.complete_round(session, user, game_code="rps", round_id=round_id, result="win")
+    _assert_equal("complete round no immediate points", int(round_payload["points_added"]), 0)
+    _assert_true("complete round requires ad", bool(round_payload["ad_required"]))
     slot = await GameAdService.select_available_slot(session, user, round_id=round_id)
     _assert_true("bonus slot should be available", bool(slot["available"]))
 
@@ -224,12 +226,13 @@ async def _verify_ad_bonus_idempotency(session, user: User, marker: str) -> None
     ledger_rows = await session.execute(
         select(PointsLedger).where(
             PointsLedger.user_id == user.id,
-            PointsLedger.change_type == "ad_bonus",
+            PointsLedger.change_type == "game_estimated",
         )
     )
     ledgers = list(ledger_rows.scalars().all())
     _assert_equal("ad bonus ledger count", len(ledgers), 1)
     _assert_equal("ad bonus ledger points", int(ledgers[0].points_delta), first_bonus)
+    _assert_equal("ad bonus ledger availability", str(ledgers[0].availability), "consumable")
 
 
 async def _consume_limit(session, user: User, ad_unit_id: str, *, event_id: str) -> None:
