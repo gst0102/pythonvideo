@@ -1,6 +1,7 @@
 """Payment business logic."""
 
 import logging
+import math
 from datetime import datetime, timedelta
 from uuid import UUID
 
@@ -15,7 +16,7 @@ from services.points_account_service import PointsAccountService
 
 logger = logging.getLogger(__name__)
 
-COMMISSION_LEVEL1_RATE = 0.10
+COMMISSION_LEVEL1_RATE = 0.50
 COMMISSION_LEVEL2_RATE = 0.05
 PERIOD_DAYS = {"month": 30, "quarter": 90, "year": 365}
 
@@ -77,6 +78,9 @@ async def _calculate_commission(session: AsyncSession, order: Order) -> None:
         return
 
     amount = float(order.amount)
+    level1_rate, level2_rate = await _get_commission_rates(session)
+    points_config = await ConfigService.get(session, "stage2_points_config")
+    exchange_rate = _get_points_exchange_rate(points_config)
     if buyer.parent_id:
         await _create_commission_record(
             session,
@@ -84,8 +88,9 @@ async def _calculate_commission(session: AsyncSession, order: Order) -> None:
             buyer.id,
             order.id,
             amount,
-            COMMISSION_LEVEL1_RATE * 100,
-            round(amount * COMMISSION_LEVEL1_RATE, 2),
+            level1_rate * 100,
+            round(amount * level1_rate, 2),
+            _calculate_rebate_points(amount, level1_rate, exchange_rate),
             1,
         )
     if buyer.grand_parent_id:
@@ -95,8 +100,9 @@ async def _calculate_commission(session: AsyncSession, order: Order) -> None:
             buyer.id,
             order.id,
             amount,
-            COMMISSION_LEVEL2_RATE * 100,
-            round(amount * COMMISSION_LEVEL2_RATE, 2),
+            level2_rate * 100,
+            round(amount * level2_rate, 2),
+            _calculate_rebate_points(amount, level2_rate, exchange_rate),
             2,
         )
 
@@ -131,6 +137,23 @@ async def _get_vip_package(session: AsyncSession, period: str) -> dict:
     return {"gift_points": 0}
 
 
+async def _get_commission_rates(session: AsyncSession) -> tuple[float, float]:
+    config = await ConfigService.get(session, "commission_settings")
+    level1 = _percent_to_rate(config.get("level1_rate"), COMMISSION_LEVEL1_RATE)
+    level2 = _percent_to_rate(config.get("level2_rate"), COMMISSION_LEVEL2_RATE)
+    return level1, level2
+
+
+def _percent_to_rate(value, default_rate: float) -> float:
+    try:
+        percent = float(value)
+    except (TypeError, ValueError):
+        return default_rate
+    if percent < 0:
+        return 0.0
+    return percent / 100
+
+
 async def _create_commission_record(
     session: AsyncSession,
     user_id: UUID,
@@ -139,9 +162,22 @@ async def _create_commission_record(
     order_amount: float,
     rate: float,
     commission_amount: float,
+    rebate_points: int,
     level: int,
 ) -> None:
-    if commission_amount <= 0:
+    if commission_amount <= 0 or rebate_points <= 0:
+        return
+
+    existing_result = await session.execute(
+        select(CommissionRecord).where(
+            CommissionRecord.user_id == user_id,
+            CommissionRecord.from_user_id == from_user_id,
+            CommissionRecord.order_id == order_id,
+            CommissionRecord.level == level,
+        )
+    )
+    existing = existing_result.scalar_one_or_none()
+    if existing:
         return
 
     record = CommissionRecord(
@@ -153,18 +189,23 @@ async def _create_commission_record(
         commission_amount=commission_amount,
         level=level,
         type="vip_recharge",
-        status="settled",
+        status="pending",
     )
     session.add(record)
-
-    result = await session.execute(select(User).where(User.id == user_id))
-    inviter = result.scalar_one_or_none()
-    if inviter:
-        inviter.balance += commission_amount
-        inviter.total_income += commission_amount
-        inviter.updated_at = datetime.utcnow()
-
     await session.flush()
+
+    await PointsAccountService.add_points(
+        session=session,
+        user_id=user_id,
+        points=rebate_points,
+        source="invite",
+        change_type="invite_rebate_frozen",
+        availability="frozen",
+        idempotency_key=f"invite_rebate:{order_id}:{level}:{user_id}",
+        related_type="commission_record",
+        related_id=str(record.id),
+        remark=f"level {level} vip rebate frozen points",
+    )
 
 
 def _parse_paid_at(paid_at_str: str) -> datetime:
@@ -174,3 +215,15 @@ def _parse_paid_at(paid_at_str: str) -> datetime:
         return datetime.fromisoformat(paid_at_str)
     except ValueError:
         return datetime.utcnow()
+
+
+def _get_points_exchange_rate(config: dict) -> int:
+    value = config.get("exchange_rate") or config.get("points_exchange_rate") or 100
+    try:
+        return max(int(value), 1)
+    except (TypeError, ValueError):
+        return 100
+
+
+def _calculate_rebate_points(amount: float, rate: float, exchange_rate: int) -> int:
+    return int(math.floor(float(amount) * float(rate) * int(exchange_rate)))

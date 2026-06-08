@@ -22,6 +22,7 @@ if str(BACKEND_DIR) not in sys.path:
 from models.ad_event import AdEventRecord  # noqa: E402
 from models.base import async_session_factory  # noqa: E402
 from models.game_round import GameRound  # noqa: E402
+from models.game_settlement_batch import GameSettlementBatch  # noqa: E402
 from models.game_user_settlement import GameUserSettlement  # noqa: E402
 from models.order import Order  # noqa: E402
 from models.points_ledger import PointsLedger  # noqa: E402
@@ -205,10 +206,140 @@ async def verify() -> None:
             _assert_equal("vip detail estimated", int(vip_detail.estimated_points), 4)
             _assert_equal("vip detail settled", int(vip_detail.settled_points), 8)
 
+            await _verify_d2_fallback_flow(session, marker)
+
             print("Game settlement verification passed")
-            print("checks=first settlement, rerun adjustment, summary settled points, add/sub ledger entries")
+            print(
+                "checks=first settlement, rerun adjustment, summary settled points, "
+                "add/sub ledger entries, D+2 fallback, fallback idempotency, fallback adjustment"
+            )
         finally:
             await session.rollback()
+
+
+async def _verify_d2_fallback_flow(session, marker: str) -> None:
+    fallback_day = (datetime.now(timezone.utc) - timedelta(days=2)).date()
+    historical_ecpms = [10.0, 20.0, 30.0]
+    for offset, ecpm_value in enumerate(historical_ecpms, start=1):
+        history_day = fallback_day - timedelta(days=offset)
+        session.add(
+            GameSettlementBatch(
+                settlement_date=history_day,
+                status="settled",
+                ecpm_value=ecpm_value,
+                ecpm_source="manual",
+                ad_pv=100,
+                valid_clicks=100,
+                total_revenue=round(ecpm_value * 100 / 1000, 4),
+                settled_user_count=1,
+                total_estimated_points=10,
+                total_settled_points=10,
+                total_adjustment_points=0,
+                note="seed rolling average sample",
+                settled_at=datetime.now(timezone.utc) - timedelta(days=offset),
+            )
+        )
+    await session.flush()
+
+    normal_user = User(
+        openid=f"{marker}-fallback-normal",
+        nickname="Fallback Normal",
+        avatar="",
+        invite_code=f"{marker}fn"[-10:],
+    )
+    vip_user = User(
+        openid=f"{marker}-fallback-vip",
+        nickname="Fallback VIP",
+        avatar="",
+        invite_code=f"{marker}fv"[-10:],
+        is_vip=True,
+        vip_expire_at=datetime.now(timezone.utc) + timedelta(days=30),
+    )
+    session.add(normal_user)
+    session.add(vip_user)
+    await session.flush()
+
+    vip_order = Order(
+        user_id=vip_user.id,
+        amount=19.9,
+        period="month",
+        duration_days=30,
+        description="Stage2 fallback settlement verify month vip",
+        out_trade_no=f"{marker}-fallback-vip-order",
+        status="paid",
+        paid_at=datetime.now(timezone.utc),
+    )
+    session.add(vip_order)
+    await session.flush()
+
+    await _seed_user_estimated_points(
+        session,
+        user=normal_user,
+        settlement_day=fallback_day,
+        round_points=[2, 2, 2, 2, 2],
+        ad_pv=10,
+        marker=f"{marker}-fallback-normal",
+    )
+    await _seed_user_estimated_points(
+        session,
+        user=vip_user,
+        settlement_day=fallback_day,
+        round_points=[2, 2],
+        ad_pv=10,
+        marker=f"{marker}-fallback-vip",
+    )
+
+    fallback_result = await GameSettlementService.trigger_daily_settlement(
+        session,
+        settlement_day=fallback_day,
+        allow_fallback=True,
+    )
+    _assert_equal("fallback ecpm source", fallback_result["batch"]["ecpm_source"], "rolling_average")
+    _assert_equal("fallback ecpm value", float(fallback_result["batch"]["ecpm_value"]), 20.0)
+    _assert_equal("fallback batch status", fallback_result["batch"]["status"], "adjusted")
+
+    normal_account, _ = await PointsAccountService.ensure_user_account(session, normal_user.id)
+    vip_account, _ = await PointsAccountService.ensure_user_account(session, vip_user.id)
+    _assert_equal("fallback normal settled points", int(normal_account.withdrawable_points), 4)
+    _assert_equal("fallback vip settled points", int(vip_account.withdrawable_points), 8)
+
+    normal_ledger_count = await _count_game_settlement_ledgers(session, normal_user.id)
+    vip_ledger_count = await _count_game_settlement_ledgers(session, vip_user.id)
+
+    repeated_result = await GameSettlementService.trigger_daily_settlement(
+        session,
+        settlement_day=fallback_day,
+        allow_fallback=True,
+    )
+    _assert_equal("fallback repeated ecpm source", repeated_result["batch"]["ecpm_source"], "rolling_average")
+    _assert_equal("fallback repeated normal ledger count", await _count_game_settlement_ledgers(session, normal_user.id), normal_ledger_count)
+    _assert_equal("fallback repeated vip ledger count", await _count_game_settlement_ledgers(session, vip_user.id), vip_ledger_count)
+
+    await GameSettlementService.save_daily_input(
+        session,
+        settlement_day=fallback_day,
+        ecpm_value=30.0,
+        ad_pv=20,
+        valid_clicks=20,
+        total_revenue=0.6,
+        note="manual truth after fallback",
+    )
+    adjusted_result = await GameSettlementService.trigger_daily_settlement(
+        session,
+        settlement_day=fallback_day,
+        allow_fallback=False,
+        force_recalculate=True,
+    )
+    _assert_equal("fallback adjusted ecpm source", adjusted_result["batch"]["ecpm_source"], "manual")
+    _assert_equal("fallback adjusted normal points", int((await PointsAccountService.ensure_user_account(session, normal_user.id))[0].withdrawable_points), 6)
+    _assert_equal("fallback adjusted vip points", int((await PointsAccountService.ensure_user_account(session, vip_user.id))[0].withdrawable_points), 12)
+
+    normal_detail = await _get_user_settlement(session, fallback_day, normal_user.id)
+    vip_detail = await _get_user_settlement(session, fallback_day, vip_user.id)
+    if not normal_detail or not vip_detail:
+        raise AssertionError("fallback user settlement rows were not created")
+    _assert_equal("fallback normal detail adjustment", int(normal_detail.adjustment_points), -4)
+    _assert_equal("fallback vip detail adjustment", int(vip_detail.adjustment_points), 8)
 
 
 async def _seed_user_estimated_points(
@@ -306,6 +437,17 @@ async def _get_user_settlement(session, settlement_day, user_id):
     return result.scalar_one_or_none()
 
 
+async def _count_game_settlement_ledgers(session, user_id) -> int:
+    result = await session.execute(
+        select(PointsLedger).where(
+            PointsLedger.user_id == user_id,
+            PointsLedger.source == "game",
+            PointsLedger.change_type.in_(["game_settlement", "game_adjust_add", "game_adjust_sub"]),
+        )
+    )
+    return len(list(result.scalars().all()))
+
+
 async def _assert_required_tables(session) -> None:
     connection = await session.connection()
     table_names = await connection.run_sync(lambda sync_conn: set(inspect(sync_conn).get_table_names()))
@@ -328,7 +470,10 @@ def main() -> None:
     args = parse_args()
     if not args.execute:
         print("Dry run only. Re-run with --execute to verify against the configured database.")
-        print("Checks: first settlement, rerun adjustment, add/sub ledger entries, yesterday settled summary.")
+        print(
+            "Checks: first settlement, rerun adjustment, add/sub ledger entries, "
+            "yesterday settled summary, D+2 fallback, fallback idempotency, fallback adjustment."
+        )
         return
 
     try:

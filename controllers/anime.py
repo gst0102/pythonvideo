@@ -282,16 +282,18 @@ async def get_subscribed(
 
     items = []
     for sub, anime in rows:
+        if not anime or not anime.is_active or not (anime.title or "").strip():
+            continue
         item = {
             "anime_id": sub.anime_id,
-            "title": anime.title if anime else "",
-            "quality": anime.quality if anime else None,
-            "episode": anime.episode if anime else sub.last_episode,
-            "status": anime.status if anime else None,
-            "baidu_url": anime.baidu_url if anime else None,
-            "baidu_password": anime.baidu_password if anime else None,
-            "quark_url": anime.quark_url if anime else None,
-            "update_time": _format_time(anime.source_update_time or anime.updated_at) if anime else None,
+            "title": anime.title,
+            "quality": anime.quality,
+            "episode": anime.episode or sub.last_episode,
+            "status": anime.status,
+            "baidu_url": anime.baidu_url,
+            "baidu_password": anime.baidu_password,
+            "quark_url": anime.quark_url,
+            "update_time": _format_time(anime.source_update_time or anime.updated_at),
             "is_subscribed": True,
             "is_reminded": sub.is_reminded,
             "last_episode": sub.last_episode,

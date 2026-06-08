@@ -15,8 +15,10 @@ from uuid import UUID
 from sqlmodel import select, func
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from models.user import User
 from models.commission import CommissionRecord
+from models.points_ledger import PointsLedger
+from models.user import User
+from services.points_account_service import PointsAccountService
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +71,42 @@ class CommissionService:
             })
 
         return enriched, total
+
+    @staticmethod
+    async def release_commission_points(
+        session: AsyncSession,
+        record_id: UUID,
+    ) -> tuple[CommissionRecord | None, bool]:
+        record = await session.get(CommissionRecord, record_id)
+        if not record:
+            return None, False
+        if record.status == "settled":
+            return record, False
+
+        ledger_result = await session.execute(
+            select(PointsLedger).where(
+                PointsLedger.related_type == "commission_record",
+                PointsLedger.related_id == str(record.id),
+                PointsLedger.change_type == "invite_rebate_frozen",
+                PointsLedger.source == "invite",
+            )
+        )
+        frozen_ledger = ledger_result.scalar_one_or_none()
+        if not frozen_ledger:
+            raise RuntimeError("commission frozen points ledger not found")
+
+        await PointsAccountService.release_frozen_points(
+            session=session,
+            user_id=record.user_id,
+            points=int(frozen_ledger.points_delta),
+            idempotency_key=f"invite_rebate_unfreeze:{record.id}",
+            related_type="commission_record",
+            related_id=str(record.id),
+            remark=f"release level {record.level} vip rebate points",
+        )
+        record.status = "settled"
+        await session.flush()
+        return record, True
 
     @staticmethod
     async def get_invite_stats(session: AsyncSession, user_id: UUID) -> dict:

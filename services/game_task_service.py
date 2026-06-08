@@ -23,10 +23,10 @@ from services.points_account_service import PointsAccountService
 VALID_GAME_CODES = {"rps"}
 VALID_RESULTS = {"win", "lose", "draw"}
 DEFAULT_TASK_CONFIG = {
-    "daily_game_task_limit_normal": 10,
+    "daily_game_task_limit_normal": 20,
     "daily_game_task_limit_member_month": 100,
-    "daily_game_task_limit_member_quarter": 150,
-    "daily_game_task_limit_member_year": 200,
+    "daily_game_task_limit_member_quarter": 200,
+    "daily_game_task_limit_member_year": 300,
 }
 DEFAULT_POINTS_CONFIG = {
     "game_base_points_min": 1,

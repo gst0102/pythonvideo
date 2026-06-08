@@ -8,6 +8,7 @@ from typing import Any, Dict, Tuple
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from models.ad_event import AdEventRecord
 from models.checkin_record import CheckinRecord
 from models.daily_task_stat import DailyTaskStat
 from models.points_ledger import PointsLedger
@@ -105,6 +106,60 @@ class CheckinService:
         await session.flush()
         return _build_execute_payload(account=account, record=record, ledger=ledger), True
 
+    @staticmethod
+    async def claim_ad_bonus(
+        session: AsyncSession,
+        user: User,
+        ad_event_id: str,
+    ) -> Tuple[Dict[str, Any], bool, str | None]:
+        today = datetime.utcnow().date()
+        clean_event_id = (ad_event_id or "").strip()
+        if not clean_event_id:
+            return {}, False, "ad_event_id is required"
+
+        record = await _get_checkin_record(session, user.id, today)
+        if not record:
+            return {}, False, "check in before claiming ad bonus"
+
+        account, _ = await PointsAccountService.ensure_user_account(session, user.id)
+        existing_key = f"checkin_ad_bonus:{user.id}:{today.isoformat()}"
+        existing_ledger = await PointsAccountService.get_ledger_by_idempotency_key(session, existing_key)
+        if record.ad_bonus_used or existing_ledger:
+            payload = _build_execute_payload(account=account, record=record, ledger=existing_ledger)
+            return payload, False, None
+
+        ad_event = await _get_completed_checkin_ad_event(session, user.id, clean_event_id)
+        if not ad_event:
+            return {}, False, "completed checkin ad event not found"
+
+        config = await _get_points_config(session)
+        bonus_points = _resolve_ad_bonus_points(config)
+        ledger, account, created = await PointsAccountService.add_points(
+            session=session,
+            user_id=user.id,
+            points=bonus_points,
+            source="checkin",
+            change_type="ad_bonus",
+            availability="withdrawable",
+            idempotency_key=existing_key,
+            related_type="ad_event",
+            related_id=clean_event_id,
+            remark="daily checkin ad bonus",
+        )
+
+        record.ad_bonus_used = True
+        record.ad_event_id = clean_event_id
+        record.bonus_points += bonus_points
+        record.total_points += bonus_points
+        record.updated_at = datetime.utcnow()
+
+        stat = await _get_or_create_daily_task_stat(session, user.id, today)
+        stat.today_points += bonus_points
+        stat.updated_at = datetime.utcnow()
+
+        await session.flush()
+        return _build_execute_payload(account=account, record=record, ledger=ledger), created, None
+
 
 async def _get_points_config(session: AsyncSession) -> Dict[str, Any]:
     return await ConfigService.get(session, "stage2_points_config")
@@ -151,6 +206,33 @@ def _resolve_base_points(config: Dict[str, Any], is_member: bool) -> int:
     member_points = int(config.get("checkin_base_points_member", 2))
     normal_points = int(config.get("checkin_base_points_normal", 1))
     return member_points if is_member else normal_points
+
+
+def _resolve_ad_bonus_points(config: Dict[str, Any]) -> int:
+    value = config.get("checkin_ad_bonus_points", 1)
+    try:
+        return max(int(value), 1)
+    except (TypeError, ValueError):
+        return 1
+
+
+async def _get_completed_checkin_ad_event(
+    session: AsyncSession,
+    user_id,
+    event_id: str,
+) -> AdEventRecord | None:
+    stmt = (
+        select(AdEventRecord)
+        .where(
+            AdEventRecord.user_id == user_id,
+            AdEventRecord.event_id == event_id,
+            AdEventRecord.event_type == "complete",
+            AdEventRecord.is_completed == True,  # noqa: E712
+        )
+        .order_by(AdEventRecord.created_at.desc())
+    )
+    result = await session.execute(stmt)
+    return result.scalars().first()
 
 
 def _build_account_summary(account: UserAccount) -> Dict[str, int]:

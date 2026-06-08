@@ -34,3 +34,7 @@ class CheckinExecuteResponse(BaseModel):
     ledger_id: str
     account: CheckinAccountSummary
     checkin_recorded_at: datetime | None = None
+
+
+class CheckinAdBonusRequest(BaseModel):
+    ad_event_id: str

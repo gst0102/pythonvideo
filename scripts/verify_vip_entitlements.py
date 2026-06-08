@@ -15,11 +15,13 @@ import argparse
 import asyncio
 import sys
 import uuid
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from sqlalchemy import inspect
 from sqlmodel import select
+
+UTC = getattr(timezone, "utc")
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 if str(BACKEND_DIR) not in sys.path:
@@ -39,8 +41,8 @@ from services.withdrawal_service import WithdrawalService  # noqa: E402
 
 PERIOD_EXPECTATIONS = {
     "month": {"gift_points": 199, "game_limit": 100, "duration_days": 30, "amount": 9.90},
-    "quarter": {"gift_points": 599, "game_limit": 150, "duration_days": 90, "amount": 26.90},
-    "year": {"gift_points": 1299, "game_limit": 200, "duration_days": 365, "amount": 88.80},
+    "quarter": {"gift_points": 599, "game_limit": 200, "duration_days": 90, "amount": 26.90},
+    "year": {"gift_points": 1299, "game_limit": 300, "duration_days": 365, "amount": 88.80},
 }
 REQUIRED_TABLES = {
     "daily_task_stats",
@@ -96,6 +98,15 @@ async def verify(period: str) -> None:
             )
             _assert_equal("payment success result", ok, True)
 
+            duplicate_ok = await PaymentService.handle_payment_success(
+                session=session,
+                out_trade_no=out_trade_no,
+                transaction_id=f"{marker}-tx-duplicate",
+                total_fee_in_fen=int(round(expected["amount"] * 100)),
+                paid_at=datetime.now(UTC).isoformat(),
+            )
+            _assert_equal("duplicate payment callback result", duplicate_ok, True)
+
             refreshed_user = await session.get(User, user.id)
             if not refreshed_user:
                 raise AssertionError("test user was not found after payment")
@@ -121,6 +132,18 @@ async def verify(period: str) -> None:
                 raise AssertionError("vip_gift ledger was not created")
             _assert_equal("ledger.points_delta", int(ledger.points_delta), expected["gift_points"])
             _assert_equal("ledger.idempotency_key", ledger.idempotency_key, f"vip_gift:{order.id}")
+
+            duplicate_ledger_result = await session.execute(
+                select(PointsLedger).where(
+                    PointsLedger.user_id == user.id,
+                    PointsLedger.change_type == "vip_gift",
+                    PointsLedger.source == "vip",
+                    PointsLedger.related_type == "order",
+                    PointsLedger.related_id == str(order.id),
+                )
+            )
+            duplicate_ledgers = list(duplicate_ledger_result.scalars().all())
+            _assert_equal("vip_gift ledger count", len(duplicate_ledgers), 1)
 
             ledger_page = await PointsLedgerService.list_user_ledger(
                 session=session,

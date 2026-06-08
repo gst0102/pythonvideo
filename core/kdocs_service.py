@@ -23,6 +23,8 @@ from urllib.parse import urlparse
 import httpx
 from playwright.sync_api import sync_playwright
 
+from core.browser_guard import browser_slot, chromium_launch_args
+
 logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -232,12 +234,12 @@ class KDocsService:
     @staticmethod
     def fetch_params_via_playwright(share_url: str) -> dict | None:
         logger.info("[KDocs] Playwright 获取参数: %s", share_url)
-        with sync_playwright() as pw:
+        with browser_slot("kdocs_service.fetch_params"), sync_playwright() as pw:
             browser = pw.chromium.launch(
                 headless=True,
-                args=["--disable-blink-features=AutomationControlled", "--no-sandbox", "--disable-dev-shm-usage"],
+                args=chromium_launch_args("--disable-blink-features=AutomationControlled"),
             )
-            context = browser.new_context(user_agent=UA, viewport={"width": 1536, "height": 864})
+            context = browser.new_context(user_agent=UA, viewport={"width": 1280, "height": 720})
             page = context.new_page()
 
             captured_params = {}

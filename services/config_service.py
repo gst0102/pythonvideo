@@ -19,7 +19,7 @@ VIP_MONTHLY_PRICE = float(os.getenv("VIP_MONTHLY_PRICE", "9.90"))
 VIP_QUARTERLY_PRICE = float(os.getenv("VIP_QUARTERLY_PRICE", "26.90"))
 VIP_YEARLY_PRICE = float(os.getenv("VIP_YEARLY_PRICE", "88.80"))
 VIP_PACKAGE_GIFT_POINTS = {"month": 199, "quarter": 599, "year": 1299}
-VIP_PACKAGE_DAILY_LIMITS = {"month": 100, "quarter": 150, "year": 200}
+VIP_PACKAGE_DAILY_LIMITS = {"month": 100, "quarter": 200, "year": 300}
 VIP_PACKAGE_WITHDRAW_MIN_AMOUNT = 1.00
 
 DEFAULT_CONFIGS: Dict[str, Dict[str, Any]] = {
@@ -77,14 +77,18 @@ DEFAULT_CONFIGS: Dict[str, Dict[str, Any]] = {
     "withdrawal_config": {
         "enabled": True,
         "min_amount": 0.10,
+        "withdraw_min_first": 1.00,
+        "withdraw_min_normal": 5.00,
+        "withdraw_min_member": 1.00,
         "max_amount": 200.00,
         "daily_limit": 100.00,
         "tips": "提现申请提交后，实际到账以微信回调结果为准。",
     },
     "commission_settings": {
-        "level1_rate": 10.0,
+        "level1_rate": 50.0,
         "level2_rate": 5.0,
-        "rules": "邀请好友购买 VIP 后可获得佣金。",
+        "settlement_days": 7,
+        "rules": "邀请好友购买 VIP 后，返利积分先进入冻结账户，期满后可解冻。",
     },
     "service_settings": {
         "auto_reply": False,
