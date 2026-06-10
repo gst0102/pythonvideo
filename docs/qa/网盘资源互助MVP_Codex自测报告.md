@@ -1,97 +1,223 @@
 # 网盘资源互助MVP_Codex自测报告
 
-生成时间：2026-06-10
+生成时间：2026-06-11
 
 ## 1. 本次修改目标
 
-根据 `docs/handoff-latest.md` 和 `docs/new-docs/netdisk_miniapp_codex_delivery.md`，新增微信小程序静态原型，使用 mock 数据，不接后端，不修改现有 FastAPI 业务代码。
+根据 `AGENTS.md` 和 `docs/qa/网盘资源互助MVP_测试清单与验收标准.md`，对 `D:\Desktop\vedo-project\video-ts` 微信小程序静态原型执行阶段性 Codex 自测。
+
+本轮自测重点覆盖 TC-001 到 TC-048，尤其确认：
+
+- 未解锁资源不泄露完整网盘链接、提取码、解压码。
+- mock 解锁不真实扣积分。
+- 上传资源、补链/投诉进入待审核状态，不直接生效。
+- 赚积分任务已完成/达上限不可重复领取。
+- 求资源悬赏积分范围为 5-50。
+- “我的”页不展示旧提现、团队收益、二级分销或高风险收益承诺。
 
 ## 2. 修改文件列表
 
-新增小程序原型目录：
+本轮自测前已完成并提交的关键修复：
 
-- `miniprogram-netdisk/package.json`
-- `miniprogram-netdisk/README.md`
-- `miniprogram-netdisk/tsconfig.json`
-- `miniprogram-netdisk/vite.config.ts`
-- `miniprogram-netdisk/src/main.ts`
-- `miniprogram-netdisk/src/App.vue`
-- `miniprogram-netdisk/src/manifest.json`
-- `miniprogram-netdisk/src/pages.json`
-- `miniprogram-netdisk/src/styles/theme.scss`
-- `miniprogram-netdisk/src/data/mock.ts`
-- `miniprogram-netdisk/src/pages/home/index.vue`
-- `miniprogram-netdisk/src/pages/resources/list.vue`
-- `miniprogram-netdisk/src/pages/resources/detail.vue`
-- `miniprogram-netdisk/src/pages/requests/index.vue`
-- `miniprogram-netdisk/src/pages/requests/publish.vue`
-- `miniprogram-netdisk/src/pages/earn/index.vue`
-- `miniprogram-netdisk/src/pages/upload/index.vue`
-- `miniprogram-netdisk/src/pages/mine/index.vue`
+- `src/pages/netdisk/request-publish.vue`
+  - 悬赏积分范围从 5-200 收敛为 5-50。
+- `src/pages/netdisk/requests.vue`
+  - “提交资源”入口跳转上传资源页，避免流程断点。
+- `src/pages/netdisk/mine.vue`
+  - 新增资源互助 MVP 专用“我的”页。
+- `src/components/NetdiskTabBar.vue`
+  - “我的”tab 指向 `pages/netdisk/mine`。
+- `src/pages.json`
+  - 注册 `pages/netdisk/mine`，原生 tabBar “我的”也指向该页面。
 
-新增自测报告：
+本轮新增/更新文档：
 
 - `docs/qa/网盘资源互助MVP_Codex自测报告.md`
 
-本次同时准备提交此前未跟踪的新方向文档：
-
-- `docs/handoff-latest.md`
-- `docs/new-docs/`
-- `docs/悦享互动宝 MVP 产品开发文档.md`
+说明：本轮未修改后端业务代码，未接入真实接口，未修改支付、邀请、二级分销、提现逻辑。
 
 ## 3. 核心实现说明
 
-1. 新增独立 `miniprogram-netdisk/` uni-app + Vue 3 + TypeScript 静态原型工程。
-2. 使用蓝绿色轻工具风格，主题色与交付文档保持一致。
-3. 集中 mock 数据到 `src/data/mock.ts`，便于后续替换真实 API。
-4. 已实现页面：
-   - 首页
-   - 资源列表页
-   - 资源详情页
-   - 求资源列表页
-   - 发布求资源页
-   - 赚积分页
-   - 上传资源页
-   - 我的页面
-5. 资源详情页静态区分未解锁/已解锁状态，未解锁时不展示完整链接、提取码、解压码。
-6. 本次没有接入后端接口，没有修改支付、邀请、二级分销、小游戏、积分流水等后端逻辑。
+当前 `video-ts` 静态原型已形成以下 mock 闭环：
+
+1. 首页
+   - 展示互助资源库、积分卡、搜索框、网盘筛选、核心分类、今日精选、热门求资源、最新上传。
+   - 首页卡片仅展示摘要，不展示完整链接、提取码、解压码。
+2. 资源详情
+   - 未解锁资源隐藏完整网盘信息。
+   - 已解锁资源展示 mock 链接、提取码、解压码。
+   - “模拟解锁”只改变前端状态，不真实扣积分。
+3. 收藏
+   - 首页收藏按钮写入本地 storage。
+   - 收藏页读取本地 mock 收藏记录。
+4. 求资源
+   - 发布表单支持标题、期望网盘、分类、5-50 悬赏积分、补充说明。
+   - 提交保存到本地 mock，不冻结真实积分。
+   - 列表“提交资源”跳转上传资源页。
+5. 赚积分
+   - 任务中心展示签到、小游戏、上传资源、完成求资源、补链任务。
+   - 支持可领取、已完成、今日已达上限三种 mock 状态。
+6. 上传资源
+   - 提交资源后保存为待审核 mock 记录。
+   - 展示待审核、审核通过、驳回三种状态。
+7. 补链/投诉失效
+   - 详情页可进入“链接失效 / 我要补链”。
+   - 补链/投诉提交后保存为待审核 mock 记录。
+   - 展示待审核、补链通过、驳回三种状态。
+8. 我的
+   - 使用资源互助 MVP 专用页面。
+   - 展示积分、收藏、上传、补链、赚积分任务、邀请奖励记录待接入。
+   - 不展示提现、团队收益、二级分销或真实收益承诺。
 
 ## 4. 已运行测试
 
 ```text
-node JSON 解析检查：
-- miniprogram-netdisk/package.json
-- miniprogram-netdisk/src/pages.json
-- miniprogram-netdisk/src/manifest.json
-
-页面文件存在性检查：
-- rg --files miniprogram-netdisk/src/pages
+cd D:\Desktop\vedo-project\video-ts
+npm run type-check
 ```
+
+结果：通过。
+
+```text
+rg -n "link|extractCode|unzipCode|https://|提取码|解压码" src\pages\netdisk
+```
+
+结果：敏感字段仅出现在：
+
+- `mock.ts` 的 mock 数据中。
+- `detail.vue` 的已解锁展示分支。
+- `upload.vue` 和 `repair.vue` 的用户输入表单中。
+- 首页仅显示“未解锁前隐藏完整链接、提取码和解压码”提示，不直接渲染字段。
+
+```text
+rg -n "返佣|暴利|分销|稳赚|盗版|会员资源共享|最新影视|提现|团队收益|我的收益" src\pages\netdisk src\components\NetdiskTabBar.vue
+```
+
+结果：仅命中 `src/pages/netdisk/mine.vue` 的说明文案：
+
+```text
+当前“我的”页只展示资源互助 MVP 的 mock 账户信息，不包含提现、二级分销或真实收益承诺。
+```
+
+该命中属于风险排除说明，不是高风险承诺文案。
+
+```text
+rg -n "Math\.min\(50|悬赏积分范围|goUpload|pages/netdisk/mine|邀请奖励记录|不包含提现|不真实扣积分|待审核|补链通过" src\pages\netdisk src\components\NetdiskTabBar.vue src\pages.json
+```
+
+结果：确认以下关键点存在：
+
+- 求资源悬赏积分限制为 5-50。
+- 求资源“提交资源”入口跳转上传页。
+- “我的”tab 指向 `pages/netdisk/mine`。
+- 资源互助“我的”页有邀请奖励记录待接入和不包含提现/二级分销说明。
+- 上传/补链状态含待审核与补链通过。
 
 ## 5. 测试结果
 
-1. `package.json`、`pages.json`、`manifest.json` 均可被 Node 正常解析。
-2. 8 个小程序页面文件均已创建。
-3. 当前仓库没有安装 `miniprogram-netdisk/node_modules`，因此未运行完整 `npm run dev:mp-weixin` 或 `npm run build:mp-weixin`。
+| 范围 | 对应用例 | 结论 | 说明 |
+|---|---|---|---|
+| 首页基础展示 | TC-001 | 通过 | 首页结构、积分卡、搜索、筛选、分类和内容流已实现。 |
+| 首页不泄露链接 | TC-002 | 通过 | 首页资源卡不渲染 `link/extractCode/unzipCode` 原文。 |
+| 网盘筛选 | TC-003 | 部分通过 | 标签展示和高亮存在；当前仍为静态 mock，未实现真实筛选。 |
+| 分类入口 | TC-004 | 通过 | 首页仅展示 4 个一级分类。 |
+| 底部 tab | TC-005/TC-006 | 代码通过，需真机确认 | 自定义 tabBar 路由完整；安全区需微信开发者工具/真机复核。 |
+| 未解锁详情 | TC-007/TC-008 | 通过 | 未解锁分支不显示链接/提取码/解压码，并提示静态原型。 |
+| mock 解锁 | TC-009/TC-010/TC-012 | 通过 | 仅前端状态变化，不调用真实扣积分接口。 |
+| 已解锁详情 | TC-011 | 通过 | mock 已解锁资源可展示链接信息。 |
+| 异常资源 ID | TC-013 | 通过 | 不存在资源时展示空状态提示。 |
+| 收藏 | TC-014/TC-015/TC-016 | 通过 | 本地收藏状态可切换，收藏页不展示完整链接。 |
+| 求资源 | TC-017-TC-022 | 通过 | 发布表单校验、5-50 悬赏、mock 保存、提交资源入口均已覆盖。 |
+| 上传资源 | TC-023-TC-028 | 通过 | 必填校验、待审核、审核状态、任务联动已实现；不发真实奖励。 |
+| 补链/投诉 | TC-029-TC-034 | 通过 | 入口、校验、待审核、状态展示和任务联动已实现。 |
+| 赚积分 | TC-035-TC-040 | 通过 | 任务状态、不可重复领取、上传/补链跳转已实现。 |
+| 我的页 | TC-041/TC-042 | 通过 | 已新增资源互助“我的”页，不展示旧收益/提现/高风险承诺。 |
+| 视觉与安全区 | TC-043/TC-044 | 需要人工确认 | 代码层风格一致；真机安全区需人工验收。 |
+| 合规文案 | TC-045/TC-046 | 代码初检通过，需人工确认 | 未发现高风险承诺命中；内容合规仍需人工复核。 |
+| 本地存储 | TC-047/TC-048 | 部分通过 | 正常 storage 读写有覆盖；异常 storage 破坏场景未自动化执行。 |
 
-## 6. 未覆盖测试项
+## 6. 已通过测试项
 
-1. 未在微信开发者工具中真机/模拟器预览。
-2. 未执行 uni-app 编译构建。
-3. 未接入真实后端接口。
-4. 未覆盖真实积分扣减、积分流水、资源获取记录、求资源冻结、补链奖励等 P0 后端逻辑。
-5. 未进行 UI 截图验收和多机型适配验收。
+- P0：未解锁资源不在首页、收藏页、详情未解锁区域泄露完整链接。
+- P0：mock 解锁不真实扣积分，不调用真实接口。
+- P0：求资源悬赏积分范围已统一为 5-50。
+- P0：上传资源提交后为待审核 mock 状态，不直接变公开资源。
+- P0：补链/投诉提交后为待审核 mock 状态，不直接替换链接或发奖励。
+- P0：赚积分任务已完成/今日达上限不可重复领取。
+- P0：资源互助“我的”页不展示提现、团队收益、二级分销或收益承诺。
+- P1：求资源列表“提交资源”入口已可跳转上传页。
+- P1：上传资源、补链/投诉与任务中心状态联动已实现。
+- P1：不存在资源详情 ID 有空状态提示。
 
-## 7. 可能影响范围
+## 7. 未覆盖测试项
 
-本次新增目录和文档，不修改现有后端业务代码。理论影响范围仅限：
+- 未在微信开发者工具中完整点击走查。
+- 未做真机安全区、底部 tab 遮挡、多机型视觉验收。
+- 未做截图验收。
+- 未做自动化 UI 测试。
+- 未模拟破坏 storage 的异常值场景。
+- 未接入真实后端，因此 TC-049 到 TC-065 后端类测试未覆盖。
+- 未验证真实登录态、真实积分账户、积分流水、资源获取记录、支付回调、邀请奖励、二级收益、提现。
 
-1. 新增小程序静态原型目录。
-2. 新增/归档项目文档。
+## 8. 发现的问题
 
-## 8. 需要 AI 测试官复核的事项
+本轮自测前根据测试清单发现并已修复：
 
-1. 小程序页面是否符合 `netdisk_miniapp_codex_delivery.md` 的页面结构。
-2. 高风险文案是否已经避开“盗版、会员资源共享、返佣暴利”等表达。
-3. 静态原型确认后，是否进入 `ai-qa-acceptance` 测试清单生成阶段。
-4. 后续真实后端开发前，必须补齐资源解锁、积分扣减、求资源冻结、补链奖励、支付回调幂等等 P0 验收用例。
+1. `GAP-001`：求资源悬赏积分上限原型曾允许到 200，与测试清单 5-50 不一致。
+   - 已修复为 5-50。
+   - 提交：`31f8c6e fix: align request bounty and submit flow`
+2. `GAP-004`：求资源列表“提交资源”入口不能无响应。
+   - 已改为跳转上传资源页。
+   - 提交：`31f8c6e fix: align request bounty and submit flow`
+3. `GAP-002`：“我的”页保留旧收益/提现/会员可能与新资源 MVP 不一致。
+   - 已新增 `pages/netdisk/mine`，tab 指向新页面，避免旧页面作为资源 MVP 我的页。
+   - 提交：`7a94d54 feat: add netdisk profile tab`
+
+## 9. 需要 AI 测试官复核的风险
+
+- P0：未解锁资源是否在所有实际渲染路径、分享路径、未来接口响应中都不泄露链接。
+- P0：mock 解锁文案是否足够避免用户误解为真实扣积分。
+- P0：上传/补链/投诉状态是否满足“先审核、后生效、后奖励”的业务口径。
+- P0：任务中心是否需要进一步区分“领取奖励”和“去完成任务”，避免未来接真实奖励时重复发放。
+- P0：我的页“邀请奖励记录”待接入文案是否足够低风险。
+- P1：网盘筛选当前只做静态高亮，是否需要在静态原型阶段补 mock 筛选逻辑。
+- P1：异常 storage 场景需要补自动化或手工破坏数据验证。
+
+## 10. 需要人工确认的地方
+
+- 微信开发者工具完整预览和真机安全区。
+- 首页、详情、上传、补链、任务中心、我的页的视觉体验是否符合预期。
+- 影视娱乐分类、mock 资源标题和描述是否满足上线合规口径。
+- 是否接受 mock 解锁刷新后不持久化；真实后端接入时必须持久化。
+- 是否需要补独立“完成求资源提交页”，而不是暂时跳上传资源页。
+
+## 11. 可能影响范围
+
+本轮自测和近期修复影响范围仅限 `video-ts` 的 netdisk 静态原型和 `myproject` QA 文档：
+
+- 不影响 FastAPI 后端。
+- 不影响真实支付、邀请、二级分销、提现逻辑。
+- 不修改旧 `src/pages/mine/mine.vue` 业务页面。
+- 底部“我的”tab 已切换到 `src/pages/netdisk/mine.vue`，资源 MVP 入口不再直接进入旧收益/提现页。
+
+## 12. 下一步建议
+
+建议下一步调用 `ai-qa-acceptance` 进行正式验收，读取：
+
+- `AGENTS.md`
+- `docs/handoff-latest.md`
+- `docs/qa/网盘资源互助MVP_测试清单与验收标准.md`
+- `docs/qa/网盘资源互助MVP_Codex自测报告.md`
+
+输出并保存：
+
+```text
+docs/qa/网盘资源互助MVP_验收报告.md
+```
+
+验收重点：
+
+- P0 是否全部覆盖。
+- 是否仍存在阻断进入后端开发的静态原型问题。
+- 是否需要先补自动化测试或真机截图验收。
+- 是否可以进入后端资源域设计与开发。
