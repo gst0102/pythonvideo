@@ -22,6 +22,10 @@ load_dotenv(BACKEND_DIR / ".env", override=False)
 
 # ── 数据库连接 ─────────────────────────────────────────────
 def _build_database_url() -> str:
+    configured = os.getenv("DATABASE_URL")
+    if configured:
+        return configured
+
     if os.getenv("DB_HOST") or os.getenv("DB_NAME"):
         user = os.getenv("DB_USER", "postgres")
         password = quote_plus(os.getenv("DB_PASSWORD", "postgres"))
@@ -29,10 +33,6 @@ def _build_database_url() -> str:
         port = os.getenv("DB_PORT", "5432")
         name = os.getenv("DB_NAME", "video_app")
         return f"postgresql+asyncpg://{user}:{password}@{host}:{port}/{name}"
-
-    configured = os.getenv("DATABASE_URL")
-    if configured:
-        return configured
 
     user = os.getenv("DB_USER", "postgres")
     password = quote_plus(os.getenv("DB_PASSWORD", "postgres"))

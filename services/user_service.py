@@ -26,6 +26,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 from models.invite_relation import InviteRelation
 from models.user import User
+from services.invite_reward_service import InviteRewardService
 from services.points_account_service import PointsAccountService
 
 load_dotenv()
@@ -192,18 +193,18 @@ async def _bind_inviter_if_allowed(
     user.parent_id = inviter.id
     user.grand_parent_id = inviter.parent_id
     user.updated_at = datetime.utcnow()
-    session.add(
-        InviteRelation(
-            inviter_id=inviter.id,
-            invitee_id=user.id,
-            invite_code=normalized_code,
-            source=source,
-        )
+    relation = InviteRelation(
+        inviter_id=inviter.id,
+        invitee_id=user.id,
+        invite_code=normalized_code,
+        source=source,
     )
+    session.add(relation)
 
     await _inc_invite_stats(session, inviter.id, is_direct=True)
     if inviter.parent_id:
         await _inc_invite_stats(session, inviter.parent_id, is_direct=False)
+    await InviteRewardService.grant_register_reward_for_relation(session, relation)
     await session.flush()
     return True
 
