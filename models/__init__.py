@@ -38,6 +38,7 @@ from models.game_round import GameRound
 from models.daily_task_stat import DailyTaskStat
 from models.game_settlement_batch import GameSettlementBatch
 from models.game_user_settlement import GameUserSettlement
+from models.invite_relation import InviteRelation
 
 # 所有表，供 Alembic 自动发现
 __all__ = [
@@ -58,6 +59,7 @@ __all__ = [
     "DailyTaskStat",
     "GameSettlementBatch",
     "GameUserSettlement",
+    "InviteRelation",
     "get_session",
     "get_session_ctx",
     "init_db",

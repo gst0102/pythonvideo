@@ -14,6 +14,7 @@ class UserLoginRequest(BaseModel):
     avatar: str = ""
     nickname: str = ""
     invite_code: Optional[str] = None
+    inviter: Optional[str] = None
 
     @field_validator("code", mode="before")
     @classmethod
@@ -30,6 +31,16 @@ class UserLoginRequest(BaseModel):
         if not isinstance(value, str):
             raise ValueError("field must be string")
         return value.strip()
+
+    @field_validator("invite_code", "inviter", mode="before")
+    @classmethod
+    def normalize_invite_text(cls, value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError("field must be string")
+        cleaned = value.strip()
+        return cleaned or None
 
 
 class UserProfile(BaseModel):

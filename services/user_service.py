@@ -24,6 +24,7 @@ from dotenv import load_dotenv
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from models.invite_relation import InviteRelation
 from models.user import User
 from services.points_account_service import PointsAccountService
 
@@ -70,7 +71,7 @@ class UserService:
             openid: 微信 openid
             nickname: 用户昵称
             avatar: 头像 URL
-            invite_code: 邀请码（新用户注册时传入）
+            invite_code: 登录分享参数中的邀请人邀请码（首次有效绑定时使用）
 
         Returns:
             (User, is_new_user)
@@ -88,6 +89,7 @@ class UserService:
                 existing_user.nickname = normalized_nickname
             if avatar and avatar.strip():
                 existing_user.avatar = normalized_avatar
+            await _bind_inviter_if_allowed(session, existing_user, invite_code)
             existing_user.updated_at = datetime.utcnow()
             await session.flush()
             await PointsAccountService.ensure_user_account(session, existing_user.id)
@@ -96,33 +98,18 @@ class UserService:
         # 2. 新用户：注册
         new_invite_code = _generate_invite_code()
 
-        # 3. 处理邀请关系
-        parent_id = None
-        grand_parent_id = None
-
-        if invite_code:
-            inviter = await _find_user_by_invite_code(session, invite_code)
-            if inviter and str(inviter.id) != "":  # 不能邀请自己
-                parent_id = inviter.id
-                grand_parent_id = inviter.parent_id
-
-        # 4. 创建用户
+        # 3. 创建用户。邀请关系在 flush 后统一绑定，便于防自邀和写追踪表。
         user = User(
             openid=openid,
             nickname=normalized_nickname,
             avatar=normalized_avatar,
             invite_code=new_invite_code,
-            parent_id=parent_id,
-            grand_parent_id=grand_parent_id,
         )
         session.add(user)
         await session.flush()
 
-        # 5. 更新邀请人的统计数据
-        if parent_id:
-            await _inc_invite_stats(session, parent_id, is_direct=True)
-        if grand_parent_id:
-            await _inc_invite_stats(session, grand_parent_id, is_direct=False)
+        # 4. 首次绑定邀请人。已有绑定时不覆盖，绑定成功时写 invite_relations 追踪记录。
+        await _bind_inviter_if_allowed(session, user, invite_code)
 
         await PointsAccountService.ensure_user_account(session, user.id)
         return user, True
@@ -172,6 +159,53 @@ async def _find_user_by_invite_code(session: AsyncSession, invite_code: str) -> 
     stmt = select(User).where(User.invite_code == invite_code)
     result = await session.execute(stmt)
     return result.scalar_one_or_none()
+
+
+async def _bind_inviter_if_allowed(
+    session: AsyncSession,
+    user: User,
+    invite_code: Optional[str],
+    source: str = "login",
+) -> bool:
+    """Bind an inviter once when login carries a share invite code.
+
+    Rules:
+    - Empty/invalid invite code: no-op.
+    - Existing parent or existing relation: no rebind.
+    - Self invite: no-op.
+    - Successful bind updates user parent fields, inviter counters, and trace row.
+    """
+    normalized_code = (invite_code or "").strip()
+    if not normalized_code or user.parent_id:
+        return False
+
+    existing_relation_result = await session.execute(
+        select(InviteRelation).where(InviteRelation.invitee_id == user.id)
+    )
+    if existing_relation_result.scalar_one_or_none():
+        return False
+
+    inviter = await _find_user_by_invite_code(session, normalized_code)
+    if not inviter or inviter.id == user.id:
+        return False
+
+    user.parent_id = inviter.id
+    user.grand_parent_id = inviter.parent_id
+    user.updated_at = datetime.utcnow()
+    session.add(
+        InviteRelation(
+            inviter_id=inviter.id,
+            invitee_id=user.id,
+            invite_code=normalized_code,
+            source=source,
+        )
+    )
+
+    await _inc_invite_stats(session, inviter.id, is_direct=True)
+    if inviter.parent_id:
+        await _inc_invite_stats(session, inviter.parent_id, is_direct=False)
+    await session.flush()
+    return True
 
 
 async def _inc_invite_stats(session: AsyncSession, user_id: UUID, is_direct: bool):

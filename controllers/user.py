@@ -48,7 +48,7 @@ async def login(req: UserLoginRequest, session: AsyncSession = Depends(get_sessi
         openid,
         req.nickname,
         req.avatar,
-        req.invite_code,
+        req.inviter or req.invite_code,
     )
 
     token = create_access_token(

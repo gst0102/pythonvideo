@@ -3,9 +3,11 @@
 Checks:
 1. new user login auto-creates user and points account
 2. first login with invite_code binds direct and indirect inviter
-3. existing user re-login does not overwrite inviter binding
-4. using own invite code on re-login does not self-bind
-5. issued token is openid-based
+3. invite binding writes traceable invite_relations records
+4. existing user re-login does not overwrite inviter binding
+5. existing unbound user can bind once on later login
+6. using own invite code on re-login does not self-bind
+7. issued token is openid-based
 
 By default it only prints the plan. Pass --execute to run against the current
 database inside a rollback transaction.
@@ -30,11 +32,12 @@ from jose import jwt  # noqa: E402
 
 from jwt_create import ALGORITHM, SECRET_KEY, create_access_token  # noqa: E402
 from models.base import async_session_factory  # noqa: E402
+from models.invite_relation import InviteRelation  # noqa: E402
 from models.user import User  # noqa: E402
 from services.points_account_service import PointsAccountService  # noqa: E402
 from services.user_service import UserService  # noqa: E402
 
-REQUIRED_TABLES = {"users", "user_accounts"}
+REQUIRED_TABLES = {"users", "user_accounts", "invite_relations"}
 
 
 def _assert_equal(label: str, actual, expected) -> None:
@@ -45,6 +48,11 @@ def _assert_equal(label: str, actual, expected) -> None:
 def _assert_true(label: str, condition: bool) -> None:
     if not condition:
         raise AssertionError(label)
+
+
+async def _invite_relations_for(session, invitee_id: uuid.UUID) -> list[InviteRelation]:
+    result = await session.execute(select(InviteRelation).where(InviteRelation.invitee_id == invitee_id))
+    return list(result.scalars().all())
 
 
 async def verify() -> None:
@@ -74,6 +82,11 @@ async def verify() -> None:
             _assert_equal("direct inviter is_new", direct_is_new, True)
             _assert_equal("direct inviter parent_id", direct_user.parent_id, root_user.id)
             _assert_equal("direct inviter grand_parent_id", direct_user.grand_parent_id, None)
+            direct_relations = await _invite_relations_for(session, direct_user.id)
+            _assert_equal("direct relation count", len(direct_relations), 1)
+            _assert_equal("direct relation inviter_id", direct_relations[0].inviter_id, root_user.id)
+            _assert_equal("direct relation invite_code", direct_relations[0].invite_code, root_user.invite_code)
+            _assert_equal("direct relation source", direct_relations[0].source, "login")
 
             invitee_user, invitee_is_new = await UserService.get_or_create_user(
                 session,
@@ -85,6 +98,10 @@ async def verify() -> None:
             _assert_equal("invitee is_new", invitee_is_new, True)
             _assert_equal("invitee parent_id", invitee_user.parent_id, direct_user.id)
             _assert_equal("invitee grand_parent_id", invitee_user.grand_parent_id, root_user.id)
+            invitee_relations = await _invite_relations_for(session, invitee_user.id)
+            _assert_equal("invitee relation count", len(invitee_relations), 1)
+            _assert_equal("invitee relation inviter_id", invitee_relations[0].inviter_id, direct_user.id)
+            _assert_equal("invitee relation invite_code", invitee_relations[0].invite_code, direct_user.invite_code)
             invitee_account, _ = await PointsAccountService.ensure_user_account(session, invitee_user.id)
             _assert_equal("invitee account total_points", int(invitee_account.total_points), 0)
 
@@ -115,6 +132,42 @@ async def verify() -> None:
             _assert_equal("relogin grand_parent_id unchanged", relogin_user.grand_parent_id, root_user.id)
             _assert_equal("relogin nickname updated", relogin_user.nickname, "Invitee Updated")
             _assert_equal("relogin avatar updated", relogin_user.avatar, "avatar-updated")
+            relogin_relations = await _invite_relations_for(session, invitee_user.id)
+            _assert_equal("relogin relation count unchanged", len(relogin_relations), 1)
+            _assert_equal("relogin relation inviter unchanged", relogin_relations[0].inviter_id, direct_user.id)
+
+            late_user, late_is_new = await UserService.get_or_create_user(
+                session,
+                openid=f"{marker}-late",
+                nickname="Late Bind User",
+                avatar="",
+            )
+            _assert_equal("late user is_new", late_is_new, True)
+            _assert_equal("late user initially unbound", late_user.parent_id, None)
+            late_bound_user, late_bound_is_new = await UserService.get_or_create_user(
+                session,
+                openid=late_user.openid,
+                nickname="Late Bind User",
+                avatar="",
+                invite_code=other_inviter.invite_code,
+            )
+            _assert_equal("late bind relogin is_new", late_bound_is_new, False)
+            _assert_equal("late bind parent_id", late_bound_user.parent_id, other_inviter.id)
+            late_relations = await _invite_relations_for(session, late_user.id)
+            _assert_equal("late bind relation count", len(late_relations), 1)
+            _assert_equal("late bind relation inviter_id", late_relations[0].inviter_id, other_inviter.id)
+
+            late_rebind_user, late_rebind_is_new = await UserService.get_or_create_user(
+                session,
+                openid=late_user.openid,
+                nickname="Late Bind User",
+                avatar="",
+                invite_code=root_user.invite_code,
+            )
+            _assert_equal("late rebind is_new", late_rebind_is_new, False)
+            _assert_equal("late rebind parent_id unchanged", late_rebind_user.parent_id, other_inviter.id)
+            late_rebind_relations = await _invite_relations_for(session, late_user.id)
+            _assert_equal("late rebind relation count unchanged", len(late_rebind_relations), 1)
 
             solo_user, solo_is_new = await UserService.get_or_create_user(
                 session,
@@ -132,6 +185,8 @@ async def verify() -> None:
             )
             _assert_equal("solo relogin is_new", solo_relogin_is_new, False)
             _assert_equal("self invite parent_id remains none", solo_relogin.parent_id, None)
+            solo_relations = await _invite_relations_for(session, solo_user.id)
+            _assert_equal("self invite relation not created", len(solo_relations), 0)
 
             token = create_access_token({"openid": invitee_user.openid})
             payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
@@ -140,10 +195,10 @@ async def verify() -> None:
 
             all_users_result = await session.execute(select(User).where(User.openid.like(f"{marker}%")))
             created_users = list(all_users_result.scalars().all())
-            _assert_equal("created user count", len(created_users), 5)
+            _assert_equal("created user count", len(created_users), 6)
 
             print("Login and invite verification passed")
-            print("checks=new user, invite bind, no rebind, no self-bind, token openid")
+            print("checks=new user, invite trace, no rebind, late bind, no self-bind, token openid")
         finally:
             await session.rollback()
 
@@ -170,7 +225,7 @@ def main() -> None:
     args = parse_args()
     if not args.execute:
         print("Dry run only. Re-run with --execute to verify against the configured database.")
-        print("Checks: new user init, invite bind, no rebind, no self-bind, token openid.")
+        print("Checks: new user init, invite trace, no rebind, late bind, no self-bind, token openid.")
         return
 
     try:
