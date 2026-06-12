@@ -1,9 +1,31 @@
 <script setup lang="ts">
-import { categories, panFilters, requests, resources, userProfile } from "@/data/mock";
+import { ref } from "vue";
+import { onShow } from "@dcloudio/uni-app";
+import { categories, requests, userProfile } from "@/data/mock";
+import { getNetdiskResources, type NetdiskResource } from "@/utils/api";
+
+const resources = ref<NetdiskResource[]>([]);
+const loading = ref(false);
 
 const go = (url: string) => {
   uni.navigateTo({ url });
 };
+
+const levelText = (level?: string) => ({ normal: "普通", featured: "精选", official: "官方" }[level || ""] || level || "-");
+
+const loadFeatured = async () => {
+  loading.value = true;
+  try {
+    const data = await getNetdiskResources({ sort: "latest", page: 1, page_size: 3 });
+    resources.value = data.resources || [];
+  } catch {
+    resources.value = [];
+  } finally {
+    loading.value = false;
+  }
+};
+
+onShow(loadFeatured);
 </script>
 
 <template>
@@ -20,14 +42,6 @@ const go = (url: string) => {
     </view>
 
     <view class="search section" @click="go('/pages/resources/list')">搜索资源、网盘、资料关键词</view>
-
-    <scroll-view class="section" scroll-x>
-      <view class="chip-row">
-        <view v-for="(item, index) in panFilters" :key="item" class="chip" :class="{ 'chip-active': index === 0 }">
-          {{ item }}
-        </view>
-      </view>
-    </scroll-view>
 
     <view class="hero section">
       <view>
@@ -56,18 +70,20 @@ const go = (url: string) => {
         <view class="section-title">今日精选</view>
         <view class="muted" @click="go('/pages/resources/list')">查看全部</view>
       </view>
+      <view v-if="loading" class="muted">正在加载...</view>
       <view v-for="item in resources" :key="item.id" class="card resource-card" @click="go(`/pages/resources/detail?id=${item.id}`)">
         <view class="row between">
           <view class="resource-title">{{ item.title }}</view>
-          <view class="points">{{ item.points }}分</view>
+          <view class="points">{{ item.cost_points }}分</view>
         </view>
         <view class="row tag-line">
           <text class="tag">{{ item.pan }}</text>
-          <text class="tag tag-warning">{{ item.level }}</text>
+          <text class="tag tag-warning">{{ levelText(item.level) }}</text>
           <text class="tag">{{ item.category }}</text>
         </view>
-        <view class="meta">已验证{{ item.verifiedAt }} · 获取{{ item.downloads }} · 收藏{{ item.favorites }}</view>
+        <view class="meta">已验证{{ item.verified_at }} · 获取{{ item.downloads }} · 收藏{{ item.favorites }}</view>
       </view>
+      <view v-if="!loading && resources.length === 0" class="muted">暂无精选资源</view>
     </view>
 
     <view class="section">

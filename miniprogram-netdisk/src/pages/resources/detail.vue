@@ -2,9 +2,13 @@
 import { computed, ref } from "vue";
 import { onLoad } from "@dcloudio/uni-app";
 import {
-  ensureDevLogin,
+  ensureWechatLogin,
+  favoriteNetdiskResource,
+  getNetdiskFavorites,
   getNetdiskResourceAccess,
   getNetdiskResourceDetail,
+  reportNetdiskResource,
+  unfavoriteNetdiskResource,
   unlockNetdiskResource,
   type NetdiskResource,
   type NetdiskResourceAccess
@@ -23,6 +27,7 @@ const access = ref<NetdiskResourceAccess>({
   unzip_code: ""
 });
 const consumablePoints = ref(0);
+const favorited = ref(false);
 const unlocked = computed(() => access.value.unlocked);
 
 onLoad(async (query) => {
@@ -38,10 +43,12 @@ const loadDetail = async () => {
   try {
     const detail = await getNetdiskResourceDetail(selectedId.value);
     resource.value = detail.resource;
-    await ensureDevLogin();
+    await ensureWechatLogin();
     const accessData = await getNetdiskResourceAccess(selectedId.value);
     access.value = accessData.access;
     consumablePoints.value = accessData.account.consumable_points;
+    const favorites = await getNetdiskFavorites();
+    favorited.value = favorites.favorites.some((item) => item.resource.id === selectedId.value);
   } catch (error: any) {
     errorText.value = error?.message || "资源加载失败";
   } finally {
@@ -58,7 +65,7 @@ const confirmAccess = async () => {
     success: async (res) => {
       if (!res.confirm) return;
       try {
-        await ensureDevLogin();
+        await ensureWechatLogin();
         const data = await unlockNetdiskResource(selectedId.value);
         resource.value = data.resource;
         access.value = data.unlock;
@@ -81,6 +88,38 @@ const copyLink = () => {
     .filter(Boolean)
     .join("\n");
   uni.setClipboardData({ data: text });
+};
+
+const toggleFavorite = async () => {
+  if (!resource.value) return;
+  try {
+    await ensureWechatLogin();
+    const data = favorited.value ? await unfavoriteNetdiskResource(resource.value.id) : await favoriteNetdiskResource(resource.value.id);
+    resource.value = data.resource;
+    favorited.value = data.favorited;
+    uni.showToast({ title: favorited.value ? "已收藏" : "已取消收藏", icon: "none" });
+  } catch (error: any) {
+    uni.showToast({ title: error?.message || "收藏失败", icon: "none" });
+  }
+};
+
+const reportInvalid = () => {
+  if (!resource.value) return;
+  uni.showModal({
+    title: "确认投诉失效？",
+    content: "提交后运营会核验链接状态，确认失效后资源会隐藏处理。",
+    confirmText: "提交投诉",
+    success: async (res) => {
+      if (!res.confirm || !resource.value) return;
+      try {
+        await ensureWechatLogin();
+        await reportNetdiskResource(resource.value, "用户反馈：资源链接失效或内容不符。");
+        uni.showToast({ title: "投诉已提交", icon: "none" });
+      } catch (error: any) {
+        uni.showToast({ title: error?.message || "投诉失败", icon: "none" });
+      }
+    }
+  });
 };
 
 const levelText = (level?: string) => ({ normal: "普通", featured: "精选", official: "官方" }[level || ""] || level || "-");
@@ -132,8 +171,8 @@ const levelText = (level?: string) => ({ normal: "普通", featured: "精选", o
 
       <view class="bottom-actions">
         <view class="btn" @click="confirmAccess">{{ unlocked ? "已获取" : `获取资源 ${resource.cost_points}分` }}</view>
-        <view class="btn-plain">收藏</view>
-        <view class="btn-plain danger">投诉失效</view>
+        <view class="btn-plain" @click="toggleFavorite">{{ favorited ? "已收藏" : "收藏" }}</view>
+        <view class="btn-plain danger" @click="reportInvalid">投诉失效</view>
       </view>
     </template>
   </view>

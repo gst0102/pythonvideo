@@ -21,6 +21,14 @@ export interface NetdiskResource {
   is_active: boolean;
 }
 
+export interface ResourceListResponse {
+  resources: NetdiskResource[];
+  total: number;
+  page: number;
+  page_size: number;
+  has_more: boolean;
+}
+
 export interface NetdiskResourceAccess {
   unlocked: boolean;
   ledger_id: string;
@@ -62,6 +70,44 @@ export interface NotificationListResponse {
   unread_count: number;
 }
 
+export interface LoginResponse {
+  token: string;
+  is_new_user: boolean;
+  user: {
+    id: string;
+    openid: string;
+    nickname: string;
+    avatar: string;
+    account: UserAccount;
+  };
+}
+
+export interface FavoriteListResponse {
+  favorites: Array<{
+    resource: NetdiskResource;
+    favorite_at: string;
+    favorited: boolean;
+  }>;
+}
+
+export interface FavoriteResponse {
+  resource: NetdiskResource;
+  favorite_at?: string;
+  favorited: boolean;
+}
+
+export interface RepairResponse {
+  repair: {
+    id: string;
+    resource_id: string;
+    resource_title: string;
+    mode: string;
+    status: string;
+    audit_note: string;
+    note: string;
+  };
+}
+
 const getToken = () => {
   return uni.getStorageSync("token") || uni.getStorageSync("access_token") || "";
 };
@@ -71,16 +117,28 @@ export const setToken = (token: string) => {
   uni.setStorageSync("access_token", token);
 };
 
-export const ensureDevLogin = async () => {
+export const ensureWechatLogin = async () => {
   const existing = getToken();
   if (existing) return existing;
-  const data = await request<{ token: string }>("/user/dev-login", {
+  const code = await new Promise<string>((resolve, reject) => {
+    uni.login({
+      provider: "weixin",
+      success: (res) => {
+        if (res.code) {
+          resolve(res.code);
+          return;
+        }
+        reject(new Error("微信登录失败"));
+      },
+      fail: () => reject(new Error("微信登录失败"))
+    });
+  });
+  const data = await request<LoginResponse>("/user/login", {
     method: "POST",
     data: {
-      openid: "netdisk-dev-user",
-      nickname: "本地测试用户",
-      avatar: "",
-      seed_points: 200
+      code,
+      nickname: uni.getStorageSync("nickname") || "",
+      avatar: uni.getStorageSync("avatar") || ""
     }
   });
   setToken(data.token);
@@ -119,6 +177,14 @@ export const markNetdiskNotificationRead = (id: string) => {
   return request<NetdiskNotification>(`/netdisk/notifications/${id}/read`, { method: "POST" });
 };
 
+export const getNetdiskResources = (params: Record<string, string | number | undefined> = {}) => {
+  const query = Object.keys(params)
+    .filter((key) => params[key] !== undefined && params[key] !== "")
+    .map((key) => `${encodeURIComponent(key)}=${encodeURIComponent(String(params[key]))}`)
+    .join("&");
+  return request<ResourceListResponse>(`/netdisk/resources${query ? `?${query}` : ""}`);
+};
+
 export const getNetdiskResourceDetail = (id: string) => {
   return request<ResourceDetailResponse>(`/netdisk/resources/${id}`);
 };
@@ -129,4 +195,28 @@ export const getNetdiskResourceAccess = (id: string) => {
 
 export const unlockNetdiskResource = (id: string) => {
   return request<ResourceUnlockResponse>(`/netdisk/resources/${id}/unlock`, { method: "POST" });
+};
+
+export const getNetdiskFavorites = () => {
+  return request<FavoriteListResponse>("/netdisk/favorites");
+};
+
+export const favoriteNetdiskResource = (id: string) => {
+  return request<FavoriteResponse>(`/netdisk/resources/${id}/favorite`, { method: "POST" });
+};
+
+export const unfavoriteNetdiskResource = (id: string) => {
+  return request<FavoriteResponse>(`/netdisk/resources/${id}/favorite`, { method: "DELETE" });
+};
+
+export const reportNetdiskResource = (resource: NetdiskResource, note: string) => {
+  return request<RepairResponse>("/netdisk/repairs", {
+    method: "POST",
+    data: {
+      resource_id: resource.id,
+      mode: "report",
+      pan: resource.pan,
+      note
+    }
+  });
 };
