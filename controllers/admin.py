@@ -12,6 +12,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from core.response import response
 from models.base import get_session
 from models.chat import ChatMessage
+from models.netdisk_audit_log import NetdiskAuditLog
 from models.netdisk_repair import NetdiskRepair
 from models.netdisk_resource import NetdiskResource as NetdiskResourceModel
 from models.netdisk_risk_record import NetdiskRiskRecord
@@ -355,6 +356,7 @@ async def admin_approve_netdisk_upload(
         payload = await NetdiskResourceService.approve_upload(session, upload_id, req.note)
     except ValueError as exc:
         return response([], 400, str(exc))
+    await _record_netdisk_audit_log(session, "upload_approve", "netdisk_upload", upload_id, payload["upload"].get("title", ""), req.note)
     return response(data=jsonable_encoder(payload), msg="netdisk upload approved")
 
 
@@ -368,6 +370,7 @@ async def admin_reject_netdisk_upload(
         payload = await NetdiskResourceService.reject_upload(session, upload_id, req.note)
     except ValueError as exc:
         return response([], 400, str(exc))
+    await _record_netdisk_audit_log(session, "upload_reject", "netdisk_upload", upload_id, payload["upload"].get("title", ""), req.note)
     return response(data=jsonable_encoder(payload), msg="netdisk upload rejected")
 
 
@@ -381,6 +384,7 @@ async def admin_confirm_invalid_netdisk_upload(
         payload = await NetdiskResourceService.confirm_upload_invalid(session, upload_id, req.note)
     except ValueError as exc:
         return response([], 400, str(exc))
+    await _record_netdisk_audit_log(session, "upload_confirm_invalid", "netdisk_upload", upload_id, payload["upload"].get("title", ""), req.note)
     return response(data=jsonable_encoder(payload), msg="netdisk upload invalid confirmed")
 
 
@@ -430,6 +434,14 @@ async def admin_restore_netdisk_resource(
         payload = await NetdiskResourceService.restore_resource(session, resource_id, req.note)
     except ValueError as exc:
         return response([], 400, str(exc))
+    await _record_netdisk_audit_log(
+        session,
+        "resource_restore",
+        "netdisk_resource",
+        resource_id,
+        payload["resource"].get("title", ""),
+        req.note,
+    )
     return response(data=jsonable_encoder(payload), msg="netdisk resource restored")
 
 
@@ -447,6 +459,39 @@ async def admin_list_netdisk_risk_records(
         page_size=page_size,
     )
     return response(data=jsonable_encoder(payload))
+
+
+@router.get("/netdisk/audit-logs", summary="admin netdisk audit operation logs")
+async def admin_list_netdisk_audit_logs(
+    action: Optional[str] = Query(None),
+    target_type: Optional[str] = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    session: AsyncSession = Depends(get_session),
+):
+    query = select(NetdiskAuditLog)
+    if action:
+        query = query.where(NetdiskAuditLog.action == action)
+    if target_type:
+        query = query.where(NetdiskAuditLog.target_type == target_type)
+
+    total = (await session.execute(select(func.count()).select_from(query.subquery()))).scalar() or 0
+    items = (
+        await session.execute(
+            query.order_by(NetdiskAuditLog.created_at.desc())
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        )
+    ).scalars().all()
+    return response(
+        data={
+            "logs": [_netdisk_audit_log_to_dict(item) for item in items],
+            "total": int(total),
+            "page": page,
+            "page_size": page_size,
+            "has_more": ((page - 1) * page_size + len(items)) < total,
+        }
+    )
 
 
 @router.get("/netdisk/audit-config", summary="get netdisk audit config")
@@ -547,6 +592,7 @@ async def admin_netdisk_ops_dashboard(session: AsyncSession = Depends(get_sessio
             )
         )
     ).scalar() or 0
+    trends = await _build_netdisk_ops_trends(session, today_start)
 
     return response(
         data={
@@ -575,6 +621,7 @@ async def admin_netdisk_ops_dashboard(session: AsyncSession = Depends(get_sessio
                 "repairs": int(today_repairs),
                 "reports": int(today_reports),
             },
+            "trends": trends,
             "generated_at": datetime.utcnow().isoformat(),
         }
     )
@@ -602,7 +649,7 @@ async def admin_seed_netdisk_review_demo(session: AsyncSession = Depends(get_ses
     if not account:
         session.add(UserAccount(user_id=user.id, consumable_points=2, total_points=2))
 
-    marker = datetime.utcnow().strftime("%m%d%H%M%S")
+    marker = datetime.utcnow().strftime("%m%d%H%M%S%f")
     uploads = [
         NetdiskUpload(
             user_id=user.id,
@@ -721,6 +768,9 @@ async def admin_approve_netdisk_repair(
         payload = await NetdiskResourceService.approve_repair(session, repair_id, req.note)
     except ValueError as exc:
         return response([], 400, str(exc))
+    repair = payload["repair"]
+    action = "report_confirm" if repair.get("mode") == "report" else "repair_approve"
+    await _record_netdisk_audit_log(session, action, "netdisk_repair", repair_id, repair.get("resource_title", ""), req.note)
     return response(data=jsonable_encoder(payload), msg="netdisk repair approved")
 
 
@@ -734,6 +784,9 @@ async def admin_reject_netdisk_repair(
         payload = await NetdiskResourceService.reject_repair(session, repair_id, req.note)
     except ValueError as exc:
         return response([], 400, str(exc))
+    repair = payload["repair"]
+    action = "report_reject" if repair.get("mode") == "report" else "repair_reject"
+    await _record_netdisk_audit_log(session, action, "netdisk_repair", repair_id, repair.get("resource_title", ""), req.note)
     return response(data=jsonable_encoder(payload), msg="netdisk repair rejected")
 
 
@@ -747,6 +800,9 @@ async def admin_confirm_invalid_netdisk_repair(
         payload = await NetdiskResourceService.confirm_repair_invalid(session, repair_id, req.note)
     except ValueError as exc:
         return response([], 400, str(exc))
+    repair = payload["repair"]
+    action = "report_confirm" if repair.get("mode") == "report" else "repair_confirm_invalid"
+    await _record_netdisk_audit_log(session, action, "netdisk_repair", repair_id, repair.get("resource_title", ""), req.note)
     return response(data=jsonable_encoder(payload), msg="netdisk repair invalid confirmed")
 
 
@@ -792,6 +848,114 @@ async def admin_reply(req: AdminReplyRequest, session: AsyncSession = Depends(ge
         data={"id": str(msg.id), "content": msg.content, "created_at": msg.created_at.isoformat()},
         msg="reply sent",
     )
+
+
+async def _record_netdisk_audit_log(
+    session: AsyncSession,
+    action: str,
+    target_type: str,
+    target_id: str,
+    target_title: str,
+    note: str = "",
+) -> None:
+    session.add(
+        NetdiskAuditLog(
+            admin_name="admin",
+            action=action,
+            target_type=target_type,
+            target_id=target_id,
+            target_title=(target_title or "")[:200],
+            note=(note or "").strip(),
+            result="success",
+        )
+    )
+    await session.flush()
+
+
+async def _build_netdisk_ops_trends(session: AsyncSession, today_start: datetime) -> list[dict]:
+    start_day = today_start - timedelta(days=6)
+    trends: list[dict] = []
+    for index in range(7):
+        day_start = start_day + timedelta(days=index)
+        day_end = day_start + timedelta(days=1)
+
+        new_users = (
+            await session.execute(
+                select(func.count()).select_from(User).where(
+                    User.created_at >= day_start,
+                    User.created_at < day_end,
+                )
+            )
+        ).scalar() or 0
+        gain = (
+            await session.execute(
+                select(
+                    func.count(func.distinct(PointsLedger.user_id)),
+                    func.coalesce(func.sum(PointsLedger.points_delta), 0),
+                ).where(
+                    PointsLedger.created_at >= day_start,
+                    PointsLedger.created_at < day_end,
+                    PointsLedger.points_delta > 0,
+                )
+            )
+        ).one()
+        spend = (
+            await session.execute(
+                select(
+                    func.count(func.distinct(PointsLedger.user_id)),
+                    func.coalesce(func.sum(PointsLedger.points_delta), 0),
+                ).where(
+                    PointsLedger.created_at >= day_start,
+                    PointsLedger.created_at < day_end,
+                    PointsLedger.points_delta < 0,
+                )
+            )
+        ).one()
+        uploads = (
+            await session.execute(
+                select(func.count()).select_from(NetdiskUpload).where(
+                    NetdiskUpload.created_at >= day_start,
+                    NetdiskUpload.created_at < day_end,
+                )
+            )
+        ).scalar() or 0
+        reports = (
+            await session.execute(
+                select(func.count()).select_from(NetdiskRepair).where(
+                    NetdiskRepair.created_at >= day_start,
+                    NetdiskRepair.created_at < day_end,
+                    NetdiskRepair.mode == "report",
+                )
+            )
+        ).scalar() or 0
+
+        trends.append(
+            {
+                "date": day_start.strftime("%Y-%m-%d"),
+                "new_users": int(new_users),
+                "gain_users": int(gain[0] or 0),
+                "gain_points": int(gain[1] or 0),
+                "spend_users": int(spend[0] or 0),
+                "spend_points": abs(int(spend[1] or 0)),
+                "uploads": int(uploads),
+                "reports": int(reports),
+            }
+        )
+    return trends
+
+
+def _netdisk_audit_log_to_dict(item: NetdiskAuditLog) -> dict:
+    return {
+        "id": str(item.id),
+        "admin_name": item.admin_name,
+        "action": item.action,
+        "target_type": item.target_type,
+        "target_id": item.target_id,
+        "target_title": item.target_title,
+        "note": item.note,
+        "result": item.result,
+        "created_at": item.created_at.isoformat() if item.created_at else None,
+    }
 
 
 def _user_to_dict(user: User) -> dict:
