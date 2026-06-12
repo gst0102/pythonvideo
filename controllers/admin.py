@@ -395,6 +395,65 @@ async def admin_list_netdisk_repairs(
     return response(data=jsonable_encoder(payload))
 
 
+@router.get("/netdisk/resources", summary="admin netdisk resource list")
+async def admin_list_netdisk_resources(
+    active: Optional[bool] = Query(None),
+    keyword: Optional[str] = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    session: AsyncSession = Depends(get_session),
+):
+    payload = await NetdiskResourceService.list_admin_resources(
+        session=session,
+        active=active,
+        keyword=keyword,
+        page=page,
+        page_size=page_size,
+    )
+    return response(data=jsonable_encoder(payload))
+
+
+@router.post("/netdisk/resources/{resource_id}/restore", summary="admin restore netdisk resource")
+async def admin_restore_netdisk_resource(
+    resource_id: str,
+    req: NetdiskAdminAuditRequest,
+    session: AsyncSession = Depends(get_session),
+):
+    try:
+        payload = await NetdiskResourceService.restore_resource(session, resource_id, req.note)
+    except ValueError as exc:
+        return response([], 400, str(exc))
+    return response(data=jsonable_encoder(payload), msg="netdisk resource restored")
+
+
+@router.get("/netdisk/risk-records", summary="admin netdisk pending recovery list")
+async def admin_list_netdisk_risk_records(
+    status: Optional[str] = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    session: AsyncSession = Depends(get_session),
+):
+    payload = await NetdiskResourceService.list_risk_records(
+        session=session,
+        status=status,
+        page=page,
+        page_size=page_size,
+    )
+    return response(data=jsonable_encoder(payload))
+
+
+@router.get("/netdisk/audit-config", summary="get netdisk audit config")
+async def admin_get_netdisk_audit_config(session: AsyncSession = Depends(get_session)):
+    config = await ConfigService.get(session, "netdisk_audit_config")
+    return response(data=config)
+
+
+@router.put("/netdisk/audit-config", summary="update netdisk audit config")
+async def admin_update_netdisk_audit_config(req: ConfigUpdateRequest, session: AsyncSession = Depends(get_session)):
+    config = await ConfigService.set(session, "netdisk_audit_config", req.config_data)
+    return response(data=config.config_data, msg="netdisk audit config updated")
+
+
 @router.post("/netdisk/repairs/{repair_id}/approve", summary="admin approve netdisk repair/report")
 async def admin_approve_netdisk_repair(
     repair_id: str,

@@ -15,11 +15,13 @@ from models.netdisk_favorite import NetdiskFavorite
 from models.netdisk_repair import NetdiskRepair
 from models.netdisk_request import NetdiskRequest
 from models.netdisk_resource import NetdiskResource as NetdiskResourceModel
+from models.netdisk_risk_record import NetdiskRiskRecord
 from models.netdisk_upload import NetdiskUpload
 from models.points_ledger import PointsLedger
 from models.user import User
 from models.user_account import UserAccount
 from services.invite_reward_service import InviteRewardService
+from services.config_service import ConfigService
 from services.points_account_service import PointsAccountService
 
 ResourceLevel = Literal["normal", "featured", "official"]
@@ -362,6 +364,7 @@ class NetdiskResourceService:
         if not clean_description:
             raise ValueError("description is required")
 
+        config = await _get_netdisk_audit_config(session)
         item = NetdiskUpload(
             user_id=user.id,
             title=clean_title[:120],
@@ -372,7 +375,7 @@ class NetdiskResourceService:
             unzip_code=(unzip_code or "").strip()[:64],
             description=clean_description[:800],
             status="pending",
-            reward_points=5,
+            reward_points=int(config["upload_reward_points"]),
             audit_note="已记录待验证奖励，验证通过后释放为可用积分。",
         )
         session.add(item)
@@ -427,7 +430,8 @@ class NetdiskResourceService:
         if not clean_note:
             raise ValueError("note is required")
 
-        reward_points = 5 if clean_mode == "repair" else 0
+        config = await _get_netdisk_audit_config(session)
+        reward_points = int(config["repair_reward_points"]) if clean_mode == "repair" else 0
         item = NetdiskRepair(
             user_id=user.id,
             resource_id=resource.id,
@@ -449,8 +453,8 @@ class NetdiskResourceService:
         session.add(item)
         await session.flush()
         await _grant_repair_frozen_reward(session, user, item)
-        if clean_mode == "report":
-            await _hide_resource_after_report_threshold(session, resource.id)
+        if clean_mode == "report" and config["auto_hide_on_report"]:
+            await _hide_resource_after_report_threshold(session, resource.id, int(config["report_hide_threshold"]))
         await session.refresh(item)
         return {"repair": _build_repair_payload(item, user.id)}
 
@@ -573,6 +577,8 @@ class NetdiskResourceService:
             item.updated_at = datetime.utcnow()
             if item.mode == "repair":
                 await _clawback_repair_reward(session, item, "repair_reward_rejected")
+            elif item.mode == "report":
+                await _restore_resource_if_report_below_threshold(session, item.resource_id)
         await session.flush()
         await session.refresh(item)
         return {"repair": _build_repair_payload(item)}
@@ -599,6 +605,72 @@ class NetdiskResourceService:
         await session.flush()
         await session.refresh(item)
         return {"repair": _build_repair_payload(item)}
+
+    @staticmethod
+    async def restore_resource(session: AsyncSession, resource_id: str, note: str = "") -> dict:
+        result = await session.execute(select(NetdiskResourceModel).where(NetdiskResourceModel.id == resource_id))
+        resource = result.scalar_one_or_none()
+        if not resource:
+            raise ValueError("resource not found")
+
+        resource.is_active = True
+        resource.updated_at = datetime.utcnow()
+        await session.flush()
+        await session.refresh(resource)
+        return {"resource": _build_resource_payload(resource), "note": note.strip()}
+
+    @staticmethod
+    async def list_admin_resources(
+        session: AsyncSession,
+        active: bool | None = None,
+        keyword: str | None = None,
+        page: int = 1,
+        page_size: int = 50,
+    ) -> dict:
+        query = select(NetdiskResourceModel)
+        if active is not None:
+            query = query.where(NetdiskResourceModel.is_active == active)
+        clean_keyword = (keyword or "").strip()
+        if clean_keyword:
+            like = f"%{clean_keyword}%"
+            query = query.where(
+                or_(
+                    NetdiskResourceModel.id.ilike(like),
+                    NetdiskResourceModel.title.ilike(like),
+                    NetdiskResourceModel.category.ilike(like),
+                    NetdiskResourceModel.pan.ilike(like),
+                )
+            )
+
+        total = (await session.execute(select(func.count()).select_from(query.subquery()))).scalar() or 0
+        items = (
+            await session.execute(
+                query.order_by(NetdiskResourceModel.updated_at.desc())
+                .offset((page - 1) * page_size)
+                .limit(page_size)
+            )
+        ).scalars().all()
+        return _build_admin_list_payload("resources", [_build_resource_payload(item) for item in items], total, page, page_size)
+
+    @staticmethod
+    async def list_risk_records(
+        session: AsyncSession,
+        status: str | None = None,
+        page: int = 1,
+        page_size: int = 50,
+    ) -> dict:
+        query = select(NetdiskRiskRecord)
+        if status:
+            query = query.where(NetdiskRiskRecord.status == status)
+        total = (await session.execute(select(func.count()).select_from(query.subquery()))).scalar() or 0
+        items = (
+            await session.execute(
+                query.order_by(NetdiskRiskRecord.created_at.desc())
+                .offset((page - 1) * page_size)
+                .limit(page_size)
+            )
+        ).scalars().all()
+        return _build_admin_list_payload("risk_records", [_build_risk_payload(item) for item in items], total, page, page_size)
 
 
 async def _get_unlock_ledger(session: AsyncSession, user_id, resource_id: str) -> PointsLedger | None:
@@ -744,10 +816,12 @@ async def _clawback_netdisk_reward(
 
     release_ledger = await PointsAccountService.get_ledger_by_idempotency_key(session, release_idempotency_key)
     if release_ledger:
+        config = await _get_netdisk_audit_config(session)
+        penalty_points = reward_points * int(config["invalid_penalty_multiplier"])
         await _deduct_consumable_penalty(
             session=session,
             user_id=user_id,
-            points=reward_points,
+            points=penalty_points,
             idempotency_key=penalty_idempotency_key,
             related_type=related_type,
             related_id=related_id,
@@ -780,21 +854,35 @@ async def _deduct_consumable_penalty(
     remark: str,
 ) -> None:
     account, _ = await PointsAccountService.ensure_user_account(session, user_id)
-    penalty_points = min(int(points), int(account.consumable_points))
-    if penalty_points <= 0:
-        return
+    target_points = int(points)
+    penalty_points = min(target_points, int(account.consumable_points))
 
-    await PointsAccountService.consume_consumable_points(
-        session=session,
-        user_id=user_id,
-        points=penalty_points,
-        source="netdisk",
-        change_type=change_type,
-        idempotency_key=idempotency_key,
-        related_type=related_type,
-        related_id=related_id,
-        remark=remark,
-    )
+    if penalty_points > 0:
+        await PointsAccountService.consume_consumable_points(
+            session=session,
+            user_id=user_id,
+            points=penalty_points,
+            source="netdisk",
+            change_type=change_type,
+            idempotency_key=idempotency_key,
+            related_type=related_type,
+            related_id=related_id,
+            remark=remark,
+        )
+
+    shortfall = target_points - penalty_points
+    if shortfall > 0:
+        await _create_risk_record(
+            session=session,
+            user_id=user_id,
+            related_type=related_type,
+            related_id=related_id,
+            reason=change_type,
+            points_due=shortfall,
+            points_collected=penalty_points,
+            idempotency_key=f"{idempotency_key}:risk",
+            note=f"{remark}；可用积分不足，待追缴 {shortfall} 分。",
+        )
 
 
 async def _hide_resource_after_report_threshold(session: AsyncSession, resource_id: str, threshold: int = 3) -> None:
@@ -815,6 +903,75 @@ async def _hide_resource_after_report_threshold(session: AsyncSession, resource_
     if resource:
         resource.is_active = False
         resource.updated_at = datetime.utcnow()
+
+
+async def _restore_resource_if_report_below_threshold(session: AsyncSession, resource_id: str) -> None:
+    config = await _get_netdisk_audit_config(session)
+    report_count = (
+        await session.execute(
+            select(func.count()).select_from(NetdiskRepair).where(
+                NetdiskRepair.resource_id == resource_id,
+                NetdiskRepair.mode == "report",
+                NetdiskRepair.status != "rejected",
+            )
+        )
+    ).scalar() or 0
+    if int(report_count) >= int(config["report_hide_threshold"]):
+        return
+
+    result = await session.execute(select(NetdiskResourceModel).where(NetdiskResourceModel.id == resource_id))
+    resource = result.scalar_one_or_none()
+    if resource:
+        resource.is_active = True
+        resource.updated_at = datetime.utcnow()
+
+
+async def _create_risk_record(
+    session: AsyncSession,
+    user_id,
+    related_type: str,
+    related_id: str,
+    reason: str,
+    points_due: int,
+    points_collected: int,
+    idempotency_key: str,
+    note: str,
+) -> None:
+    existing = (
+        await session.execute(select(NetdiskRiskRecord).where(NetdiskRiskRecord.idempotency_key == idempotency_key))
+    ).scalar_one_or_none()
+    if existing:
+        return
+
+    item = NetdiskRiskRecord(
+        user_id=user_id,
+        related_type=related_type,
+        related_id=related_id,
+        reason=reason,
+        points_due=int(points_due),
+        points_collected=int(points_collected),
+        status="open",
+        note=note,
+        idempotency_key=idempotency_key,
+    )
+    session.add(item)
+    await session.flush()
+
+
+async def _get_netdisk_audit_config(session: AsyncSession) -> dict:
+    raw = await ConfigService.get(session, "netdisk_audit_config")
+    return _normalize_netdisk_audit_config(raw)
+
+
+def _normalize_netdisk_audit_config(raw: dict | None) -> dict:
+    data = dict(raw or {})
+    return {
+        "upload_reward_points": max(0, int(data.get("upload_reward_points", 5) or 0)),
+        "repair_reward_points": max(0, int(data.get("repair_reward_points", 5) or 0)),
+        "report_hide_threshold": max(1, int(data.get("report_hide_threshold", 3) or 3)),
+        "invalid_penalty_multiplier": max(1, int(data.get("invalid_penalty_multiplier", 1) or 1)),
+        "auto_hide_on_report": bool(data.get("auto_hide_on_report", True)),
+    }
 
 
 async def _get_upload_or_raise(session: AsyncSession, upload_id: str) -> NetdiskUpload:
@@ -978,6 +1135,7 @@ def _build_resource_payload(resource: NetdiskResource | NetdiskResourceModel) ->
         "downloads": resource.downloads,
         "favorites": resource.favorites,
         "description": resource.description,
+        "is_active": bool(getattr(resource, "is_active", True)),
     }
 
 
@@ -1041,6 +1199,22 @@ def _build_admin_list_payload(key: str, items: list[dict], total: int, page: int
         "page": int(page),
         "page_size": int(page_size),
         "has_more": (int(page) - 1) * int(page_size) + len(items) < int(total),
+    }
+
+
+def _build_risk_payload(item: NetdiskRiskRecord) -> dict:
+    return {
+        "id": str(item.id),
+        "user_id": str(item.user_id),
+        "related_type": item.related_type,
+        "related_id": item.related_id,
+        "reason": item.reason,
+        "points_due": int(item.points_due),
+        "points_collected": int(item.points_collected),
+        "status": item.status,
+        "note": item.note,
+        "created_at": item.created_at,
+        "updated_at": item.updated_at,
     }
 
 

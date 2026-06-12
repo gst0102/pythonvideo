@@ -43,6 +43,7 @@ from models.netdisk_favorite import NetdiskFavorite
 from models.netdisk_repair import NetdiskRepair
 from models.netdisk_request import NetdiskRequest
 from models.netdisk_resource import NetdiskResource
+from models.netdisk_risk_record import NetdiskRiskRecord
 from models.netdisk_upload import NetdiskUpload
 
 # 所有表，供 Alembic 自动发现
@@ -69,6 +70,7 @@ __all__ = [
     "NetdiskRepair",
     "NetdiskRequest",
     "NetdiskResource",
+    "NetdiskRiskRecord",
     "NetdiskUpload",
     "get_session",
     "get_session_ctx",

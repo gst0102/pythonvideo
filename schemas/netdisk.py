@@ -18,6 +18,7 @@ class NetdiskResourceSummary(BaseModel):
     downloads: int
     favorites: int
     description: str
+    is_active: bool = True
 
 
 class NetdiskResourceListResponse(BaseModel):

@@ -132,6 +132,13 @@ DEFAULT_CONFIGS: Dict[str, Dict[str, Any]] = {
             }
         ],
     },
+    "netdisk_audit_config": {
+        "upload_reward_points": 5,
+        "repair_reward_points": 5,
+        "report_hide_threshold": 3,
+        "invalid_penalty_multiplier": 1,
+        "auto_hide_on_report": True,
+    },
 }
 
 
