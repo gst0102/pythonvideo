@@ -341,6 +341,7 @@ async def reject_withdrawal(
 @router.get("/netdisk/uploads", summary="admin netdisk upload list")
 async def admin_list_netdisk_uploads(
     status: Optional[str] = Query(None),
+    upload_id: Optional[str] = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
     session: AsyncSession = Depends(get_session),
@@ -348,6 +349,7 @@ async def admin_list_netdisk_uploads(
     payload = await NetdiskResourceService.list_admin_uploads(
         session=session,
         status=status,
+        upload_id=upload_id,
         page=page,
         page_size=page_size,
     )
@@ -361,7 +363,13 @@ async def admin_approve_netdisk_upload(
     session: AsyncSession = Depends(get_session),
 ):
     try:
-        payload = await NetdiskResourceService.approve_upload(session, upload_id, req.note)
+        payload = await NetdiskResourceService.approve_upload(
+            session,
+            upload_id,
+            req.note,
+            resource_level=req.resource_level,
+            cost_points=req.cost_points,
+        )
     except ValueError as exc:
         return response([], 400, str(exc))
     await _record_netdisk_audit_log(session, "upload_approve", "netdisk_upload", upload_id, payload["upload"].get("title", ""), req.note)

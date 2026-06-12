@@ -1,16 +1,20 @@
 """Netdisk resource routes."""
 
+from uuid import UUID
+
 from fastapi import APIRouter, Depends
-from sqlmodel import select
+from sqlmodel import func, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from core.response import response
 from jwt_create import get_current_user
 from models.base import get_session
+from models.netdisk_user_notification import NetdiskUserNotification
 from models.user import User
 from schemas.netdisk import (
     NetdiskFavoriteListResponse,
     NetdiskFavoriteResponse,
+    NetdiskNotificationListResponse,
     NetdiskRepairCreate,
     NetdiskRepairListResponse,
     NetdiskRepairResponse,
@@ -257,6 +261,61 @@ async def list_netdisk_favorites(
     return response(data=NetdiskFavoriteListResponse(**payload).model_dump(mode="json"))
 
 
+@router.get("/notifications", summary="list current user's netdisk notifications")
+async def list_netdisk_notifications(
+    openid: str = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    user = await _get_user_by_openid(session, openid)
+    if not user:
+        return response([], 404, "user not found")
+
+    rows = (
+        await session.execute(
+            select(NetdiskUserNotification)
+            .where(NetdiskUserNotification.user_id == user.id)
+            .order_by(NetdiskUserNotification.created_at.desc())
+            .limit(100)
+        )
+    ).scalars().all()
+    unread_count = (
+        await session.execute(
+            select(func.count())
+            .select_from(NetdiskUserNotification)
+            .where(
+                NetdiskUserNotification.user_id == user.id,
+                NetdiskUserNotification.status == "unread",
+            )
+        )
+    ).scalar() or 0
+    payload = {
+        "notifications": [_build_notification_payload(item) for item in rows],
+        "unread_count": int(unread_count),
+    }
+    return response(data=NetdiskNotificationListResponse(**payload).model_dump(mode="json"))
+
+
+@router.post("/notifications/{notification_id}/read", summary="mark netdisk notification read")
+async def mark_netdisk_notification_read(
+    notification_id: str,
+    openid: str = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    user = await _get_user_by_openid(session, openid)
+    if not user:
+        return response([], 404, "user not found")
+    try:
+        item_id = UUID(notification_id)
+    except ValueError:
+        return response([], 400, "invalid notification id")
+    item = await session.get(NetdiskUserNotification, item_id)
+    if not item or item.user_id != user.id:
+        return response([], 404, "notification not found")
+    item.status = "read"
+    await session.flush()
+    return response(data=_build_notification_payload(item), msg="notification marked read")
+
+
 @router.post("/resources/{resource_id}/favorite", summary="favorite netdisk resource")
 async def favorite_netdisk_resource(
     resource_id: str,
@@ -294,3 +353,16 @@ async def unfavorite_netdisk_resource(
         return response([], 400, str(exc))
 
     return response(data=NetdiskUnfavoriteResponse(**payload).model_dump(mode="json"), msg="resource unfavorited")
+
+
+def _build_notification_payload(item: NetdiskUserNotification) -> dict:
+    return {
+        "id": str(item.id),
+        "notice_type": item.notice_type,
+        "title": item.title,
+        "content": item.content,
+        "related_type": item.related_type,
+        "related_id": item.related_id,
+        "status": item.status,
+        "created_at": item.created_at,
+    }

@@ -463,10 +463,16 @@ class NetdiskResourceService:
     async def list_admin_uploads(
         session: AsyncSession,
         status: str | None = None,
+        upload_id: str | None = None,
         page: int = 1,
         page_size: int = 50,
     ) -> dict:
         query = select(NetdiskUpload)
+        if upload_id:
+            try:
+                query = query.where(NetdiskUpload.id == UUID(upload_id))
+            except ValueError:
+                return _build_admin_list_payload("uploads", [], 0, page, page_size)
         if status:
             query = query.where(NetdiskUpload.status == status)
 
@@ -511,16 +517,34 @@ class NetdiskResourceService:
         return _build_admin_list_payload("repairs", [_build_repair_payload(item) for item in items], total, page, page_size)
 
     @staticmethod
-    async def approve_upload(session: AsyncSession, upload_id: str, note: str = "") -> dict:
+    async def approve_upload(
+        session: AsyncSession,
+        upload_id: str,
+        note: str = "",
+        resource_level: str | None = None,
+        cost_points: int | None = None,
+    ) -> dict:
         item = await _get_upload_or_raise(session, upload_id)
         if item.status in {"rejected", "invalid_confirmed", "deleted", "canceled"}:
             raise ValueError(f"upload is already {item.status}")
 
+        level, cost = _normalize_resource_level_and_cost(resource_level, cost_points)
+        previous_status = item.status
         item.status = "approved"
-        item.audit_note = note.strip() or "系统验证通过，待验证奖励已释放为可用积分。"
+        item.audit_note = note.strip() or f"系统验证通过，资源等级为{_resource_level_label(level)}，解锁消耗 {cost} 积分。"
         item.updated_at = datetime.utcnow()
         await _release_upload_reward(session, item)
-        resource = await _ensure_resource_from_upload(session, item)
+        resource = await _ensure_resource_from_upload(session, item, level, cost)
+        if previous_status != "approved":
+            await _create_user_notification(
+                session=session,
+                user_id=item.user_id,
+                notice_type="netdisk_upload_approved",
+                title="上传审核通过",
+                content=f"你上传的资源「{item.title}」已通过审核，等级为{_resource_level_label(level)}，解锁消耗 {cost} 积分；待验证奖励已释放为可用积分。",
+                related_type="netdisk_upload",
+                related_id=str(item.id),
+            )
         await session.flush()
         await session.refresh(item)
         return {"upload": _build_upload_payload(item), "resource": _build_resource_payload(resource)}
@@ -535,6 +559,15 @@ class NetdiskResourceService:
             item.audit_note = note.strip() or "系统审核未通过，待验证奖励已扣回。"
             item.updated_at = datetime.utcnow()
             await _clawback_upload_reward(session, item, "upload_reward_rejected")
+            await _create_user_notification(
+                session=session,
+                user_id=item.user_id,
+                notice_type="netdisk_upload_rejected",
+                title="上传审核未通过",
+                content=f"你上传的资源「{item.title}」未通过审核，待验证奖励不会释放。原因：{item.audit_note}",
+                related_type="netdisk_upload",
+                related_id=str(item.id),
+            )
         await session.flush()
         await session.refresh(item)
         return {"upload": _build_upload_payload(item)}
@@ -547,6 +580,15 @@ class NetdiskResourceService:
             item.audit_note = note.strip() or "资源确认失效，奖励已扣回或处罚。"
             item.updated_at = datetime.utcnow()
             await _clawback_upload_reward(session, item, "upload_reward_invalid")
+            await _create_user_notification(
+                session=session,
+                user_id=item.user_id,
+                notice_type="netdisk_upload_invalid",
+                title="上传资源确认失效",
+                content=f"你上传的资源「{item.title}」已被确认失效，奖励将按规则扣回或进入待追缴。",
+                related_type="netdisk_upload",
+                related_id=str(item.id),
+            )
         await session.flush()
         await session.refresh(item)
         return {"upload": _build_upload_payload(item)}
@@ -557,6 +599,7 @@ class NetdiskResourceService:
         if item.status in {"rejected", "invalid_confirmed", "deleted", "canceled"}:
             raise ValueError(f"repair is already {item.status}")
 
+        previous_status = item.status
         item.status = "approved"
         item.audit_note = note.strip() or (
             "系统验证通过，待验证奖励已释放为可用积分。"
@@ -566,6 +609,20 @@ class NetdiskResourceService:
         item.updated_at = datetime.utcnow()
         if item.mode == "repair":
             await _release_repair_reward(session, item)
+        if previous_status != "approved":
+            await _create_user_notification(
+                session=session,
+                user_id=item.user_id,
+                notice_type="netdisk_repair_approved" if item.mode == "repair" else "netdisk_report_approved",
+                title="补链审核通过" if item.mode == "repair" else "投诉核验通过",
+                content=(
+                    f"你提交的「{item.resource_title}」补链已通过审核，待验证奖励已释放为可用积分。"
+                    if item.mode == "repair"
+                    else f"你提交的「{item.resource_title}」投诉已核验通过，资源已进入处理流程。"
+                ),
+                related_type="netdisk_repair",
+                related_id=str(item.id),
+            )
         await session.flush()
         await session.refresh(item)
         return {"repair": _build_repair_payload(item)}
@@ -587,6 +644,19 @@ class NetdiskResourceService:
                 await _clawback_repair_reward(session, item, "repair_reward_rejected")
             elif item.mode == "report":
                 await _restore_resource_if_report_below_threshold(session, item.resource_id)
+            await _create_user_notification(
+                session=session,
+                user_id=item.user_id,
+                notice_type="netdisk_repair_rejected" if item.mode == "repair" else "netdisk_report_rejected",
+                title="补链审核未通过" if item.mode == "repair" else "投诉未通过核验",
+                content=(
+                    f"你提交的「{item.resource_title}」补链未通过审核，待验证奖励不会释放。原因：{item.audit_note}"
+                    if item.mode == "repair"
+                    else f"你提交的「{item.resource_title}」投诉未通过核验。原因：{item.audit_note}"
+                ),
+                related_type="netdisk_repair",
+                related_id=str(item.id),
+            )
         await session.flush()
         await session.refresh(item)
         return {"repair": _build_repair_payload(item)}
@@ -610,6 +680,19 @@ class NetdiskResourceService:
             resource.updated_at = datetime.utcnow()
             if item.mode == "repair":
                 await _clawback_repair_reward(session, item, "repair_reward_invalid")
+            await _create_user_notification(
+                session=session,
+                user_id=item.user_id,
+                notice_type="netdisk_repair_invalid" if item.mode == "repair" else "netdisk_report_confirmed",
+                title="补链确认失效" if item.mode == "repair" else "投诉确认有效",
+                content=(
+                    f"你补链的资源「{item.resource_title}」已确认失效，奖励将按规则扣回或进入待追缴。"
+                    if item.mode == "repair"
+                    else f"你投诉的资源「{item.resource_title}」已确认失效，资源已隐藏等待处理。"
+                ),
+                related_type="netdisk_repair",
+                related_id=str(item.id),
+            )
         await session.flush()
         await session.refresh(item)
         return {"repair": _build_repair_payload(item)}
@@ -782,7 +865,27 @@ async def _get_unlock_ledger(session: AsyncSession, user_id, resource_id: str) -
     return result.scalar_one_or_none()
 
 
-async def _ensure_resource_from_upload(session: AsyncSession, item: NetdiskUpload) -> NetdiskResourceModel:
+def _normalize_resource_level_and_cost(resource_level: str | None, cost_points: int | None) -> tuple[str, int]:
+    cost_by_level = {"normal": 5, "featured": 10, "official": 20}
+    level = (resource_level or "normal").strip()
+    if level not in cost_by_level:
+        raise ValueError("invalid resource level")
+    cost = int(cost_points or cost_by_level[level])
+    if cost != cost_by_level[level]:
+        raise ValueError("resource level and cost points do not match")
+    return level, cost
+
+
+def _resource_level_label(level: str) -> str:
+    return {"normal": "普通", "featured": "精选", "official": "官方"}.get(level, level)
+
+
+async def _ensure_resource_from_upload(
+    session: AsyncSession,
+    item: NetdiskUpload,
+    resource_level: str = "normal",
+    cost_points: int = 5,
+) -> NetdiskResourceModel:
     resource_id = f"upload-{str(item.id).replace('-', '')[:24]}"
     result = await session.execute(select(NetdiskResourceModel).where(NetdiskResourceModel.source_upload_id == str(item.id)))
     resource = result.scalar_one_or_none()
@@ -792,8 +895,8 @@ async def _ensure_resource_from_upload(session: AsyncSession, item: NetdiskUploa
         resource.title = item.title
         resource.category = item.category
         resource.pan = item.pan
-        resource.level = resource.level or "normal"
-        resource.cost_points = int(resource.cost_points or 5)
+        resource.level = resource_level
+        resource.cost_points = int(cost_points)
         resource.description = item.description
         resource.link = item.link
         resource.extract_code = item.extract_code
@@ -810,8 +913,8 @@ async def _ensure_resource_from_upload(session: AsyncSession, item: NetdiskUploa
         title=item.title,
         category=item.category,
         pan=item.pan,
-        level="normal",
-        cost_points=5,
+        level=resource_level,
+        cost_points=int(cost_points),
         downloads=0,
         favorites=0,
         description=item.description,

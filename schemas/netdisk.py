@@ -183,6 +183,24 @@ class NetdiskRepairResponse(BaseModel):
     repair: NetdiskRepairItem
 
 
+class NetdiskNotificationItem(BaseModel):
+    id: str
+    notice_type: str
+    title: str
+    content: str
+    related_type: str
+    related_id: str
+    status: str
+    created_at: datetime
+
+
+class NetdiskNotificationListResponse(BaseModel):
+    notifications: list[NetdiskNotificationItem]
+    unread_count: int
+
+
 class NetdiskAdminAuditRequest(BaseModel):
     note: str = ""
     result_action: str | None = None
+    resource_level: str | None = None
+    cost_points: int | None = None

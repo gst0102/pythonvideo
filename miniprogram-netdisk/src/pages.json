@@ -45,6 +45,12 @@
       }
     },
     {
+      "path": "pages/messages/index",
+      "style": {
+        "navigationBarTitleText": "我的消息"
+      }
+    },
+    {
       "path": "pages/mine/index",
       "style": {
         "navigationBarTitleText": "我的"

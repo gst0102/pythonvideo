@@ -1,7 +1,24 @@
 <script setup lang="ts">
 import { userProfile } from "@/data/mock";
 
-const menu = ["我的上传", "我的获取", "我的求资源", "我的收藏", "积分明细", "投诉/补链通知", "规则说明", "联系客服"];
+const menu = [
+  { title: "我的消息", url: "/pages/messages/index" },
+  { title: "我的上传" },
+  { title: "我的获取" },
+  { title: "我的求资源" },
+  { title: "我的收藏" },
+  { title: "积分明细" },
+  { title: "规则说明" },
+  { title: "联系客服" }
+];
+
+const openMenu = (item: { title: string; url?: string }) => {
+  if (item.url) {
+    uni.navigateTo({ url: item.url });
+    return;
+  }
+  uni.showToast({ title: "功能整理中", icon: "none" });
+};
 </script>
 
 <template>
@@ -39,8 +56,8 @@ const menu = ["我的上传", "我的获取", "我的求资源", "我的收藏",
     </view>
 
     <view class="card section menu">
-      <view v-for="item in menu" :key="item" class="menu-item">
-        <text>{{ item }}</text>
+      <view v-for="item in menu" :key="item.title" class="menu-item" @click="openMenu(item)">
+        <text>{{ item.title }}</text>
         <text class="muted">›</text>
       </view>
     </view>
