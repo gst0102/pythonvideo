@@ -372,10 +372,11 @@ class NetdiskResourceService:
             description=clean_description[:800],
             status="pending",
             reward_points=5,
-            audit_note="系统正在校验链接有效性和内容匹配度。",
+            audit_note="已记录待验证奖励，验证通过后释放为可用积分。",
         )
         session.add(item)
         await session.flush()
+        await _grant_upload_frozen_reward(session, user, item)
         await session.refresh(item)
         return {"upload": _build_upload_payload(item)}
 
@@ -438,10 +439,15 @@ class NetdiskResourceService:
             note=clean_note[:500],
             status="pending",
             reward_points=reward_points,
-            audit_note="已提交补链，等待审核。" if clean_mode == "repair" else "已提交投诉，等待核验。",
+            audit_note=(
+                "已记录待验证奖励，验证通过后释放为可用积分。"
+                if clean_mode == "repair"
+                else "已提交投诉，等待核验。"
+            ),
         )
         session.add(item)
         await session.flush()
+        await _grant_repair_frozen_reward(session, user, item)
         await session.refresh(item)
         return {"repair": _build_repair_payload(item, user.id)}
 
@@ -454,6 +460,52 @@ async def _get_unlock_ledger(session: AsyncSession, user_id, resource_id: str) -
         )
     )
     return result.scalar_one_or_none()
+
+
+async def _grant_upload_frozen_reward(
+    session: AsyncSession,
+    user: User,
+    item: NetdiskUpload,
+) -> None:
+    reward_points = int(item.reward_points)
+    if reward_points <= 0:
+        return
+
+    await PointsAccountService.add_points(
+        session=session,
+        user_id=user.id,
+        points=reward_points,
+        source="netdisk",
+        change_type="upload_reward_frozen",
+        availability="frozen",
+        idempotency_key=f"netdisk_upload_frozen:{item.id}",
+        related_type="netdisk_upload",
+        related_id=str(item.id),
+        remark=f"网盘上传待验证奖励：{item.title}",
+    )
+
+
+async def _grant_repair_frozen_reward(
+    session: AsyncSession,
+    user: User,
+    item: NetdiskRepair,
+) -> None:
+    reward_points = int(item.reward_points)
+    if item.mode != "repair" or reward_points <= 0:
+        return
+
+    await PointsAccountService.add_points(
+        session=session,
+        user_id=user.id,
+        points=reward_points,
+        source="netdisk",
+        change_type="repair_reward_frozen",
+        availability="frozen",
+        idempotency_key=f"netdisk_repair_frozen:{item.id}",
+        related_type="netdisk_repair",
+        related_id=str(item.id),
+        remark=f"网盘补链待验证奖励：{item.resource_title}",
+    )
 
 
 async def _get_favorite(session: AsyncSession, user_id, resource_id: str) -> NetdiskFavorite | None:

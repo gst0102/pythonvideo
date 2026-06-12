@@ -196,10 +196,22 @@ MVP 阶段支持以下网盘标签：
 
 ### 6.4 上传资源积分
 
-- 上传资源审核通过：+5 分
+- 上传资源创建成功并通过基础系统校验后，先记录冻结奖励 +5 分
+- `frozen_points` 是待验证奖励，用户可见但不可消耗
+- 上传提交成功不等于获得可用积分，后续验证通过后再从冻结积分释放为可用积分
+- 同一上传记录只能生成一笔冻结奖励，幂等键为 `netdisk_upload_frozen:{upload_id}`
 - 资源被其他用户下载：上传者 +1 分
 - 同一用户重复下载不重复奖励上传者
 - 单个资源每日下载奖励上限为 10 分
+
+### 6.4.1 补链与投诉积分
+
+- 有效补链创建成功并通过基础系统校验后，先记录冻结奖励 +5 分
+- 补链冻结奖励流水：`source=netdisk`，`availability=frozen`，`change_type=repair_reward_frozen`
+- 补链幂等键为 `netdisk_repair_frozen:{repair_id}`，同一补链记录不能重复生成冻结奖励
+- 投诉只用于核验资源有效性，不发放积分
+- `rejected / canceled / deleted / invalid_confirmed` 状态不释放可用积分
+- 后续确认资源失效时，优先扣回对应记录的冻结奖励；处罚规则另行实现
 
 ### 6.5 获取资源积分消耗
 
@@ -208,6 +220,14 @@ MVP 阶段建议三档：
 - 普通资源：-5 分
 - 精选资源：-10 分
 - 官方合集：-20 分
+
+当前实现要求：
+
+- 资源解锁只扣 `consumable_points`
+- 解锁流水：`source=netdisk`，`availability=consumable`，`change_type=resource_unlock`
+- 重复解锁同一资源不重复扣分，幂等键为 `netdisk_unlock:{user_id}:{resource_id}`
+- 上传和补链冻结奖励不增加 `consumable_points`
+- 本轮不实现 `frozen_points -> consumable_points` 释放接口，也不实现失效确认扣回接口
 
 积分分配建议：
 
