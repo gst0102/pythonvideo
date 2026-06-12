@@ -23,6 +23,7 @@ from schemas.checkin import CheckinAccountSummary
 from schemas.user import (
     AdRewardGrantRequest,
     AdRewardGrantResponse,
+    DevLoginRequest,
     UserLoginRequest,
     UserLoginResponse,
     UserProfile,
@@ -66,6 +67,45 @@ async def login(req: UserLoginRequest, session: AsyncSession = Depends(get_sessi
             user=profile,
         ).model_dump(mode="json"),
         msg="注册成功" if is_new else "登录成功",
+    )
+
+
+@router.post("/dev-login", summary="本地开发测试登录")
+async def dev_login(req: DevLoginRequest, session: AsyncSession = Depends(get_session)):
+    if os.getenv("ENABLE_DEV_LOGIN", "false").lower() != "true":
+        return response([], 403, "dev login disabled")
+
+    user, is_new = await UserService.get_or_create_user(
+        session=session,
+        openid=req.openid,
+        nickname=req.nickname,
+        avatar=req.avatar,
+        invite_code=req.invite_code,
+    )
+
+    account, _ = await PointsAccountService.ensure_user_account(session, user.id)
+    if req.seed_points > 0:
+        _, account, _ = await PointsAccountService.add_points(
+            session=session,
+            user_id=user.id,
+            points=req.seed_points,
+            source="dev",
+            change_type="dev_seed",
+            availability="consumable",
+            idempotency_key=f"dev_seed:{user.id}:{req.seed_points}",
+            related_type="dev_user",
+            related_id=str(user.id),
+            remark="local dev seed points",
+        )
+
+    token = create_access_token({"openid": user.openid})
+    return response(
+        data=UserLoginResponse(
+            token=token,
+            is_new_user=is_new,
+            user=_build_profile(user, account),
+        ).model_dump(mode="json"),
+        msg="本地开发登录成功",
     )
 
 

@@ -67,6 +67,21 @@ class UserLoginResponse(BaseModel):
     user: UserProfile
 
 
+class DevLoginRequest(BaseModel):
+    openid: str = "dev-openid"
+    nickname: str = "本地测试用户"
+    avatar: str = ""
+    invite_code: Optional[str] = None
+    seed_points: int = Field(default=100, ge=0, le=10000)
+
+    @field_validator("openid", mode="before")
+    @classmethod
+    def check_openid_not_empty(cls, value: Any) -> Any:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("openid is required")
+        return value.strip()
+
+
 class UserUpdateRequest(BaseModel):
     avatar: Optional[str] = None
     nickname: Optional[str] = None
