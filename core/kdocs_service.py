@@ -89,6 +89,35 @@ def extract_text_nodes(block, texts=None):
     return texts
 
 
+def _is_resource_link(text: str) -> bool:
+    value = (text or "").strip().lower()
+    return value.startswith(("http://", "https://", "magnet:", "thunder://", "ed2k://"))
+
+
+def _extract_inline_link(text: str) -> str:
+    match = re.search(r"(https?://\S+|magnet:\?\S+|thunder://\S+|ed2k://\S+)", text or "", re.I)
+    return match.group(1).strip() if match else ""
+
+
+def _read_following_link(all_texts: list[str], index: int) -> tuple[str, int]:
+    i = index + 1
+    while i < len(all_texts):
+        line = all_texts[i].strip()
+        inline = _extract_inline_link(line)
+        if inline:
+            return inline, i + 1
+        if line in {"链接:", "链接：", "链接"} or "链接" in line:
+            i += 1
+            continue
+        if _is_resource_link(line):
+            return line, i + 1
+        if not line or line.startswith(("提取码", "密码")):
+            i += 1
+            continue
+        break
+    return "", index + 1
+
+
 def parse_doc(doc_data: dict, crawl_time: str) -> list[dict]:
     content = doc_data.get("content", {}).get("content", [])
     if not content:
@@ -154,21 +183,18 @@ def parse_doc(doc_data: dict, crawl_time: str) -> list[dict]:
         baidu_code = ""
         quark_link = ""
         k4_link = ""
+        xunlei_link = ""
 
         while i < len(all_texts):
             line = all_texts[i].strip()
 
             if "百度链接" in line or line == "百度":
-                i += 1
-                if i < len(all_texts):
-                    link_line = all_texts[i].strip()
-                    if link_line == "链接:" or link_line == "链接：":
-                        i += 1
-                        if i < len(all_texts):
-                            baidu_link = all_texts[i].strip()
-                    elif link_line.startswith("http"):
-                        baidu_link = link_line
-                i += 1
+                inline = _extract_inline_link(line)
+                if inline:
+                    baidu_link = inline
+                    i += 1
+                else:
+                    baidu_link, i = _read_following_link(all_texts, i)
             elif "提取码" in line:
                 m = re.search(r"提取码[：:]\s*(\S+)", line)
                 if m:
@@ -179,26 +205,29 @@ def parse_doc(doc_data: dict, crawl_time: str) -> list[dict]:
                         baidu_code = all_texts[i].strip().strip("：:")
                 i += 1
             elif "夸克" in line:
-                i += 1
-                if i < len(all_texts) and "链接" in all_texts[i]:
+                inline = _extract_inline_link(line)
+                if inline:
+                    quark_link = inline
                     i += 1
-                if i < len(all_texts):
-                    quark_link = all_texts[i].strip()
-                    if not quark_link.startswith("http"):
-                        quark_link = ""
-                        i -= 1
-                i += 1
+                else:
+                    quark_link, i = _read_following_link(all_texts, i)
             elif "4K链接" in line:
-                i += 1
-                if i < len(all_texts):
-                    k4_link = all_texts[i].strip()
-                    if not k4_link.startswith("http"):
-                        k4_link = ""
-                        i -= 1
-                i += 1
+                inline = _extract_inline_link(line)
+                if inline:
+                    k4_link = inline
+                    i += 1
+                else:
+                    k4_link, i = _read_following_link(all_texts, i)
+            elif "迅雷" in line or "磁力" in line:
+                inline = _extract_inline_link(line)
+                if inline:
+                    xunlei_link = inline
+                    i += 1
+                else:
+                    xunlei_link, i = _read_following_link(all_texts, i)
             else:
                 if (not line or
-                    line.startswith("http") or
+                    _is_resource_link(line) or
                     line.startswith("百度") or
                     line.startswith("夸克") or
                     line.startswith("提取码") or
@@ -224,6 +253,7 @@ def parse_doc(doc_data: dict, crawl_time: str) -> list[dict]:
             "baidu_code": baidu_code,
             "quark_link": quark_link,
             "4k_link": k4_link,
+            "xunlei_link": xunlei_link,
             "update_time": crawl_time,
         })
 
@@ -434,6 +464,7 @@ class KDocsService:
                 "baidu_password": entry.get("baidu_code", ""),
                 "quark_url": entry.get("quark_link", ""),
                 "4k_url": entry.get("4k_link", ""),
+                "xunlei_url": entry.get("xunlei_link", ""),
                 "update_time": now,
             })
 
