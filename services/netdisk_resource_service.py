@@ -734,6 +734,7 @@ async def _release_upload_reward(session: AsyncSession, item: NetdiskUpload) -> 
     if reward_points <= 0:
         return
 
+    await _ensure_upload_frozen_reward(session, item)
     await PointsAccountService.move_frozen_to_consumable(
         session=session,
         user_id=item.user_id,
@@ -752,6 +753,7 @@ async def _release_repair_reward(session: AsyncSession, item: NetdiskRepair) -> 
     if item.mode != "repair" or reward_points <= 0:
         return
 
+    await _ensure_repair_frozen_reward(session, item)
     await PointsAccountService.move_frozen_to_consumable(
         session=session,
         user_id=item.user_id,
@@ -830,6 +832,15 @@ async def _clawback_netdisk_reward(
         )
         return
 
+    clawback_ledger = await PointsAccountService.get_ledger_by_idempotency_key(session, clawback_idempotency_key)
+    if clawback_ledger:
+        return
+
+    frozen_ledger_key = _frozen_reward_key_for_related(related_type, related_id)
+    frozen_ledger = await PointsAccountService.get_ledger_by_idempotency_key(session, frozen_ledger_key)
+    if not frozen_ledger:
+        return
+
     await PointsAccountService.deduct_frozen_points(
         session=session,
         user_id=user_id,
@@ -841,6 +852,56 @@ async def _clawback_netdisk_reward(
         related_id=related_id,
         remark=remark,
     )
+
+
+async def _ensure_upload_frozen_reward(session: AsyncSession, item: NetdiskUpload) -> None:
+    reward_points = int(item.reward_points)
+    if reward_points <= 0:
+        return
+    existing = await PointsAccountService.get_ledger_by_idempotency_key(session, f"netdisk_upload_frozen:{item.id}")
+    if existing:
+        return
+    await PointsAccountService.add_points(
+        session=session,
+        user_id=item.user_id,
+        points=reward_points,
+        source="netdisk",
+        change_type="upload_reward_frozen",
+        availability="frozen",
+        idempotency_key=f"netdisk_upload_frozen:{item.id}",
+        related_type="netdisk_upload",
+        related_id=str(item.id),
+        remark=f"网盘上传历史待审奖励补记：{item.title}",
+    )
+
+
+async def _ensure_repair_frozen_reward(session: AsyncSession, item: NetdiskRepair) -> None:
+    reward_points = int(item.reward_points)
+    if item.mode != "repair" or reward_points <= 0:
+        return
+    existing = await PointsAccountService.get_ledger_by_idempotency_key(session, f"netdisk_repair_frozen:{item.id}")
+    if existing:
+        return
+    await PointsAccountService.add_points(
+        session=session,
+        user_id=item.user_id,
+        points=reward_points,
+        source="netdisk",
+        change_type="repair_reward_frozen",
+        availability="frozen",
+        idempotency_key=f"netdisk_repair_frozen:{item.id}",
+        related_type="netdisk_repair",
+        related_id=str(item.id),
+        remark=f"网盘补链历史待审奖励补记：{item.resource_title}",
+    )
+
+
+def _frozen_reward_key_for_related(related_type: str, related_id: str) -> str:
+    if related_type == "netdisk_upload":
+        return f"netdisk_upload_frozen:{related_id}"
+    if related_type == "netdisk_repair":
+        return f"netdisk_repair_frozen:{related_id}"
+    return ""
 
 
 async def _deduct_consumable_penalty(
