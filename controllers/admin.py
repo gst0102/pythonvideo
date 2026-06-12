@@ -4,6 +4,7 @@ from typing import Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
+from fastapi.encoders import jsonable_encoder
 from sqlmodel import and_, func, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
@@ -13,11 +14,13 @@ from models.chat import ChatMessage
 from models.user import User
 from models.withdrawal import WithdrawalRecord
 from schemas.admin_settlement import AdminGameSettlementTriggerRequest, AdminGameSettlementUpsertRequest
+from schemas.netdisk import NetdiskAdminAuditRequest
 from schemas.user import AdminReplyRequest, AdminUserVipUpdateRequest, ConfigUpdateRequest, PaginatedResponse
 from services.chat_service import ChatService
 from services.config_service import ConfigService
 from services.game_ad_service import build_game_bonus_ad_config_payload, normalize_game_bonus_ad_config
 from services.game_settlement_service import GameSettlementService
+from services.netdisk_resource_service import NetdiskResourceService
 from services.withdrawal_service import WithdrawalService
 
 logger = logging.getLogger(__name__)
@@ -317,6 +320,118 @@ async def reject_withdrawal(
 
     await WithdrawalService.handle_transfer_failed(session, record.batch_no, reason or "admin_rejected")
     return response(msg="withdrawal rejected")
+
+
+@router.get("/netdisk/uploads", summary="admin netdisk upload list")
+async def admin_list_netdisk_uploads(
+    status: Optional[str] = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    session: AsyncSession = Depends(get_session),
+):
+    payload = await NetdiskResourceService.list_admin_uploads(
+        session=session,
+        status=status,
+        page=page,
+        page_size=page_size,
+    )
+    return response(data=jsonable_encoder(payload))
+
+
+@router.post("/netdisk/uploads/{upload_id}/approve", summary="admin approve netdisk upload")
+async def admin_approve_netdisk_upload(
+    upload_id: str,
+    req: NetdiskAdminAuditRequest,
+    session: AsyncSession = Depends(get_session),
+):
+    try:
+        payload = await NetdiskResourceService.approve_upload(session, upload_id, req.note)
+    except ValueError as exc:
+        return response([], 400, str(exc))
+    return response(data=jsonable_encoder(payload), msg="netdisk upload approved")
+
+
+@router.post("/netdisk/uploads/{upload_id}/reject", summary="admin reject netdisk upload")
+async def admin_reject_netdisk_upload(
+    upload_id: str,
+    req: NetdiskAdminAuditRequest,
+    session: AsyncSession = Depends(get_session),
+):
+    try:
+        payload = await NetdiskResourceService.reject_upload(session, upload_id, req.note)
+    except ValueError as exc:
+        return response([], 400, str(exc))
+    return response(data=jsonable_encoder(payload), msg="netdisk upload rejected")
+
+
+@router.post("/netdisk/uploads/{upload_id}/confirm-invalid", summary="admin confirm invalid netdisk upload")
+async def admin_confirm_invalid_netdisk_upload(
+    upload_id: str,
+    req: NetdiskAdminAuditRequest,
+    session: AsyncSession = Depends(get_session),
+):
+    try:
+        payload = await NetdiskResourceService.confirm_upload_invalid(session, upload_id, req.note)
+    except ValueError as exc:
+        return response([], 400, str(exc))
+    return response(data=jsonable_encoder(payload), msg="netdisk upload invalid confirmed")
+
+
+@router.get("/netdisk/repairs", summary="admin netdisk repair/report list")
+async def admin_list_netdisk_repairs(
+    status: Optional[str] = Query(None),
+    mode: Optional[str] = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    session: AsyncSession = Depends(get_session),
+):
+    payload = await NetdiskResourceService.list_admin_repairs(
+        session=session,
+        status=status,
+        mode=mode,
+        page=page,
+        page_size=page_size,
+    )
+    return response(data=jsonable_encoder(payload))
+
+
+@router.post("/netdisk/repairs/{repair_id}/approve", summary="admin approve netdisk repair/report")
+async def admin_approve_netdisk_repair(
+    repair_id: str,
+    req: NetdiskAdminAuditRequest,
+    session: AsyncSession = Depends(get_session),
+):
+    try:
+        payload = await NetdiskResourceService.approve_repair(session, repair_id, req.note)
+    except ValueError as exc:
+        return response([], 400, str(exc))
+    return response(data=jsonable_encoder(payload), msg="netdisk repair approved")
+
+
+@router.post("/netdisk/repairs/{repair_id}/reject", summary="admin reject netdisk repair/report")
+async def admin_reject_netdisk_repair(
+    repair_id: str,
+    req: NetdiskAdminAuditRequest,
+    session: AsyncSession = Depends(get_session),
+):
+    try:
+        payload = await NetdiskResourceService.reject_repair(session, repair_id, req.note)
+    except ValueError as exc:
+        return response([], 400, str(exc))
+    return response(data=jsonable_encoder(payload), msg="netdisk repair rejected")
+
+
+@router.post("/netdisk/repairs/{repair_id}/confirm-invalid", summary="admin confirm invalid netdisk repair/report")
+async def admin_confirm_invalid_netdisk_repair(
+    repair_id: str,
+    req: NetdiskAdminAuditRequest,
+    session: AsyncSession = Depends(get_session),
+):
+    try:
+        payload = await NetdiskResourceService.confirm_repair_invalid(session, repair_id, req.note)
+    except ValueError as exc:
+        return response([], 400, str(exc))
+    return response(data=jsonable_encoder(payload), msg="netdisk repair invalid confirmed")
 
 
 @router.get("/chat/messages", summary="chat messages")

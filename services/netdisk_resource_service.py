@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta
 from typing import Literal
+from uuid import UUID
 
 from sqlalchemy import and_, func, or_
 from sqlmodel import select
@@ -448,8 +449,156 @@ class NetdiskResourceService:
         session.add(item)
         await session.flush()
         await _grant_repair_frozen_reward(session, user, item)
+        if clean_mode == "report":
+            await _hide_resource_after_report_threshold(session, resource.id)
         await session.refresh(item)
         return {"repair": _build_repair_payload(item, user.id)}
+
+    @staticmethod
+    async def list_admin_uploads(
+        session: AsyncSession,
+        status: str | None = None,
+        page: int = 1,
+        page_size: int = 50,
+    ) -> dict:
+        query = select(NetdiskUpload)
+        if status:
+            query = query.where(NetdiskUpload.status == status)
+
+        total = (await session.execute(select(func.count()).select_from(query.subquery()))).scalar() or 0
+        items = (
+            await session.execute(
+                query.order_by(NetdiskUpload.created_at.desc())
+                .offset((page - 1) * page_size)
+                .limit(page_size)
+            )
+        ).scalars().all()
+        return _build_admin_list_payload("uploads", [_build_upload_payload(item) for item in items], total, page, page_size)
+
+    @staticmethod
+    async def list_admin_repairs(
+        session: AsyncSession,
+        status: str | None = None,
+        mode: str | None = None,
+        page: int = 1,
+        page_size: int = 50,
+    ) -> dict:
+        query = select(NetdiskRepair)
+        if status:
+            query = query.where(NetdiskRepair.status == status)
+        if mode:
+            query = query.where(NetdiskRepair.mode == mode)
+
+        total = (await session.execute(select(func.count()).select_from(query.subquery()))).scalar() or 0
+        items = (
+            await session.execute(
+                query.order_by(NetdiskRepair.created_at.desc())
+                .offset((page - 1) * page_size)
+                .limit(page_size)
+            )
+        ).scalars().all()
+        return _build_admin_list_payload("repairs", [_build_repair_payload(item) for item in items], total, page, page_size)
+
+    @staticmethod
+    async def approve_upload(session: AsyncSession, upload_id: str, note: str = "") -> dict:
+        item = await _get_upload_or_raise(session, upload_id)
+        if item.status in {"rejected", "invalid_confirmed", "deleted", "canceled"}:
+            raise ValueError(f"upload is already {item.status}")
+
+        item.status = "approved"
+        item.audit_note = note.strip() or "系统验证通过，待验证奖励已释放为可用积分。"
+        item.updated_at = datetime.utcnow()
+        await _release_upload_reward(session, item)
+        await session.flush()
+        await session.refresh(item)
+        return {"upload": _build_upload_payload(item)}
+
+    @staticmethod
+    async def reject_upload(session: AsyncSession, upload_id: str, note: str = "") -> dict:
+        item = await _get_upload_or_raise(session, upload_id)
+        if item.status == "approved":
+            raise ValueError("approved upload cannot be rejected; confirm invalid instead")
+        if item.status != "rejected":
+            item.status = "rejected"
+            item.audit_note = note.strip() or "系统审核未通过，待验证奖励已扣回。"
+            item.updated_at = datetime.utcnow()
+            await _clawback_upload_reward(session, item, "upload_reward_rejected")
+        await session.flush()
+        await session.refresh(item)
+        return {"upload": _build_upload_payload(item)}
+
+    @staticmethod
+    async def confirm_upload_invalid(session: AsyncSession, upload_id: str, note: str = "") -> dict:
+        item = await _get_upload_or_raise(session, upload_id)
+        if item.status != "invalid_confirmed":
+            item.status = "invalid_confirmed"
+            item.audit_note = note.strip() or "资源确认失效，奖励已扣回或处罚。"
+            item.updated_at = datetime.utcnow()
+            await _clawback_upload_reward(session, item, "upload_reward_invalid")
+        await session.flush()
+        await session.refresh(item)
+        return {"upload": _build_upload_payload(item)}
+
+    @staticmethod
+    async def approve_repair(session: AsyncSession, repair_id: str, note: str = "") -> dict:
+        item = await _get_repair_or_raise(session, repair_id)
+        if item.status in {"rejected", "invalid_confirmed", "deleted", "canceled"}:
+            raise ValueError(f"repair is already {item.status}")
+
+        item.status = "approved"
+        item.audit_note = note.strip() or (
+            "系统验证通过，待验证奖励已释放为可用积分。"
+            if item.mode == "repair"
+            else "投诉已核验通过。"
+        )
+        item.updated_at = datetime.utcnow()
+        if item.mode == "repair":
+            await _release_repair_reward(session, item)
+        await session.flush()
+        await session.refresh(item)
+        return {"repair": _build_repair_payload(item)}
+
+    @staticmethod
+    async def reject_repair(session: AsyncSession, repair_id: str, note: str = "") -> dict:
+        item = await _get_repair_or_raise(session, repair_id)
+        if item.status == "approved" and item.mode == "repair":
+            raise ValueError("approved repair cannot be rejected; confirm invalid instead")
+        if item.status != "rejected":
+            item.status = "rejected"
+            item.audit_note = note.strip() or (
+                "补链审核未通过，待验证奖励已扣回。"
+                if item.mode == "repair"
+                else "投诉未通过核验。"
+            )
+            item.updated_at = datetime.utcnow()
+            if item.mode == "repair":
+                await _clawback_repair_reward(session, item, "repair_reward_rejected")
+        await session.flush()
+        await session.refresh(item)
+        return {"repair": _build_repair_payload(item)}
+
+    @staticmethod
+    async def confirm_repair_invalid(session: AsyncSession, repair_id: str, note: str = "") -> dict:
+        item = await _get_repair_or_raise(session, repair_id)
+        if item.status != "invalid_confirmed":
+            item.status = "invalid_confirmed"
+            item.audit_note = note.strip() or (
+                "补链确认失效，奖励已扣回或处罚。"
+                if item.mode == "repair"
+                else "投诉确认有效，资源已隐藏等待处理。"
+            )
+            item.updated_at = datetime.utcnow()
+            result = await session.execute(select(NetdiskResourceModel).where(NetdiskResourceModel.id == item.resource_id))
+            resource = result.scalar_one_or_none()
+            if not resource:
+                raise ValueError("resource not found")
+            resource.is_active = False
+            resource.updated_at = datetime.utcnow()
+            if item.mode == "repair":
+                await _clawback_repair_reward(session, item, "repair_reward_invalid")
+        await session.flush()
+        await session.refresh(item)
+        return {"repair": _build_repair_payload(item)}
 
 
 async def _get_unlock_ledger(session: AsyncSession, user_id, resource_id: str) -> PointsLedger | None:
@@ -506,6 +655,190 @@ async def _grant_repair_frozen_reward(
         related_id=str(item.id),
         remark=f"网盘补链待验证奖励：{item.resource_title}",
     )
+
+
+async def _release_upload_reward(session: AsyncSession, item: NetdiskUpload) -> None:
+    reward_points = int(item.reward_points)
+    if reward_points <= 0:
+        return
+
+    await PointsAccountService.move_frozen_to_consumable(
+        session=session,
+        user_id=item.user_id,
+        points=reward_points,
+        source="netdisk",
+        change_type="upload_reward_release",
+        idempotency_key=f"netdisk_upload_release:{item.id}",
+        related_type="netdisk_upload",
+        related_id=str(item.id),
+        remark=f"网盘上传奖励释放：{item.title}",
+    )
+
+
+async def _release_repair_reward(session: AsyncSession, item: NetdiskRepair) -> None:
+    reward_points = int(item.reward_points)
+    if item.mode != "repair" or reward_points <= 0:
+        return
+
+    await PointsAccountService.move_frozen_to_consumable(
+        session=session,
+        user_id=item.user_id,
+        points=reward_points,
+        source="netdisk",
+        change_type="repair_reward_release",
+        idempotency_key=f"netdisk_repair_release:{item.id}",
+        related_type="netdisk_repair",
+        related_id=str(item.id),
+        remark=f"网盘补链奖励释放：{item.resource_title}",
+    )
+
+
+async def _clawback_upload_reward(session: AsyncSession, item: NetdiskUpload, reason: str) -> None:
+    await _clawback_netdisk_reward(
+        session=session,
+        user_id=item.user_id,
+        points=int(item.reward_points),
+        related_type="netdisk_upload",
+        related_id=str(item.id),
+        release_idempotency_key=f"netdisk_upload_release:{item.id}",
+        clawback_idempotency_key=f"netdisk_upload_clawback:{item.id}:{reason}",
+        penalty_idempotency_key=f"netdisk_upload_penalty:{item.id}:{reason}",
+        clawback_change_type=reason,
+        penalty_change_type=reason,
+        remark=f"网盘上传奖励扣回：{item.title}",
+    )
+
+
+async def _clawback_repair_reward(session: AsyncSession, item: NetdiskRepair, reason: str) -> None:
+    await _clawback_netdisk_reward(
+        session=session,
+        user_id=item.user_id,
+        points=int(item.reward_points),
+        related_type="netdisk_repair",
+        related_id=str(item.id),
+        release_idempotency_key=f"netdisk_repair_release:{item.id}",
+        clawback_idempotency_key=f"netdisk_repair_clawback:{item.id}:{reason}",
+        penalty_idempotency_key=f"netdisk_repair_penalty:{item.id}:{reason}",
+        clawback_change_type=reason,
+        penalty_change_type=reason,
+        remark=f"网盘补链奖励扣回：{item.resource_title}",
+    )
+
+
+async def _clawback_netdisk_reward(
+    session: AsyncSession,
+    user_id,
+    points: int,
+    related_type: str,
+    related_id: str,
+    release_idempotency_key: str,
+    clawback_idempotency_key: str,
+    penalty_idempotency_key: str,
+    clawback_change_type: str,
+    penalty_change_type: str,
+    remark: str,
+) -> None:
+    reward_points = int(points)
+    if reward_points <= 0:
+        return
+
+    release_ledger = await PointsAccountService.get_ledger_by_idempotency_key(session, release_idempotency_key)
+    if release_ledger:
+        await _deduct_consumable_penalty(
+            session=session,
+            user_id=user_id,
+            points=reward_points,
+            idempotency_key=penalty_idempotency_key,
+            related_type=related_type,
+            related_id=related_id,
+            change_type=penalty_change_type,
+            remark=remark,
+        )
+        return
+
+    await PointsAccountService.deduct_frozen_points(
+        session=session,
+        user_id=user_id,
+        points=reward_points,
+        source="netdisk",
+        change_type=clawback_change_type,
+        idempotency_key=clawback_idempotency_key,
+        related_type=related_type,
+        related_id=related_id,
+        remark=remark,
+    )
+
+
+async def _deduct_consumable_penalty(
+    session: AsyncSession,
+    user_id,
+    points: int,
+    idempotency_key: str,
+    related_type: str,
+    related_id: str,
+    change_type: str,
+    remark: str,
+) -> None:
+    account, _ = await PointsAccountService.ensure_user_account(session, user_id)
+    penalty_points = min(int(points), int(account.consumable_points))
+    if penalty_points <= 0:
+        return
+
+    await PointsAccountService.consume_consumable_points(
+        session=session,
+        user_id=user_id,
+        points=penalty_points,
+        source="netdisk",
+        change_type=change_type,
+        idempotency_key=idempotency_key,
+        related_type=related_type,
+        related_id=related_id,
+        remark=remark,
+    )
+
+
+async def _hide_resource_after_report_threshold(session: AsyncSession, resource_id: str, threshold: int = 3) -> None:
+    report_count = (
+        await session.execute(
+            select(func.count()).select_from(NetdiskRepair).where(
+                NetdiskRepair.resource_id == resource_id,
+                NetdiskRepair.mode == "report",
+                NetdiskRepair.status != "rejected",
+            )
+        )
+    ).scalar() or 0
+    if int(report_count) < threshold:
+        return
+
+    result = await session.execute(select(NetdiskResourceModel).where(NetdiskResourceModel.id == resource_id))
+    resource = result.scalar_one_or_none()
+    if resource:
+        resource.is_active = False
+        resource.updated_at = datetime.utcnow()
+
+
+async def _get_upload_or_raise(session: AsyncSession, upload_id: str) -> NetdiskUpload:
+    try:
+        item_id = UUID(upload_id)
+    except ValueError as exc:
+        raise ValueError("invalid upload id") from exc
+
+    item = await session.get(NetdiskUpload, item_id)
+    if not item:
+        raise ValueError("upload not found")
+    return item
+
+
+async def _get_repair_or_raise(session: AsyncSession, repair_id: str) -> NetdiskRepair:
+    try:
+        item_id = UUID(repair_id)
+    except ValueError as exc:
+        raise ValueError("invalid repair id") from exc
+
+    item = await session.get(NetdiskRepair, item_id)
+    if not item:
+        raise ValueError("repair not found")
+    return item
 
 
 async def _get_favorite(session: AsyncSession, user_id, resource_id: str) -> NetdiskFavorite | None:
@@ -698,6 +1031,16 @@ def _build_repair_payload(item: NetdiskRepair, user_id=None) -> dict:
         "note": item.note,
         "created_at": item.created_at,
         "mine": bool(user_id and item.user_id == user_id),
+    }
+
+
+def _build_admin_list_payload(key: str, items: list[dict], total: int, page: int, page_size: int) -> dict:
+    return {
+        key: items,
+        "total": int(total),
+        "page": int(page),
+        "page_size": int(page_size),
+        "has_more": (int(page) - 1) * int(page_size) + len(items) < int(total),
     }
 
 

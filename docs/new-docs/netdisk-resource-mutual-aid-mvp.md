@@ -213,6 +213,35 @@ MVP 阶段支持以下网盘标签：
 - `rejected / canceled / deleted / invalid_confirmed` 状态不释放可用积分
 - 后续确认资源失效时，优先扣回对应记录的冻结奖励；处罚规则另行实现
 
+### 6.4.2 审核释放与失效处罚
+
+当前审核闭环：
+
+- 上传审核通过：将该上传记录对应的 `frozen_points` 转为 `consumable_points`
+- 补链审核通过：将该补链记录对应的 `frozen_points` 转为 `consumable_points`
+- 投诉审核通过：只确认投诉有效，不发放积分
+- 拒绝上传/补链：扣回该记录对应的冻结奖励
+- 确认上传/补链失效：如果奖励还在冻结中，扣回冻结奖励；如果奖励已释放，则从可用积分中扣除同等金额作为处罚
+- 同一记录的释放、扣回、处罚均必须有幂等键，重复审核不能重复释放或重复扣分
+
+审核流水口径：
+
+- 上传释放：`change_type=upload_reward_release`，`idempotency_key=netdisk_upload_release:{upload_id}`
+- 补链释放：`change_type=repair_reward_release`，`idempotency_key=netdisk_repair_release:{repair_id}`
+- 上传扣回/处罚：`netdisk_upload_clawback:{upload_id}:{reason}` 或 `netdisk_upload_penalty:{upload_id}:{reason}`
+- 补链扣回/处罚：`netdisk_repair_clawback:{repair_id}:{reason}` 或 `netdisk_repair_penalty:{repair_id}:{reason}`
+
+投诉隐藏规则：
+
+- 同一资源被 3 条及以上未驳回投诉命中后，系统先将资源隐藏，避免继续消耗用户积分
+- 隐藏不等于最终处罚，仍需后台或系统确认失效
+- 确认失效后再扣回/处罚对应上传或补链奖励
+
+数据库幂等要求：
+
+- `points_ledger.idempotency_key` 已有唯一约束
+- 所有积分释放、扣回、处罚都必须通过唯一幂等键写流水
+
 ### 6.5 获取资源积分消耗
 
 MVP 阶段建议三档：
@@ -227,7 +256,8 @@ MVP 阶段建议三档：
 - 解锁流水：`source=netdisk`，`availability=consumable`，`change_type=resource_unlock`
 - 重复解锁同一资源不重复扣分，幂等键为 `netdisk_unlock:{user_id}:{resource_id}`
 - 上传和补链冻结奖励不增加 `consumable_points`
-- 本轮不实现 `frozen_points -> consumable_points` 释放接口，也不实现失效确认扣回接口
+- 审核通过后才允许 `frozen_points -> consumable_points`
+- 确认失效后，按该记录奖励状态扣回冻结积分或处罚可用积分
 
 积分分配建议：
 

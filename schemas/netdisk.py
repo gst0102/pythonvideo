@@ -180,3 +180,7 @@ class NetdiskRepairListResponse(BaseModel):
 
 class NetdiskRepairResponse(BaseModel):
     repair: NetdiskRepairItem
+
+
+class NetdiskAdminAuditRequest(BaseModel):
+    note: str = ""
