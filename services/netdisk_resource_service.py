@@ -9,6 +9,8 @@ from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from models.netdisk_favorite import NetdiskFavorite
+from models.netdisk_request import NetdiskRequest
+from models.netdisk_upload import NetdiskUpload
 from models.points_ledger import PointsLedger
 from models.user import User
 from models.user_account import UserAccount
@@ -203,6 +205,117 @@ class NetdiskResourceService:
 
         return {"resource": _build_resource_payload(resource), "favorited": False}
 
+    @staticmethod
+    async def list_requests(session: AsyncSession, user: User | None = None) -> dict:
+        result = await session.execute(
+            select(NetdiskRequest).order_by(NetdiskRequest.created_at.desc()).limit(100)
+        )
+        items = result.scalars().all()
+        user_id = user.id if user else None
+        return {"requests": [_build_request_payload(item, user_id) for item in items]}
+
+    @staticmethod
+    async def list_my_requests(session: AsyncSession, user: User) -> dict:
+        result = await session.execute(
+            select(NetdiskRequest)
+            .where(NetdiskRequest.user_id == user.id)
+            .order_by(NetdiskRequest.created_at.desc())
+            .limit(100)
+        )
+        return {"requests": [_build_request_payload(item, user.id) for item in result.scalars().all()]}
+
+    @staticmethod
+    async def create_request(
+        session: AsyncSession,
+        user: User,
+        title: str,
+        pans: list[str],
+        category: str,
+        bounty_points: int,
+        note: str,
+    ) -> dict:
+        clean_title = (title or "").strip()
+        clean_pans = [item.strip() for item in pans if item and item.strip()]
+        clean_category = (category or "").strip()
+        clean_note = (note or "").strip()
+        if not clean_title:
+            raise ValueError("title is required")
+        if not clean_pans:
+            raise ValueError("pans is required")
+        if not clean_category:
+            raise ValueError("category is required")
+
+        item = NetdiskRequest(
+            user_id=user.id,
+            title=clean_title[:120],
+            pans=" / ".join(clean_pans[:4]),
+            category=clean_category[:64],
+            bounty_points=max(5, min(50, int(bounty_points or 5))),
+            note=clean_note[:500],
+            status="open",
+            deadline_text="3天后",
+        )
+        session.add(item)
+        await session.flush()
+        await session.refresh(item)
+        return {"request": _build_request_payload(item, user.id)}
+
+    @staticmethod
+    async def list_my_uploads(session: AsyncSession, user: User) -> dict:
+        result = await session.execute(
+            select(NetdiskUpload)
+            .where(NetdiskUpload.user_id == user.id)
+            .order_by(NetdiskUpload.created_at.desc())
+            .limit(100)
+        )
+        return {"uploads": [_build_upload_payload(item) for item in result.scalars().all()]}
+
+    @staticmethod
+    async def create_upload(
+        session: AsyncSession,
+        user: User,
+        title: str,
+        category: str,
+        pan: str,
+        link: str,
+        extract_code: str,
+        unzip_code: str,
+        description: str,
+    ) -> dict:
+        clean_title = (title or "").strip()
+        clean_category = (category or "").strip()
+        clean_pan = (pan or "").strip()
+        clean_link = (link or "").strip()
+        clean_description = (description or "").strip()
+        if not clean_title:
+            raise ValueError("title is required")
+        if not clean_category:
+            raise ValueError("category is required")
+        if not clean_pan:
+            raise ValueError("pan is required")
+        if not clean_link:
+            raise ValueError("link is required")
+        if not clean_description:
+            raise ValueError("description is required")
+
+        item = NetdiskUpload(
+            user_id=user.id,
+            title=clean_title[:120],
+            category=clean_category[:64],
+            pan=clean_pan[:32],
+            link=clean_link[:500],
+            extract_code=(extract_code or "").strip()[:64],
+            unzip_code=(unzip_code or "").strip()[:64],
+            description=clean_description[:800],
+            status="pending",
+            reward_points=5,
+            audit_note="系统正在校验链接有效性和内容匹配度。",
+        )
+        session.add(item)
+        await session.flush()
+        await session.refresh(item)
+        return {"upload": _build_upload_payload(item)}
+
 
 async def _get_unlock_ledger(session: AsyncSession, user_id, resource_id: str) -> PointsLedger | None:
     result = await session.execute(
@@ -253,6 +366,35 @@ def _build_favorite_payload(favorite: NetdiskFavorite) -> dict:
         "resource": _build_resource_payload(resource),
         "favorite_at": favorite.created_at,
         "favorited": True,
+    }
+
+
+def _build_request_payload(item: NetdiskRequest, user_id=None) -> dict:
+    return {
+        "id": str(item.id),
+        "title": item.title,
+        "pans": item.pans,
+        "category": item.category,
+        "bounty_points": int(item.bounty_points),
+        "note": item.note,
+        "status": item.status,
+        "submissions_count": int(item.submissions_count),
+        "deadline_text": item.deadline_text,
+        "created_at": item.created_at,
+        "mine": bool(user_id and item.user_id == user_id),
+    }
+
+
+def _build_upload_payload(item: NetdiskUpload) -> dict:
+    return {
+        "id": str(item.id),
+        "title": item.title,
+        "category": item.category,
+        "pan": item.pan,
+        "status": item.status,
+        "reward_points": int(item.reward_points),
+        "audit_note": item.audit_note,
+        "created_at": item.created_at,
     }
 
 

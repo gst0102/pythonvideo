@@ -11,11 +11,17 @@ from models.user import User
 from schemas.netdisk import (
     NetdiskFavoriteListResponse,
     NetdiskFavoriteResponse,
+    NetdiskRequestCreate,
+    NetdiskRequestListResponse,
+    NetdiskRequestResponse,
     NetdiskResourceAccessResponse,
     NetdiskResourceDetailResponse,
     NetdiskResourceListResponse,
     NetdiskResourceUnlockResponse,
     NetdiskUnfavoriteResponse,
+    NetdiskUploadCreate,
+    NetdiskUploadListResponse,
+    NetdiskUploadResponse,
 )
 from services.netdisk_resource_service import NetdiskResourceService
 
@@ -31,6 +37,92 @@ async def _get_user_by_openid(session: AsyncSession, openid: str) -> User | None
 async def list_netdisk_resources(pan: str | None = None):
     payload = {"resources": NetdiskResourceService.list_resources(pan=pan)}
     return response(data=NetdiskResourceListResponse(**payload).model_dump(mode="json"))
+
+
+@router.get("/requests", summary="list netdisk resource requests")
+async def list_netdisk_requests(session: AsyncSession = Depends(get_session)):
+    payload = await NetdiskResourceService.list_requests(session)
+    return response(data=NetdiskRequestListResponse(**payload).model_dump(mode="json"))
+
+
+@router.get("/requests/mine", summary="list current user's netdisk resource requests")
+async def list_my_netdisk_requests(
+    openid: str = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    user = await _get_user_by_openid(session, openid)
+    if not user:
+        return response([], 404, "user not found")
+
+    payload = await NetdiskResourceService.list_my_requests(session, user)
+    return response(data=NetdiskRequestListResponse(**payload).model_dump(mode="json"))
+
+
+@router.post("/requests", summary="create netdisk resource request")
+async def create_netdisk_request(
+    payload: NetdiskRequestCreate,
+    openid: str = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    user = await _get_user_by_openid(session, openid)
+    if not user:
+        return response([], 404, "user not found")
+
+    try:
+        result = await NetdiskResourceService.create_request(
+            session=session,
+            user=user,
+            title=payload.title,
+            pans=payload.pans,
+            category=payload.category,
+            bounty_points=payload.bounty_points,
+            note=payload.note,
+        )
+    except ValueError as exc:
+        return response([], 400, str(exc))
+
+    return response(data=NetdiskRequestResponse(**result).model_dump(mode="json"), msg="request created")
+
+
+@router.get("/uploads/mine", summary="list current user's netdisk uploads")
+async def list_my_netdisk_uploads(
+    openid: str = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    user = await _get_user_by_openid(session, openid)
+    if not user:
+        return response([], 404, "user not found")
+
+    payload = await NetdiskResourceService.list_my_uploads(session, user)
+    return response(data=NetdiskUploadListResponse(**payload).model_dump(mode="json"))
+
+
+@router.post("/uploads", summary="create netdisk upload submission")
+async def create_netdisk_upload(
+    payload: NetdiskUploadCreate,
+    openid: str = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    user = await _get_user_by_openid(session, openid)
+    if not user:
+        return response([], 404, "user not found")
+
+    try:
+        result = await NetdiskResourceService.create_upload(
+            session=session,
+            user=user,
+            title=payload.title,
+            category=payload.category,
+            pan=payload.pan,
+            link=payload.link,
+            extract_code=payload.extract_code,
+            unzip_code=payload.unzip_code,
+            description=payload.description,
+        )
+    except ValueError as exc:
+        return response([], 400, str(exc))
+
+    return response(data=NetdiskUploadResponse(**result).model_dump(mode="json"), msg="upload created")
 
 
 @router.get("/resources/{resource_id}", summary="get netdisk resource detail")

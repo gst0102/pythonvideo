@@ -85,3 +85,62 @@ class NetdiskFavoriteResponse(BaseModel):
 class NetdiskUnfavoriteResponse(BaseModel):
     resource: NetdiskResourceSummary
     favorited: bool = False
+
+
+class NetdiskRequestCreate(BaseModel):
+    title: str
+    pans: list[str]
+    category: str
+    bounty_points: int
+    note: str = ""
+
+
+class NetdiskRequestItem(BaseModel):
+    id: str
+    title: str
+    pans: str
+    category: str
+    bounty_points: int
+    note: str = ""
+    status: str
+    submissions_count: int
+    deadline_text: str
+    created_at: datetime
+    mine: bool = False
+
+
+class NetdiskRequestListResponse(BaseModel):
+    requests: list[NetdiskRequestItem]
+
+
+class NetdiskRequestResponse(BaseModel):
+    request: NetdiskRequestItem
+
+
+class NetdiskUploadCreate(BaseModel):
+    title: str
+    category: str
+    pan: str
+    link: str
+    extract_code: str = ""
+    unzip_code: str = ""
+    description: str
+
+
+class NetdiskUploadItem(BaseModel):
+    id: str
+    title: str
+    category: str
+    pan: str
+    status: str
+    reward_points: int
+    audit_note: str
+    created_at: datetime
+
+
+class NetdiskUploadListResponse(BaseModel):
+    uploads: list[NetdiskUploadItem]
+
+
+class NetdiskUploadResponse(BaseModel):
+    upload: NetdiskUploadItem

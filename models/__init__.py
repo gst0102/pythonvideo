@@ -40,6 +40,8 @@ from models.game_settlement_batch import GameSettlementBatch
 from models.game_user_settlement import GameUserSettlement
 from models.invite_relation import InviteRelation
 from models.netdisk_favorite import NetdiskFavorite
+from models.netdisk_request import NetdiskRequest
+from models.netdisk_upload import NetdiskUpload
 
 # 所有表，供 Alembic 自动发现
 __all__ = [
@@ -62,6 +64,8 @@ __all__ = [
     "GameUserSettlement",
     "InviteRelation",
     "NetdiskFavorite",
+    "NetdiskRequest",
+    "NetdiskUpload",
     "get_session",
     "get_session_ctx",
     "init_db",
