@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
+from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from models.points_ledger import PointsLedger
@@ -64,6 +65,23 @@ class NetdiskResourceService:
     """Unlock resources by consuming points and writing idempotent ledger rows."""
 
     @staticmethod
+    async def get_resource_access(
+        session: AsyncSession,
+        user: User,
+        resource_id: str,
+    ) -> dict:
+        resource_key = (resource_id or "").strip()
+        resource = NETDISK_RESOURCE_CATALOG.get(resource_key)
+        if not resource:
+            raise ValueError("resource not found")
+
+        account, _ = await PointsAccountService.ensure_user_account(session, user.id)
+        ledger = await _get_unlock_ledger(session, user.id, resource.id)
+        if not ledger:
+            return _build_access_payload(resource, None, account)
+        return _build_access_payload(resource, ledger, account)
+
+    @staticmethod
     async def unlock_resource(
         session: AsyncSession,
         user: User,
@@ -99,6 +117,55 @@ class NetdiskResourceService:
         return _build_unlock_payload(resource, ledger, account, invite_reward), unlocked_now
 
 
+async def _get_unlock_ledger(session: AsyncSession, user_id, resource_id: str) -> PointsLedger | None:
+    result = await session.execute(
+        select(PointsLedger).where(
+            PointsLedger.user_id == user_id,
+            PointsLedger.idempotency_key == f"netdisk_unlock:{user_id}:{resource_id}",
+        )
+    )
+    return result.scalar_one_or_none()
+
+
+def _build_resource_payload(resource: NetdiskResource) -> dict:
+    return {
+        "id": resource.id,
+        "title": resource.title,
+        "pan": resource.pan,
+        "level": resource.level,
+        "cost_points": resource.cost_points,
+    }
+
+
+def _build_account_payload(account: UserAccount) -> dict:
+    return {
+        "total_points": int(account.total_points),
+        "withdrawable_points": int(account.withdrawable_points),
+        "frozen_points": int(account.frozen_points),
+        "consumable_points": int(account.consumable_points),
+    }
+
+
+def _build_access_payload(
+    resource: NetdiskResource,
+    ledger: PointsLedger | None,
+    account: UserAccount,
+) -> dict:
+    access = {
+        "unlocked": bool(ledger),
+        "ledger_id": str(ledger.id) if ledger else "",
+        "points_delta": int(ledger.points_delta) if ledger else 0,
+        "link": resource.link if ledger else "",
+        "extract_code": resource.extract_code if ledger else "",
+        "unzip_code": resource.unzip_code if ledger else "",
+    }
+    return {
+        "resource": _build_resource_payload(resource),
+        "access": access,
+        "account": _build_account_payload(account),
+    }
+
+
 def _build_unlock_payload(
     resource: NetdiskResource,
     ledger: PointsLedger,
@@ -106,13 +173,7 @@ def _build_unlock_payload(
     invite_reward: dict | None,
 ) -> dict:
     return {
-        "resource": {
-            "id": resource.id,
-            "title": resource.title,
-            "pan": resource.pan,
-            "level": resource.level,
-            "cost_points": resource.cost_points,
-        },
+        "resource": _build_resource_payload(resource),
         "unlock": {
             "unlocked": True,
             "ledger_id": str(ledger.id),
@@ -121,12 +182,7 @@ def _build_unlock_payload(
             "extract_code": resource.extract_code,
             "unzip_code": resource.unzip_code,
         },
-        "account": {
-            "total_points": int(account.total_points),
-            "withdrawable_points": int(account.withdrawable_points),
-            "frozen_points": int(account.frozen_points),
-            "consumable_points": int(account.consumable_points),
-        },
+        "account": _build_account_payload(account),
         "invite_reward": invite_reward,
     }
 
