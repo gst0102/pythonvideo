@@ -22,6 +22,15 @@ class NetdiskUnlockData(BaseModel):
     unzip_code: str = ""
 
 
+class NetdiskAccessData(BaseModel):
+    unlocked: bool = False
+    ledger_id: str = ""
+    points_delta: int = 0
+    link: str = ""
+    extract_code: str = ""
+    unzip_code: str = ""
+
+
 class NetdiskInviteRewardSummary(BaseModel):
     created: bool = False
     ledger_id: str
@@ -34,3 +43,9 @@ class NetdiskResourceUnlockResponse(BaseModel):
     unlock: NetdiskUnlockData
     account: CheckinAccountSummary
     invite_reward: NetdiskInviteRewardSummary | None = None
+
+
+class NetdiskResourceAccessResponse(BaseModel):
+    resource: NetdiskResourceSummary
+    access: NetdiskAccessData
+    account: CheckinAccountSummary
