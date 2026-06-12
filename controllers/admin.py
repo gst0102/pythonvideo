@@ -1,7 +1,8 @@
 import logging
+import os
 from datetime import datetime, timedelta
 from typing import Optional
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, Query
 from fastapi.encoders import jsonable_encoder
@@ -11,7 +12,12 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from core.response import response
 from models.base import get_session
 from models.chat import ChatMessage
+from models.netdisk_repair import NetdiskRepair
+from models.netdisk_resource import NetdiskResource as NetdiskResourceModel
+from models.netdisk_risk_record import NetdiskRiskRecord
+from models.netdisk_upload import NetdiskUpload
 from models.user import User
+from models.user_account import UserAccount
 from models.withdrawal import WithdrawalRecord
 from schemas.admin_settlement import AdminGameSettlementTriggerRequest, AdminGameSettlementUpsertRequest
 from schemas.netdisk import NetdiskAdminAuditRequest
@@ -446,6 +452,131 @@ async def admin_list_netdisk_risk_records(
 async def admin_get_netdisk_audit_config(session: AsyncSession = Depends(get_session)):
     config = await ConfigService.get(session, "netdisk_audit_config")
     return response(data=config)
+
+
+@router.post("/netdisk/dev-seed", summary="seed netdisk review demo data")
+async def admin_seed_netdisk_review_demo(session: AsyncSession = Depends(get_session)):
+    if os.getenv("ENABLE_DEV_LOGIN", "false").lower() != "true":
+        return response([], 403, "dev seed disabled")
+
+    user_result = await session.execute(select(User).where(User.openid == "dev-netdisk-review"))
+    user = user_result.scalar_one_or_none()
+    if not user:
+        user = User(
+            openid="dev-netdisk-review",
+            nickname="网盘审核演示用户",
+            avatar="",
+            invite_code=f"ND{uuid4().hex[:8]}",
+        )
+        session.add(user)
+        await session.flush()
+
+    account_result = await session.execute(select(UserAccount).where(UserAccount.user_id == user.id))
+    account = account_result.scalar_one_or_none()
+    if not account:
+        session.add(UserAccount(user_id=user.id, consumable_points=2, total_points=2))
+
+    marker = datetime.utcnow().strftime("%m%d%H%M%S")
+    uploads = [
+        NetdiskUpload(
+            user_id=user.id,
+            title=f"演示待审核上传 {marker}",
+            category="学习办公",
+            pan="夸克",
+            link="https://pan.quark.cn/s/demo-pending",
+            extract_code="demo",
+            unzip_code="",
+            description="用于后台审核页面验收的待审核上传。",
+            status="pending",
+            reward_points=5,
+            audit_note="待系统/人工确认后释放冻结积分。",
+        ),
+        NetdiskUpload(
+            user_id=user.id,
+            title=f"演示已通过上传 {marker}",
+            category="自媒体素材",
+            pan="百度",
+            link="https://pan.baidu.com/s/demo-approved",
+            extract_code="yx88",
+            unzip_code="yx2026",
+            description="用于测试确认失效和处罚动作。",
+            status="approved",
+            reward_points=5,
+            audit_note="已通过，可测试确认失效。",
+        ),
+    ]
+    session.add_all(uploads)
+
+    hidden_resource_id = f"dev-hidden-{marker}"
+    session.add(
+        NetdiskResourceModel(
+            id=hidden_resource_id,
+            title=f"演示隐藏资源 {marker}",
+            category="办公模板",
+            pan="阿里",
+            level="featured",
+            cost_points=10,
+            downloads=18,
+            favorites=3,
+            description="用于测试后台恢复上架。",
+            link="https://www.aliyundrive.com/s/demo-hidden",
+            extract_code="demo",
+            unzip_code="",
+            is_active=False,
+        )
+    )
+
+    repairs = [
+        NetdiskRepair(
+            user_id=user.id,
+            resource_id=hidden_resource_id,
+            mode="repair",
+            resource_title=f"演示隐藏资源 {marker}",
+            pan="阿里",
+            link="https://www.aliyundrive.com/s/demo-repair",
+            extract_code="rp88",
+            note="演示补链，等待审核。",
+            status="pending",
+            reward_points=5,
+            audit_note="补链通过后释放冻结奖励。",
+        ),
+        NetdiskRepair(
+            user_id=user.id,
+            resource_id=hidden_resource_id,
+            mode="report",
+            resource_title=f"演示隐藏资源 {marker}",
+            pan="阿里",
+            note="演示投诉：链接疑似失效。",
+            status="pending",
+            reward_points=0,
+            audit_note="投诉待核验，不奖励积分。",
+        ),
+    ]
+    session.add_all(repairs)
+
+    session.add(
+        NetdiskRiskRecord(
+            user_id=user.id,
+            related_type="netdisk_upload",
+            related_id=f"demo-upload-{marker}",
+            reason="upload_reward_invalid",
+            points_due=8,
+            points_collected=2,
+            status="open",
+            note="演示待追缴：用户可用积分不足，剩余 8 分待追缴。",
+            idempotency_key=f"dev_netdisk_risk:{marker}",
+        )
+    )
+    await session.flush()
+    return response(
+        data={
+            "uploads": len(uploads),
+            "repairs": len(repairs),
+            "resources": 1,
+            "risk_records": 1,
+        },
+        msg="netdisk review demo data seeded",
+    )
 
 
 @router.put("/netdisk/audit-config", summary="update netdisk audit config")
