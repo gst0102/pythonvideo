@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, Query, Response
+from fastapi import APIRouter, Depends, Header, Query, Response
 from fastapi.encoders import jsonable_encoder
 from sqlalchemy import or_
 from sqlmodel import and_, func, select
@@ -385,8 +385,11 @@ async def admin_reject_netdisk_upload(
 async def admin_confirm_invalid_netdisk_upload(
     upload_id: str,
     req: NetdiskAdminAuditRequest,
+    x_admin_role: str = Header("operator"),
     session: AsyncSession = Depends(get_session),
 ):
+    if not _is_quality_supervisor(x_admin_role):
+        return response([], 403, "仅主管可确认资源失效")
     try:
         payload = await NetdiskResourceService.confirm_upload_invalid(session, upload_id, req.note)
     except ValueError as exc:
@@ -437,8 +440,11 @@ async def admin_list_netdisk_resources(
 async def admin_restore_netdisk_resource(
     resource_id: str,
     req: NetdiskAdminAuditRequest,
+    x_admin_role: str = Header("operator"),
     session: AsyncSession = Depends(get_session),
 ):
+    if not _is_quality_supervisor(x_admin_role):
+        return response([], 403, "仅主管可恢复资源上架")
     try:
         payload = await NetdiskResourceService.restore_resource(session, resource_id, req.note)
     except ValueError as exc:
@@ -1049,10 +1055,13 @@ async def admin_handle_netdisk_resource_quality_alert(
     alert_id: str,
     action: str,
     req: NetdiskAdminAuditRequest,
+    x_admin_role: str = Header("operator"),
     session: AsyncSession = Depends(get_session),
 ):
     if action not in {"read", "resolve", "ignore", "reopen"}:
         return response([], 400, "invalid alert action")
+    if action in {"resolve", "ignore"} and not _is_quality_supervisor(x_admin_role):
+        return response([], 403, "仅主管可执行高风险预警处理")
     try:
         uid = UUID(alert_id)
     except ValueError:
@@ -1079,14 +1088,63 @@ async def admin_handle_netdisk_resource_quality_alert(
     return response(data=_quality_alert_to_dict(item), msg="quality alert updated")
 
 
+@router.post("/netdisk/resource-quality/alerts-action/{alert_id}/resolve", summary="resolve quality alert with resource action")
+async def admin_resolve_netdisk_resource_quality_alert_with_action(
+    alert_id: str,
+    req: NetdiskAdminAuditRequest,
+    x_admin_role: str = Header("operator"),
+    session: AsyncSession = Depends(get_session),
+):
+    if not _is_quality_supervisor(x_admin_role):
+        return response([], 403, "仅主管可执行资源复核结果处理")
+    if req.result_action not in {"restore", "confirm_invalid", "keep_hidden"}:
+        return response([], 400, "invalid result action")
+    try:
+        uid = UUID(alert_id)
+    except ValueError:
+        return response([], 400, "invalid alert id")
+    item = await session.get(NetdiskQualityAlert, uid)
+    if not item:
+        return response([], 404, "quality alert not found")
+    try:
+        result_payload = await _apply_quality_alert_result_action(session, item, req.result_action, req.note)
+    except ValueError as exc:
+        return response([], 400, str(exc))
+    item.status = "resolved"
+    item.note = _append_note(item.note, req.note.strip() or _quality_alert_result_action_note(req.result_action))
+    item.handled_at = datetime.utcnow()
+    item.updated_at = datetime.utcnow()
+    await session.flush()
+    await session.refresh(item)
+    await _record_netdisk_audit_log(
+        session,
+        f"quality_alert_resolve_{req.result_action}",
+        "netdisk_quality_alert",
+        str(item.id),
+        item.title,
+        req.note,
+    )
+    return response(
+        data={
+            "alert": _quality_alert_to_dict(item),
+            "result_action": req.result_action,
+            "result": result_payload,
+        },
+        msg="quality alert resolved",
+    )
+
+
 @router.post("/netdisk/resource-quality/alerts-batch/{action}", summary="batch handle netdisk quality alerts")
 async def admin_batch_handle_netdisk_resource_quality_alerts(
     action: str,
     payload: dict,
+    x_admin_role: str = Header("operator"),
     session: AsyncSession = Depends(get_session),
 ):
     if action not in {"read", "resolve", "ignore"}:
         return response([], 400, "invalid batch alert action")
+    if action in {"resolve", "ignore"} and not _is_quality_supervisor(x_admin_role):
+        return response([], 403, "仅主管可执行高风险预警批量处理")
     ids = payload.get("ids") or []
     note = str(payload.get("note") or "").strip()
     if not ids:
@@ -1167,8 +1225,11 @@ async def admin_reject_netdisk_repair(
 async def admin_confirm_invalid_netdisk_repair(
     repair_id: str,
     req: NetdiskAdminAuditRequest,
+    x_admin_role: str = Header("operator"),
     session: AsyncSession = Depends(get_session),
 ):
+    if not _is_quality_supervisor(x_admin_role):
+        return response([], 403, "仅主管可确认资源失效")
     try:
         payload = await NetdiskResourceService.confirm_repair_invalid(session, repair_id, req.note)
     except ValueError as exc:
@@ -1591,6 +1652,56 @@ async def _apply_quality_auto_action(
     await session.flush()
 
 
+async def _apply_quality_alert_result_action(
+    session: AsyncSession,
+    alert: NetdiskQualityAlert,
+    result_action: str,
+    note: str = "",
+) -> dict:
+    resource = await session.get(NetdiskResourceModel, alert.resource_id)
+    if not resource:
+        raise ValueError("resource not found")
+    clean_note = note.strip() or _quality_alert_result_action_note(result_action)
+    if result_action == "restore":
+        payload = await NetdiskResourceService.restore_resource(session, alert.resource_id, clean_note)
+        await _record_netdisk_audit_log(
+            session,
+            "resource_restore",
+            "netdisk_resource",
+            alert.resource_id,
+            payload["resource"].get("title", ""),
+            clean_note,
+        )
+        return payload
+
+    if result_action == "confirm_invalid":
+        resource.is_active = False
+        resource.updated_at = datetime.utcnow()
+        await _record_netdisk_audit_log(
+            session,
+            "resource_quality_confirm_invalid",
+            "netdisk_resource",
+            resource.id,
+            resource.title,
+            clean_note,
+        )
+        await session.flush()
+        return {"resource": _resource_quality_resource_to_dict(resource)}
+
+    resource.is_active = False
+    resource.updated_at = datetime.utcnow()
+    await _record_netdisk_audit_log(
+        session,
+        "resource_quality_keep_hidden",
+        "netdisk_resource",
+        resource.id,
+        resource.title,
+        clean_note,
+    )
+    await session.flush()
+    return {"resource": _resource_quality_resource_to_dict(resource)}
+
+
 async def _list_resource_quality_alerts(session: AsyncSession, resource_id: str) -> list[dict]:
     rows = (
         await session.execute(
@@ -1848,6 +1959,18 @@ def _quality_alert_action_note(action: str) -> str:
         "ignore": "后台忽略预警",
         "reopen": "后台重新打开预警",
     }.get(action, "后台处理预警")
+
+
+def _quality_alert_result_action_note(action: str) -> str:
+    return {
+        "restore": "复核结果：资源恢复上架",
+        "confirm_invalid": "复核结果：确认资源失效",
+        "keep_hidden": "复核结果：继续隐藏资源",
+    }.get(action, "复核结果处理")
+
+
+def _is_quality_supervisor(role: str | None) -> bool:
+    return (role or "").lower() in {"admin", "supervisor"}
 
 
 def _parse_date_range(start_date: str | None, end_date: str | None) -> tuple[datetime | None, datetime | None]:

@@ -141,7 +141,7 @@ DEFAULT_CONFIGS: Dict[str, Dict[str, Any]] = {
         "quality_burst_report_threshold": 1,
         "quality_burst_unlock_threshold": 3,
         "quality_auto_review_pool": True,
-        "quality_auto_hide_high_report": False,
+        "quality_auto_hide_high_report": True,
         "quality_auto_hide_burst": False,
         "invalid_penalty_multiplier": 1,
         "auto_hide_on_report": True,

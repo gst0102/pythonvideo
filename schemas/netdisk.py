@@ -185,3 +185,4 @@ class NetdiskRepairResponse(BaseModel):
 
 class NetdiskAdminAuditRequest(BaseModel):
     note: str = ""
+    result_action: str | None = None
