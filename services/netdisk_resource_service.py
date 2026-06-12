@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, time, timedelta
 from typing import Literal
 
+from sqlalchemy import and_, func, or_
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from models.netdisk_favorite import NetdiskFavorite
 from models.netdisk_request import NetdiskRequest
+from models.netdisk_resource import NetdiskResource as NetdiskResourceModel
 from models.netdisk_upload import NetdiskUpload
 from models.points_ledger import PointsLedger
 from models.user import User
@@ -88,7 +91,8 @@ class NetdiskResourceService:
     """Unlock resources by consuming points and writing idempotent ledger rows."""
 
     @staticmethod
-    def list_resources(
+    async def list_resources(
+        session: AsyncSession,
         keyword: str | None = None,
         pan: str | None = None,
         category: str | None = None,
@@ -98,7 +102,9 @@ class NetdiskResourceService:
         page: int = 1,
         page_size: int = 20,
     ) -> dict:
-        selected_keyword = (keyword or "").strip().lower()
+        await _ensure_seed_resources(session)
+
+        selected_keyword = (keyword or "").strip()
         selected_pan = (pan or "").strip()
         selected_category = (category or "").strip()
         selected_level = _normalize_level(level)
@@ -107,35 +113,43 @@ class NetdiskResourceService:
         current_page = max(1, int(page or 1))
         current_page_size = max(1, min(50, int(page_size or 20)))
 
-        resources = list(NETDISK_RESOURCE_CATALOG.values())
+        filters = [NetdiskResourceModel.is_active == True]  # noqa: E712
         if selected_keyword:
-            resources = [
-                resource
-                for resource in resources
-                if selected_keyword in " ".join(
-                    [
-                        resource.title,
-                        resource.category,
-                        resource.pan,
-                        resource.level,
-                        resource.description,
-                    ]
-                ).lower()
-            ]
+            keyword_like = f"%{selected_keyword}%"
+            filters.append(
+                or_(
+                    NetdiskResourceModel.title.ilike(keyword_like),
+                    NetdiskResourceModel.category.ilike(keyword_like),
+                    NetdiskResourceModel.pan.ilike(keyword_like),
+                    NetdiskResourceModel.level.ilike(keyword_like),
+                    NetdiskResourceModel.description.ilike(keyword_like),
+                )
+            )
         if selected_pan and selected_pan != "全部":
-            resources = [resource for resource in resources if resource.pan == selected_pan]
+            filters.append(NetdiskResourceModel.pan == selected_pan)
         if selected_category and selected_category != "全部分类":
-            resources = [resource for resource in resources if resource.category == selected_category]
+            filters.append(NetdiskResourceModel.category == selected_category)
         if selected_level and selected_level != "all":
-            resources = [resource for resource in resources if resource.level == selected_level]
+            filters.append(NetdiskResourceModel.level == selected_level)
         if selected_time and selected_time != "all":
-            resources = [resource for resource in resources if _match_time(resource.verified_at, selected_time)]
+            time_start = _time_filter_start(selected_time)
+            if time_start:
+                filters.append(NetdiskResourceModel.verified_at >= time_start)
 
-        resources = _sort_resources(resources, selected_sort)
-        total = len(resources)
+        total_result = await session.execute(
+            select(func.count()).select_from(NetdiskResourceModel).where(and_(*filters))
+        )
+        total = int(total_result.scalar_one() or 0)
         start = (current_page - 1) * current_page_size
         end = start + current_page_size
-        page_items = resources[start:end]
+        result = await session.execute(
+            select(NetdiskResourceModel)
+            .where(and_(*filters))
+            .order_by(*_resource_order_by(selected_sort))
+            .offset(start)
+            .limit(current_page_size)
+        )
+        page_items = result.scalars().all()
         return {
             "resources": [_build_resource_payload(resource) for resource in page_items],
             "total": total,
@@ -145,11 +159,9 @@ class NetdiskResourceService:
         }
 
     @staticmethod
-    def get_resource_detail(resource_id: str) -> dict:
-        resource_key = (resource_id or "").strip()
-        resource = NETDISK_RESOURCE_CATALOG.get(resource_key)
-        if not resource:
-            raise ValueError("resource not found")
+    async def get_resource_detail(session: AsyncSession, resource_id: str) -> dict:
+        await _ensure_seed_resources(session)
+        resource = await _get_resource_or_raise(session, resource_id)
         return _build_resource_payload(resource)
 
     @staticmethod
@@ -158,10 +170,8 @@ class NetdiskResourceService:
         user: User,
         resource_id: str,
     ) -> dict:
-        resource_key = (resource_id or "").strip()
-        resource = NETDISK_RESOURCE_CATALOG.get(resource_key)
-        if not resource:
-            raise ValueError("resource not found")
+        await _ensure_seed_resources(session)
+        resource = await _get_resource_or_raise(session, resource_id)
 
         account, _ = await PointsAccountService.ensure_user_account(session, user.id)
         ledger = await _get_unlock_ledger(session, user.id, resource.id)
@@ -175,10 +185,8 @@ class NetdiskResourceService:
         user: User,
         resource_id: str,
     ) -> tuple[dict, bool]:
-        resource_key = (resource_id or "").strip()
-        resource = NETDISK_RESOURCE_CATALOG.get(resource_key)
-        if not resource:
-            raise ValueError("resource not found")
+        await _ensure_seed_resources(session)
+        resource = await _get_resource_or_raise(session, resource_id)
 
         ledger, account, unlocked_now = await PointsAccountService.consume_consumable_points(
             session=session,
@@ -215,11 +223,12 @@ class NetdiskResourceService:
             .order_by(NetdiskFavorite.created_at.desc())
         )
         favorites = result.scalars().all()
+        resource_map = await _get_resource_map(session, [favorite.resource_id for favorite in favorites])
         return {
             "favorites": [
-                _build_favorite_payload(favorite)
+                _build_favorite_payload(favorite, resource_map[favorite.resource_id])
                 for favorite in favorites
-                if favorite.resource_id in NETDISK_RESOURCE_CATALOG
+                if favorite.resource_id in resource_map
             ]
         }
 
@@ -229,16 +238,17 @@ class NetdiskResourceService:
         user: User,
         resource_id: str,
     ) -> tuple[dict, bool]:
-        resource = _get_resource_or_raise(resource_id)
+        await _ensure_seed_resources(session)
+        resource = await _get_resource_or_raise(session, resource_id)
         existing = await _get_favorite(session, user.id, resource.id)
         if existing:
-            return _build_favorite_payload(existing), False
+            return _build_favorite_payload(existing, resource), False
 
         favorite = NetdiskFavorite(user_id=user.id, resource_id=resource.id)
         session.add(favorite)
         await session.flush()
         await session.refresh(favorite)
-        return _build_favorite_payload(favorite), True
+        return _build_favorite_payload(favorite, resource), True
 
     @staticmethod
     async def unfavorite_resource(
@@ -246,7 +256,8 @@ class NetdiskResourceService:
         user: User,
         resource_id: str,
     ) -> dict:
-        resource = _get_resource_or_raise(resource_id)
+        await _ensure_seed_resources(session)
+        resource = await _get_resource_or_raise(session, resource_id)
         favorite = await _get_favorite(session, user.id, resource.id)
         if favorite:
             await session.delete(favorite)
@@ -386,12 +397,64 @@ async def _get_favorite(session: AsyncSession, user_id, resource_id: str) -> Net
     return result.scalar_one_or_none()
 
 
-def _get_resource_or_raise(resource_id: str) -> NetdiskResource:
+async def _get_resource_or_raise(session: AsyncSession, resource_id: str) -> NetdiskResourceModel:
     resource_key = (resource_id or "").strip()
-    resource = NETDISK_RESOURCE_CATALOG.get(resource_key)
+    result = await session.execute(
+        select(NetdiskResourceModel).where(
+            NetdiskResourceModel.id == resource_key,
+            NetdiskResourceModel.is_active == True,  # noqa: E712
+        )
+    )
+    resource = result.scalar_one_or_none()
     if not resource:
         raise ValueError("resource not found")
     return resource
+
+
+async def _get_resource_map(session: AsyncSession, resource_ids: list[str]) -> dict[str, NetdiskResourceModel]:
+    clean_ids = [resource_id for resource_id in dict.fromkeys(resource_ids) if resource_id]
+    if not clean_ids:
+        return {}
+    result = await session.execute(
+        select(NetdiskResourceModel).where(
+            NetdiskResourceModel.id.in_(clean_ids),
+            NetdiskResourceModel.is_active == True,  # noqa: E712
+        )
+    )
+    return {resource.id: resource for resource in result.scalars().all()}
+
+
+async def _ensure_seed_resources(session: AsyncSession) -> None:
+    result = await session.execute(select(func.count()).select_from(NetdiskResourceModel))
+    if int(result.scalar_one() or 0) > 0:
+        return
+
+    now = datetime.utcnow()
+    verified_offsets = {
+        "r1": timedelta(hours=2),
+        "r2": timedelta(hours=6),
+        "r3": timedelta(days=1),
+    }
+    for resource in NETDISK_RESOURCE_CATALOG.values():
+        session.add(
+            NetdiskResourceModel(
+                id=resource.id,
+                title=resource.title,
+                category=resource.category,
+                pan=resource.pan,
+                level=resource.level,
+                cost_points=resource.cost_points,
+                verified_at=now - verified_offsets.get(resource.id, timedelta(days=1)),
+                downloads=resource.downloads,
+                favorites=resource.favorites,
+                description=resource.description,
+                link=resource.link,
+                extract_code=resource.extract_code,
+                unzip_code=resource.unzip_code,
+                is_active=True,
+            )
+        )
+    await session.flush()
 
 
 def _normalize_level(level: str | None) -> str:
@@ -409,35 +472,47 @@ def _normalize_level(level: str | None) -> str:
     return level_map.get(selected, selected)
 
 
-def _verified_rank(verified_at: str) -> int:
-    if "小时" in verified_at:
-        return 0
-    if "今天" in verified_at:
-        return 1
-    if "昨天" in verified_at:
-        return 2
-    return 3
-
-
-def _match_time(verified_at: str, time_filter: str) -> bool:
+def _time_filter_start(time_filter: str) -> datetime | None:
+    now = datetime.utcnow()
     if time_filter == "today":
-        return "小时" in verified_at or "今天" in verified_at
+        return datetime.combine(now.date(), time.min)
+    if time_filter == "recent":
+        return now - timedelta(days=3)
     if time_filter == "week":
-        return "小时" in verified_at or "今天" in verified_at or "昨天" in verified_at
-    return True
+        return now - timedelta(days=7)
+    if time_filter == "yesterday":
+        return datetime.combine(now.date() - timedelta(days=1), time.min)
+    return None
 
 
-def _sort_resources(resources: list[NetdiskResource], sort: str) -> list[NetdiskResource]:
+def _resource_order_by(sort: str):
     if sort == "hot":
-        return sorted(resources, key=lambda item: item.downloads, reverse=True)
+        return [NetdiskResourceModel.downloads.desc(), NetdiskResourceModel.verified_at.desc()]
     if sort == "pointsAsc":
-        return sorted(resources, key=lambda item: item.cost_points)
+        return [NetdiskResourceModel.cost_points.asc(), NetdiskResourceModel.verified_at.desc()]
     if sort == "pointsDesc":
-        return sorted(resources, key=lambda item: item.cost_points, reverse=True)
-    return sorted(resources, key=lambda item: _verified_rank(item.verified_at))
+        return [NetdiskResourceModel.cost_points.desc(), NetdiskResourceModel.verified_at.desc()]
+    return [NetdiskResourceModel.verified_at.desc(), NetdiskResourceModel.created_at.desc()]
 
 
-def _build_resource_payload(resource: NetdiskResource) -> dict:
+def _format_verified_at(value) -> str:
+    if not value:
+        return ""
+    if isinstance(value, str):
+        return value
+    now = datetime.utcnow()
+    verified = value.replace(tzinfo=None) if getattr(value, "tzinfo", None) else value
+    delta = now - verified
+    if delta.total_seconds() < 3600:
+        return "刚刚"
+    if delta.total_seconds() < 86400:
+        return f"{max(1, int(delta.total_seconds() // 3600))}小时前"
+    if delta.days == 1:
+        return "昨天"
+    return verified.strftime("%Y-%m-%d")
+
+
+def _build_resource_payload(resource: NetdiskResource | NetdiskResourceModel) -> dict:
     return {
         "id": resource.id,
         "title": resource.title,
@@ -445,15 +520,14 @@ def _build_resource_payload(resource: NetdiskResource) -> dict:
         "pan": resource.pan,
         "level": resource.level,
         "cost_points": resource.cost_points,
-        "verified_at": resource.verified_at,
+        "verified_at": _format_verified_at(resource.verified_at),
         "downloads": resource.downloads,
         "favorites": resource.favorites,
         "description": resource.description,
     }
 
 
-def _build_favorite_payload(favorite: NetdiskFavorite) -> dict:
-    resource = NETDISK_RESOURCE_CATALOG[favorite.resource_id]
+def _build_favorite_payload(favorite: NetdiskFavorite, resource: NetdiskResourceModel) -> dict:
     return {
         "resource": _build_resource_payload(resource),
         "favorite_at": favorite.created_at,

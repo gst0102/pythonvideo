@@ -42,6 +42,13 @@ class MineQuickAction(BaseModel):
     subtitle: str = ""
 
 
+class MineNetdiskStats(BaseModel):
+    favorite_count: int = 0
+    upload_count: int = 0
+    repair_count: int = 0
+    today_can_earn: int = 0
+
+
 class MineAssetsResponse(BaseModel):
     user: TaskOverviewUserSummary
     member: TaskOverviewMemberSummary
@@ -49,4 +56,5 @@ class MineAssetsResponse(BaseModel):
     legacy_wallet: MineLegacyWallet
     points_wallet: MinePointsWallet
     invite_summary: MineInviteSummary
+    netdisk_stats: MineNetdiskStats = Field(default_factory=MineNetdiskStats)
     quick_actions: list[MineQuickAction] = Field(default_factory=list)

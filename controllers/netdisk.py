@@ -43,8 +43,10 @@ async def list_netdisk_resources(
     sort: str | None = None,
     page: int = 1,
     page_size: int = 20,
+    session: AsyncSession = Depends(get_session),
 ):
-    payload = NetdiskResourceService.list_resources(
+    payload = await NetdiskResourceService.list_resources(
+        session=session,
         keyword=keyword,
         pan=pan,
         category=category,
@@ -144,9 +146,9 @@ async def create_netdisk_upload(
 
 
 @router.get("/resources/{resource_id}", summary="get netdisk resource detail")
-async def get_netdisk_resource_detail(resource_id: str):
+async def get_netdisk_resource_detail(resource_id: str, session: AsyncSession = Depends(get_session)):
     try:
-        payload = {"resource": NetdiskResourceService.get_resource_detail(resource_id)}
+        payload = {"resource": await NetdiskResourceService.get_resource_detail(session, resource_id)}
     except ValueError as exc:
         return response([], 400, str(exc))
 

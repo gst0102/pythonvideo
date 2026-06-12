@@ -4,6 +4,11 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
+from sqlalchemy import func
+from sqlmodel import select
+
+from models.netdisk_favorite import NetdiskFavorite
+from models.netdisk_upload import NetdiskUpload
 from models.user import User
 from services.config_service import ConfigService
 from services.points_account_service import PointsAccountService
@@ -56,6 +61,7 @@ class MineAssetsService:
                 "indirect_count": int(user.indirect_count),
                 "team_count": int(user.team_count),
             },
+            "netdisk_stats": await _build_netdisk_stats(session, user, overview),
             "quick_actions": [
                 {
                     "code": "withdrawal",
@@ -79,3 +85,34 @@ class MineAssetsService:
                 },
             ],
         }
+
+
+async def _build_netdisk_stats(session, user: User, overview: Dict[str, Any]) -> Dict[str, int]:
+    favorite_count = await _count_rows(session, NetdiskFavorite, NetdiskFavorite.user_id == user.id)
+    upload_count = await _count_rows(session, NetdiskUpload, NetdiskUpload.user_id == user.id)
+    game_task = overview.get("game_task") or {}
+    today_remaining = int(game_task.get("today_remaining") or 0)
+    max_points = _resolve_max_game_points(game_task)
+
+    return {
+        "favorite_count": favorite_count,
+        "upload_count": upload_count,
+        "repair_count": 0,
+        "today_can_earn": max(today_remaining * max_points, 0),
+    }
+
+
+async def _count_rows(session, model, condition) -> int:
+    result = await session.execute(select(func.count()).select_from(model).where(condition))
+    return int(result.scalar_one() or 0)
+
+
+def _resolve_max_game_points(game_task: Dict[str, Any]) -> int:
+    games = game_task.get("games") or []
+    if not games:
+        return 2
+    points_range = str(games[0].get("points_range") or "1-2")
+    try:
+        return max(int(part) for part in points_range.split("-") if part.strip().isdigit())
+    except ValueError:
+        return 2
