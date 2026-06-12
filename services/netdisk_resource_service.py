@@ -8,6 +8,7 @@ from typing import Literal
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from models.netdisk_favorite import NetdiskFavorite
 from models.points_ledger import PointsLedger
 from models.user import User
 from models.user_account import UserAccount
@@ -152,6 +153,56 @@ class NetdiskResourceService:
         await session.flush()
         return _build_unlock_payload(resource, ledger, account, invite_reward), unlocked_now
 
+    @staticmethod
+    async def list_favorites(
+        session: AsyncSession,
+        user: User,
+    ) -> dict:
+        result = await session.execute(
+            select(NetdiskFavorite)
+            .where(NetdiskFavorite.user_id == user.id)
+            .order_by(NetdiskFavorite.created_at.desc())
+        )
+        favorites = result.scalars().all()
+        return {
+            "favorites": [
+                _build_favorite_payload(favorite)
+                for favorite in favorites
+                if favorite.resource_id in NETDISK_RESOURCE_CATALOG
+            ]
+        }
+
+    @staticmethod
+    async def favorite_resource(
+        session: AsyncSession,
+        user: User,
+        resource_id: str,
+    ) -> tuple[dict, bool]:
+        resource = _get_resource_or_raise(resource_id)
+        existing = await _get_favorite(session, user.id, resource.id)
+        if existing:
+            return _build_favorite_payload(existing), False
+
+        favorite = NetdiskFavorite(user_id=user.id, resource_id=resource.id)
+        session.add(favorite)
+        await session.flush()
+        await session.refresh(favorite)
+        return _build_favorite_payload(favorite), True
+
+    @staticmethod
+    async def unfavorite_resource(
+        session: AsyncSession,
+        user: User,
+        resource_id: str,
+    ) -> dict:
+        resource = _get_resource_or_raise(resource_id)
+        favorite = await _get_favorite(session, user.id, resource.id)
+        if favorite:
+            await session.delete(favorite)
+            await session.flush()
+
+        return {"resource": _build_resource_payload(resource), "favorited": False}
+
 
 async def _get_unlock_ledger(session: AsyncSession, user_id, resource_id: str) -> PointsLedger | None:
     result = await session.execute(
@@ -161,6 +212,24 @@ async def _get_unlock_ledger(session: AsyncSession, user_id, resource_id: str) -
         )
     )
     return result.scalar_one_or_none()
+
+
+async def _get_favorite(session: AsyncSession, user_id, resource_id: str) -> NetdiskFavorite | None:
+    result = await session.execute(
+        select(NetdiskFavorite).where(
+            NetdiskFavorite.user_id == user_id,
+            NetdiskFavorite.resource_id == resource_id,
+        )
+    )
+    return result.scalar_one_or_none()
+
+
+def _get_resource_or_raise(resource_id: str) -> NetdiskResource:
+    resource_key = (resource_id or "").strip()
+    resource = NETDISK_RESOURCE_CATALOG.get(resource_key)
+    if not resource:
+        raise ValueError("resource not found")
+    return resource
 
 
 def _build_resource_payload(resource: NetdiskResource) -> dict:
@@ -175,6 +244,15 @@ def _build_resource_payload(resource: NetdiskResource) -> dict:
         "downloads": resource.downloads,
         "favorites": resource.favorites,
         "description": resource.description,
+    }
+
+
+def _build_favorite_payload(favorite: NetdiskFavorite) -> dict:
+    resource = NETDISK_RESOURCE_CATALOG[favorite.resource_id]
+    return {
+        "resource": _build_resource_payload(resource),
+        "favorite_at": favorite.created_at,
+        "favorited": True,
     }
 
 

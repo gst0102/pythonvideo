@@ -39,6 +39,7 @@ from models.daily_task_stat import DailyTaskStat
 from models.game_settlement_batch import GameSettlementBatch
 from models.game_user_settlement import GameUserSettlement
 from models.invite_relation import InviteRelation
+from models.netdisk_favorite import NetdiskFavorite
 
 # 所有表，供 Alembic 自动发现
 __all__ = [
@@ -60,6 +61,7 @@ __all__ = [
     "GameSettlementBatch",
     "GameUserSettlement",
     "InviteRelation",
+    "NetdiskFavorite",
     "get_session",
     "get_session_ctx",
     "init_db",

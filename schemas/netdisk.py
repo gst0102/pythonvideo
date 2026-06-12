@@ -1,5 +1,7 @@
 """Schemas for netdisk resource unlock endpoints."""
 
+from datetime import datetime
+
 from pydantic import BaseModel
 
 from schemas.checkin import CheckinAccountSummary
@@ -62,3 +64,24 @@ class NetdiskResourceAccessResponse(BaseModel):
     resource: NetdiskResourceSummary
     access: NetdiskAccessData
     account: CheckinAccountSummary
+
+
+class NetdiskFavoriteItem(BaseModel):
+    resource: NetdiskResourceSummary
+    favorite_at: datetime
+    favorited: bool = True
+
+
+class NetdiskFavoriteListResponse(BaseModel):
+    favorites: list[NetdiskFavoriteItem]
+
+
+class NetdiskFavoriteResponse(BaseModel):
+    resource: NetdiskResourceSummary
+    favorite_at: datetime
+    favorited: bool = True
+
+
+class NetdiskUnfavoriteResponse(BaseModel):
+    resource: NetdiskResourceSummary
+    favorited: bool = False
