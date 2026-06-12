@@ -21,9 +21,14 @@ ResourceLevel = Literal["normal", "featured", "official"]
 class NetdiskResource:
     id: str
     title: str
+    category: str
     pan: str
     level: ResourceLevel
     cost_points: int
+    verified_at: str
+    downloads: int
+    favorites: int
+    description: str
     link: str
     extract_code: str = ""
     unzip_code: str = ""
@@ -32,29 +37,44 @@ class NetdiskResource:
 NETDISK_RESOURCE_CATALOG: dict[str, NetdiskResource] = {
     "r1": NetdiskResource(
         id="r1",
-        title="私域运营资料包",
+        title="社区团购接龙模板与群公告话术合集",
+        category="自媒体素材",
         pan="夸克",
         level="featured",
         cost_points=10,
+        verified_at="2小时前",
+        downloads=128,
+        favorites=33,
+        description="包含接龙表格、群公告、促销提醒和售后沟通模板，适合社区团购日常运营。",
         link="https://pan.quark.cn/s/mock-yuexiang-r1",
         extract_code="yx10",
         unzip_code="yx2026",
     ),
     "r2": NetdiskResource(
         id="r2",
-        title="Excel 模板合集",
+        title="Excel 进销存台账与库存预警模板",
+        category="学习办公",
         pan="百度",
         level="normal",
         cost_points=5,
+        verified_at="今天",
+        downloads=46,
+        favorites=9,
+        description="适合小店、团购和仓储场景，包含库存、采购、销售和利润汇总表。",
         link="https://pan.baidu.com/s/mock-yuexiang-r2",
         extract_code="yx05",
     ),
     "r3": NetdiskResource(
         id="r3",
-        title="官方资料合集",
+        title="自媒体账号运营选题库与脚本结构模板",
+        category="自媒体素材",
         pan="阿里",
         level="official",
         cost_points=20,
+        verified_at="昨天",
+        downloads=221,
+        favorites=68,
+        description="覆盖账号定位、爆款拆解、脚本文案、封面标题和发布复盘表。",
         link="https://www.aliyundrive.com/s/mock-yuexiang-r3",
         extract_code="yx20",
     ),
@@ -63,6 +83,22 @@ NETDISK_RESOURCE_CATALOG: dict[str, NetdiskResource] = {
 
 class NetdiskResourceService:
     """Unlock resources by consuming points and writing idempotent ledger rows."""
+
+    @staticmethod
+    def list_resources(pan: str | None = None) -> list[dict]:
+        selected_pan = (pan or "").strip()
+        resources = NETDISK_RESOURCE_CATALOG.values()
+        if selected_pan and selected_pan != "全部":
+            resources = [resource for resource in resources if resource.pan == selected_pan]
+        return [_build_resource_payload(resource) for resource in resources]
+
+    @staticmethod
+    def get_resource_detail(resource_id: str) -> dict:
+        resource_key = (resource_id or "").strip()
+        resource = NETDISK_RESOURCE_CATALOG.get(resource_key)
+        if not resource:
+            raise ValueError("resource not found")
+        return _build_resource_payload(resource)
 
     @staticmethod
     async def get_resource_access(
@@ -131,9 +167,14 @@ def _build_resource_payload(resource: NetdiskResource) -> dict:
     return {
         "id": resource.id,
         "title": resource.title,
+        "category": resource.category,
         "pan": resource.pan,
         "level": resource.level,
         "cost_points": resource.cost_points,
+        "verified_at": resource.verified_at,
+        "downloads": resource.downloads,
+        "favorites": resource.favorites,
+        "description": resource.description,
     }
 
 

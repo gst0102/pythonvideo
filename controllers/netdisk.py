@@ -8,10 +8,31 @@ from core.response import response
 from jwt_create import get_current_user
 from models.base import get_session
 from models.user import User
-from schemas.netdisk import NetdiskResourceAccessResponse, NetdiskResourceUnlockResponse
+from schemas.netdisk import (
+    NetdiskResourceAccessResponse,
+    NetdiskResourceDetailResponse,
+    NetdiskResourceListResponse,
+    NetdiskResourceUnlockResponse,
+)
 from services.netdisk_resource_service import NetdiskResourceService
 
 router = APIRouter(prefix="/netdisk", tags=["netdisk"])
+
+
+@router.get("/resources", summary="list netdisk resources")
+async def list_netdisk_resources(pan: str | None = None):
+    payload = {"resources": NetdiskResourceService.list_resources(pan=pan)}
+    return response(data=NetdiskResourceListResponse(**payload).model_dump(mode="json"))
+
+
+@router.get("/resources/{resource_id}", summary="get netdisk resource detail")
+async def get_netdisk_resource_detail(resource_id: str):
+    try:
+        payload = {"resource": NetdiskResourceService.get_resource_detail(resource_id)}
+    except ValueError as exc:
+        return response([], 400, str(exc))
+
+    return response(data=NetdiskResourceDetailResponse(**payload).model_dump(mode="json"))
 
 
 @router.get("/resources/{resource_id}/access", summary="get netdisk resource access")

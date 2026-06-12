@@ -8,9 +8,22 @@ from schemas.checkin import CheckinAccountSummary
 class NetdiskResourceSummary(BaseModel):
     id: str
     title: str
+    category: str
     pan: str
     level: str
     cost_points: int
+    verified_at: str
+    downloads: int
+    favorites: int
+    description: str
+
+
+class NetdiskResourceListResponse(BaseModel):
+    resources: list[NetdiskResourceSummary]
+
+
+class NetdiskResourceDetailResponse(BaseModel):
+    resource: NetdiskResourceSummary
 
 
 class NetdiskUnlockData(BaseModel):
