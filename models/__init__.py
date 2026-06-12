@@ -41,6 +41,8 @@ from models.game_user_settlement import GameUserSettlement
 from models.invite_relation import InviteRelation
 from models.netdisk_favorite import NetdiskFavorite
 from models.netdisk_audit_log import NetdiskAuditLog
+from models.netdisk_quality_alert import NetdiskQualityAlert
+from models.netdisk_quality_daily_stat import NetdiskQualityDailyStat
 from models.netdisk_repair import NetdiskRepair
 from models.netdisk_request import NetdiskRequest
 from models.netdisk_resource import NetdiskResource
@@ -69,6 +71,8 @@ __all__ = [
     "InviteRelation",
     "NetdiskFavorite",
     "NetdiskAuditLog",
+    "NetdiskQualityAlert",
+    "NetdiskQualityDailyStat",
     "NetdiskRepair",
     "NetdiskRequest",
     "NetdiskResource",

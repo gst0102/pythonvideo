@@ -16,6 +16,8 @@ from core.response import response
 from models.base import get_session
 from models.chat import ChatMessage
 from models.netdisk_audit_log import NetdiskAuditLog
+from models.netdisk_quality_alert import NetdiskQualityAlert
+from models.netdisk_quality_daily_stat import NetdiskQualityDailyStat
 from models.netdisk_repair import NetdiskRepair
 from models.netdisk_resource import NetdiskResource as NetdiskResourceModel
 from models.netdisk_risk_record import NetdiskRiskRecord
@@ -31,6 +33,7 @@ from services.chat_service import ChatService
 from services.config_service import ConfigService
 from services.game_ad_service import build_game_bonus_ad_config_payload, normalize_game_bonus_ad_config
 from services.game_settlement_service import GameSettlementService
+from services.netdisk_quality_stat_service import build_resource_quality_day_stat, refresh_netdisk_quality_daily_stats
 from services.netdisk_resource_service import NetdiskResourceService
 from services.points_account_service import PointsAccountService
 from services.withdrawal_service import WithdrawalService
@@ -927,12 +930,55 @@ async def admin_get_netdisk_resource_quality_detail(
         data={
             "resource": _resource_quality_resource_to_dict(resource),
             "stats": stat,
+            "alerts": await _list_resource_quality_alerts(session, resource_id),
+            "trends": await _build_resource_quality_trends(session, resource_id),
             "reports": [_netdisk_repair_to_dict(item) for item in reports],
             "restore_logs": [_netdisk_audit_log_to_dict(item) for item in restore_logs],
             "unlocks": [_netdisk_unlock_ledger_to_dict(item) for item in unlocks],
             "recent_logs": [_netdisk_audit_log_to_dict(item) for item in recent_logs],
         }
     )
+
+
+@router.post("/netdisk/resource-quality/alerts/{alert_id}/{action}", summary="handle netdisk quality alert")
+async def admin_handle_netdisk_resource_quality_alert(
+    alert_id: str,
+    action: str,
+    req: NetdiskAdminAuditRequest,
+    session: AsyncSession = Depends(get_session),
+):
+    if action not in {"read", "resolve", "ignore", "reopen"}:
+        return response([], 400, "invalid alert action")
+    try:
+        uid = UUID(alert_id)
+    except ValueError:
+        return response([], 400, "invalid alert id")
+    item = await session.get(NetdiskQualityAlert, uid)
+    if not item:
+        return response([], 404, "quality alert not found")
+
+    status_map = {"read": "read", "resolve": "resolved", "ignore": "ignored", "reopen": "open"}
+    item.status = status_map[action]
+    item.note = _append_note(item.note, req.note.strip() or _quality_alert_action_note(action))
+    item.handled_at = None if action == "reopen" else datetime.utcnow()
+    item.updated_at = datetime.utcnow()
+    await session.flush()
+    await session.refresh(item)
+    await _record_netdisk_audit_log(
+        session,
+        f"quality_alert_{action}",
+        "netdisk_quality_alert",
+        alert_id,
+        item.title,
+        req.note,
+    )
+    return response(data=_quality_alert_to_dict(item), msg="quality alert updated")
+
+
+@router.post("/netdisk/resource-quality/refresh-stats", summary="refresh netdisk quality daily stats")
+async def admin_refresh_netdisk_resource_quality_stats(session: AsyncSession = Depends(get_session)):
+    rows = await refresh_netdisk_quality_daily_stats(session)
+    return response(data={"rows": rows}, msg="netdisk quality daily stats refreshed")
 
 
 @router.put("/netdisk/audit-config", summary="update netdisk audit config")
@@ -1205,36 +1251,80 @@ async def _build_resource_quality_alerts(session: AsyncSession) -> list[dict]:
     thresholds = await _get_resource_quality_thresholds(session)
     rankings = await _build_resource_quality_rankings(session, limit=30, thresholds=thresholds)
     alerts = []
-    seen = set()
     for item in rankings:
         if item["reports"] >= thresholds["high_report_threshold"]:
-            seen.add(item["resource_id"])
-            alerts.append(
-                {
-                    "type": "high_report",
-                    "level": "danger",
-                    "resource_id": item["resource_id"],
-                    "title": item["title"],
-                    "message": f"投诉 {item['reports']} 次，达到高投诉阈值",
-                }
+            alert = await _upsert_quality_alert(
+                session=session,
+                item=item,
+                alert_type="high_report",
+                level="danger",
+                message=f"投诉 {item['reports']} 次，达到高投诉阈值",
             )
+            if alert and alert.status in {"open", "read"}:
+                alerts.append(_quality_alert_to_dict(alert, level="danger"))
         if (
             item["recent_reports_24h"] >= thresholds["burst_report_threshold"]
             and item["recent_unlocks_24h"] >= thresholds["burst_unlock_threshold"]
         ):
-            key = f"burst:{item['resource_id']}"
-            if key not in seen:
-                seen.add(key)
-                alerts.append(
-                    {
-                        "type": "unlock_report_burst",
-                        "level": "warning",
-                        "resource_id": item["resource_id"],
-                        "title": item["title"],
-                        "message": f"24小时内解锁 {item['recent_unlocks_24h']} 次且投诉 {item['recent_reports_24h']} 次",
-                    }
-                )
+            alert = await _upsert_quality_alert(
+                session=session,
+                item=item,
+                alert_type="unlock_report_burst",
+                level="warning",
+                message=f"24小时内解锁 {item['recent_unlocks_24h']} 次且投诉 {item['recent_reports_24h']} 次",
+            )
+            if alert and alert.status in {"open", "read"}:
+                alerts.append(_quality_alert_to_dict(alert, level="warning"))
     return alerts[:6]
+
+
+async def _upsert_quality_alert(
+    session: AsyncSession,
+    item: dict,
+    alert_type: str,
+    level: str,
+    message: str,
+) -> NetdiskQualityAlert | None:
+    result = await session.execute(
+        select(NetdiskQualityAlert).where(
+            NetdiskQualityAlert.resource_id == item["resource_id"],
+            NetdiskQualityAlert.alert_type == alert_type,
+        )
+    )
+    alert = result.scalar_one_or_none()
+    now = datetime.utcnow()
+    if alert:
+        alert.title = item["title"]
+        alert.message = message
+        alert.last_triggered_at = now
+        alert.updated_at = now
+        if alert.status == "resolved":
+            alert.status = "open"
+            alert.handled_at = None
+        await session.flush()
+        return alert
+    alert = NetdiskQualityAlert(
+        resource_id=item["resource_id"],
+        alert_type=alert_type,
+        status="open",
+        title=item["title"],
+        message=message,
+        last_triggered_at=now,
+    )
+    session.add(alert)
+    await session.flush()
+    return alert
+
+
+async def _list_resource_quality_alerts(session: AsyncSession, resource_id: str) -> list[dict]:
+    rows = (
+        await session.execute(
+            select(NetdiskQualityAlert)
+            .where(NetdiskQualityAlert.resource_id == resource_id)
+            .order_by(NetdiskQualityAlert.last_triggered_at.desc())
+        )
+    ).scalars().all()
+    return [_quality_alert_to_dict(item) for item in rows]
 
 
 async def _build_resource_quality_stat(session: AsyncSession, resource: NetdiskResourceModel) -> dict:
@@ -1305,6 +1395,32 @@ async def _build_resource_quality_stat(session: AsyncSession, resource: NetdiskR
         "last_restore_at": restores[1].isoformat() if restores[1] else None,
         "last_unlock_at": unlocks[2].isoformat() if unlocks[2] else None,
     }
+
+
+async def _build_resource_quality_trends(session: AsyncSession, resource_id: str) -> list[dict]:
+    today = datetime.utcnow().date()
+    start_day = today - timedelta(days=6)
+    stats = (
+        await session.execute(
+            select(NetdiskQualityDailyStat)
+            .where(
+                NetdiskQualityDailyStat.resource_id == resource_id,
+                NetdiskQualityDailyStat.stat_date >= start_day,
+                NetdiskQualityDailyStat.stat_date <= today,
+            )
+            .order_by(NetdiskQualityDailyStat.stat_date.asc())
+        )
+    ).scalars().all()
+    stat_map = {item.stat_date: item for item in stats}
+    trends = []
+    for offset in range(7):
+        day = start_day + timedelta(days=offset)
+        item = stat_map.get(day)
+        if item:
+            trends.append(_quality_daily_stat_to_dict(item))
+        else:
+            trends.append(await build_resource_quality_day_stat(session, resource_id, day))
+    return trends
 
 
 async def _get_resource_quality_thresholds(session: AsyncSession) -> dict:
@@ -1408,6 +1524,49 @@ def _resource_quality_resource_to_dict(item: NetdiskResourceModel) -> dict:
         "updated_at": item.updated_at.isoformat() if item.updated_at else None,
         "verified_at": item.verified_at.isoformat() if item.verified_at else None,
     }
+
+
+def _quality_alert_to_dict(item: NetdiskQualityAlert, level: str | None = None) -> dict:
+    level_map = {"high_report": "danger", "unlock_report_burst": "warning"}
+    return {
+        "id": str(item.id),
+        "type": item.alert_type,
+        "level": level or level_map.get(item.alert_type, "warning"),
+        "resource_id": item.resource_id,
+        "title": item.title,
+        "message": item.message,
+        "status": item.status,
+        "note": item.note,
+        "last_triggered_at": item.last_triggered_at.isoformat() if item.last_triggered_at else None,
+        "handled_at": item.handled_at.isoformat() if item.handled_at else None,
+        "created_at": item.created_at.isoformat() if item.created_at else None,
+        "updated_at": item.updated_at.isoformat() if item.updated_at else None,
+    }
+
+
+def _quality_daily_stat_to_dict(item: NetdiskQualityDailyStat) -> dict:
+    return {
+        "date": item.stat_date.isoformat(),
+        "resource_id": item.resource_id,
+        "title": item.title,
+        "category": item.category,
+        "pan": item.pan,
+        "is_active": bool(item.is_active),
+        "reports": int(item.reports or 0),
+        "restores": int(item.restores or 0),
+        "unlocks": int(item.unlocks or 0),
+        "unlock_users": int(item.unlock_users or 0),
+        "score": int(item.score or 0),
+    }
+
+
+def _quality_alert_action_note(action: str) -> str:
+    return {
+        "read": "后台标记已读",
+        "resolve": "后台标记已处理",
+        "ignore": "后台忽略预警",
+        "reopen": "后台重新打开预警",
+    }.get(action, "后台处理预警")
 
 
 def _parse_date_range(start_date: str | None, end_date: str | None) -> tuple[datetime | None, datetime | None]:

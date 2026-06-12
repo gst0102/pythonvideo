@@ -78,10 +78,43 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"⚠️ 番剧同步服务启动失败: {e}")
 
+    # 网盘资源质量统计定时刷新（每日凌晨）
+    try:
+        from apscheduler.schedulers.asyncio import AsyncIOScheduler
+        from services.netdisk_quality_stat_service import QUALITY_STATS_ENABLED, refresh_netdisk_quality_daily_stats
+
+        if QUALITY_STATS_ENABLED:
+            quality_scheduler = AsyncIOScheduler(timezone=os.getenv("TZ", "Asia/Shanghai"))
+
+            async def refresh_quality_stats_job():
+                from models.base import get_session_ctx
+
+                async with get_session_ctx() as session:
+                    rows = await refresh_netdisk_quality_daily_stats(session)
+                    print(f"✅ 网盘资源质量统计已刷新：{rows} 行")
+
+            quality_scheduler.add_job(
+                refresh_quality_stats_job,
+                "cron",
+                hour=int(os.getenv("NETDISK_QUALITY_STATS_CRON_HOUR", "3")),
+                minute=int(os.getenv("NETDISK_QUALITY_STATS_CRON_MINUTE", "20")),
+                id="netdisk_quality_daily_stats",
+                replace_existing=True,
+            )
+            quality_scheduler.start()
+            app.state.netdisk_quality_scheduler = quality_scheduler
+            print("✅ 网盘资源质量统计定时任务已启动")
+        else:
+            print("⏸️ 网盘资源质量统计定时任务已关闭（NETDISK_QUALITY_STATS_ENABLED=false）")
+    except Exception as e:
+        print(f"⚠️ 网盘资源质量统计定时任务启动失败: {e}")
+
     yield
     # ── 应用关闭时 ──────────────────────────────────────────
     if hasattr(app.state, "anime_scheduler"):
         app.state.anime_scheduler.shutdown(wait=False)
+    if hasattr(app.state, "netdisk_quality_scheduler"):
+        app.state.netdisk_quality_scheduler.shutdown(wait=False)
     await close_db()
     await close_redis_pool()
     print("👋 应用关闭执行")
