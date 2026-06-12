@@ -16,6 +16,7 @@ from models.netdisk_repair import NetdiskRepair
 from models.netdisk_resource import NetdiskResource as NetdiskResourceModel
 from models.netdisk_risk_record import NetdiskRiskRecord
 from models.netdisk_upload import NetdiskUpload
+from models.points_ledger import PointsLedger
 from models.user import User
 from models.user_account import UserAccount
 from models.withdrawal import WithdrawalRecord
@@ -452,6 +453,131 @@ async def admin_list_netdisk_risk_records(
 async def admin_get_netdisk_audit_config(session: AsyncSession = Depends(get_session)):
     config = await ConfigService.get(session, "netdisk_audit_config")
     return response(data=config)
+
+
+@router.get("/netdisk/ops-dashboard", summary="netdisk operations dashboard")
+async def admin_netdisk_ops_dashboard(session: AsyncSession = Depends(get_session)):
+    today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+
+    total_users = (await session.execute(select(func.count()).select_from(User))).scalar() or 0
+    today_new_users = (
+        await session.execute(select(func.count()).select_from(User).where(User.created_at >= today_start))
+    ).scalar() or 0
+
+    points_gain = (
+        await session.execute(
+            select(
+                func.count(func.distinct(PointsLedger.user_id)),
+                func.coalesce(func.sum(PointsLedger.points_delta), 0),
+            ).where(PointsLedger.created_at >= today_start, PointsLedger.points_delta > 0)
+        )
+    ).one()
+    points_spend = (
+        await session.execute(
+            select(
+                func.count(func.distinct(PointsLedger.user_id)),
+                func.coalesce(func.sum(PointsLedger.points_delta), 0),
+            ).where(PointsLedger.created_at >= today_start, PointsLedger.points_delta < 0)
+        )
+    ).one()
+
+    account_totals = (
+        await session.execute(
+            select(
+                func.coalesce(func.sum(UserAccount.consumable_points), 0),
+                func.coalesce(func.sum(UserAccount.frozen_points), 0),
+            )
+        )
+    ).one()
+
+    pending_uploads = (
+        await session.execute(
+            select(func.count()).select_from(NetdiskUpload).where(NetdiskUpload.status == "pending")
+        )
+    ).scalar() or 0
+    pending_repairs = (
+        await session.execute(
+            select(func.count()).select_from(NetdiskRepair).where(
+                NetdiskRepair.status == "pending",
+                NetdiskRepair.mode == "repair",
+            )
+        )
+    ).scalar() or 0
+    pending_reports = (
+        await session.execute(
+            select(func.count()).select_from(NetdiskRepair).where(
+                NetdiskRepair.status == "pending",
+                NetdiskRepair.mode == "report",
+            )
+        )
+    ).scalar() or 0
+    hidden_resources = (
+        await session.execute(
+            select(func.count()).select_from(NetdiskResourceModel).where(NetdiskResourceModel.is_active == False)  # noqa: E712
+        )
+    ).scalar() or 0
+    risk_totals = (
+        await session.execute(
+            select(
+                func.count(),
+                func.coalesce(func.sum(NetdiskRiskRecord.points_due), 0),
+            )
+            .select_from(NetdiskRiskRecord)
+            .where(NetdiskRiskRecord.status == "open")
+        )
+    ).one()
+    today_uploads = (
+        await session.execute(
+            select(func.count()).select_from(NetdiskUpload).where(NetdiskUpload.created_at >= today_start)
+        )
+    ).scalar() or 0
+    today_repairs = (
+        await session.execute(
+            select(func.count()).select_from(NetdiskRepair).where(
+                NetdiskRepair.created_at >= today_start,
+                NetdiskRepair.mode == "repair",
+            )
+        )
+    ).scalar() or 0
+    today_reports = (
+        await session.execute(
+            select(func.count()).select_from(NetdiskRepair).where(
+                NetdiskRepair.created_at >= today_start,
+                NetdiskRepair.mode == "report",
+            )
+        )
+    ).scalar() or 0
+
+    return response(
+        data={
+            "users": {
+                "total": int(total_users),
+                "today_new": int(today_new_users),
+            },
+            "points": {
+                "today_gain_users": int(points_gain[0] or 0),
+                "today_gain_points": int(points_gain[1] or 0),
+                "today_spend_users": int(points_spend[0] or 0),
+                "today_spend_points": abs(int(points_spend[1] or 0)),
+                "consumable_total": int(account_totals[0] or 0),
+                "frozen_total": int(account_totals[1] or 0),
+                "risk_due_total": int(risk_totals[1] or 0),
+            },
+            "workbench": {
+                "pending_uploads": int(pending_uploads),
+                "pending_repairs": int(pending_repairs),
+                "pending_reports": int(pending_reports),
+                "hidden_resources": int(hidden_resources),
+                "open_risk_records": int(risk_totals[0] or 0),
+            },
+            "today_activity": {
+                "uploads": int(today_uploads),
+                "repairs": int(today_repairs),
+                "reports": int(today_reports),
+            },
+            "generated_at": datetime.utcnow().isoformat(),
+        }
+    )
 
 
 @router.post("/netdisk/dev-seed", summary="seed netdisk review demo data")
