@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
 import { onShow } from "@dcloudio/uni-app";
-import { getNetdiskNotifications, markNetdiskNotificationRead, type NetdiskNotification } from "@/utils/api";
+import { ensureDevLogin, getNetdiskNotifications, markNetdiskNotificationRead, type NetdiskNotification } from "@/utils/api";
 
 const loading = ref(false);
 const errorText = ref("");
@@ -14,6 +14,7 @@ const loadMessages = async () => {
   loading.value = true;
   errorText.value = "";
   try {
+    await ensureDevLogin();
     const data = await getNetdiskNotifications();
     notifications.value = data.notifications || [];
     unreadCount.value = data.unread_count || 0;

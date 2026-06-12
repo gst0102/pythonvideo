@@ -1,76 +1,141 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
 import { onLoad } from "@dcloudio/uni-app";
-import { resources } from "@/data/mock";
+import {
+  ensureDevLogin,
+  getNetdiskResourceAccess,
+  getNetdiskResourceDetail,
+  unlockNetdiskResource,
+  type NetdiskResource,
+  type NetdiskResourceAccess
+} from "@/utils/api";
 
 const selectedId = ref("r1");
-const resource = computed(() => resources.find((item) => item.id === selectedId.value) ?? resources[0]);
-const unlocked = ref(Boolean(resource.value.unlocked));
+const loading = ref(false);
+const errorText = ref("");
+const resource = ref<NetdiskResource | null>(null);
+const access = ref<NetdiskResourceAccess>({
+  unlocked: false,
+  ledger_id: "",
+  points_delta: 0,
+  link: "",
+  extract_code: "",
+  unzip_code: ""
+});
+const consumablePoints = ref(0);
+const unlocked = computed(() => access.value.unlocked);
 
-onLoad((query) => {
+onLoad(async (query) => {
   if (typeof query?.id === "string") {
     selectedId.value = query.id;
-    unlocked.value = Boolean(resource.value.unlocked);
   }
+  await loadDetail();
 });
 
-const confirmAccess = () => {
-  if (unlocked.value) return;
+const loadDetail = async () => {
+  loading.value = true;
+  errorText.value = "";
+  try {
+    const detail = await getNetdiskResourceDetail(selectedId.value);
+    resource.value = detail.resource;
+    await ensureDevLogin();
+    const accessData = await getNetdiskResourceAccess(selectedId.value);
+    access.value = accessData.access;
+    consumablePoints.value = accessData.account.consumable_points;
+  } catch (error: any) {
+    errorText.value = error?.message || "资源加载失败";
+  } finally {
+    loading.value = false;
+  }
+};
+
+const confirmAccess = async () => {
+  if (!resource.value || unlocked.value) return;
   uni.showModal({
     title: "确认获取资源？",
-    content: `本资源需要消耗 ${resource.value.points} 积分，当前积分 100 分。`,
+    content: `本资源需要消耗 ${resource.value.cost_points} 积分，当前可用 ${consumablePoints.value} 分。`,
     confirmText: "确认获取",
-    success: (res) => {
-      if (res.confirm) unlocked.value = true;
+    success: async (res) => {
+      if (!res.confirm) return;
+      try {
+        await ensureDevLogin();
+        const data = await unlockNetdiskResource(selectedId.value);
+        resource.value = data.resource;
+        access.value = data.unlock;
+        consumablePoints.value = data.account.consumable_points;
+        uni.showToast({ title: "解锁成功", icon: "none" });
+      } catch (error: any) {
+        uni.showToast({ title: error?.message || "解锁失败", icon: "none" });
+      }
     }
   });
 };
+
+const copyLink = () => {
+  if (!access.value.link) return;
+  const text = [
+    access.value.link,
+    access.value.extract_code ? `提取码：${access.value.extract_code}` : "",
+    access.value.unzip_code ? `解压码：${access.value.unzip_code}` : ""
+  ]
+    .filter(Boolean)
+    .join("\n");
+  uni.setClipboardData({ data: text });
+};
+
+const levelText = (level?: string) => ({ normal: "普通", featured: "精选", official: "官方" }[level || ""] || level || "-");
 </script>
 
 <template>
   <view class="page">
-    <view class="card">
-      <view class="resource-title">{{ resource.title }}</view>
-      <view class="row tag-line">
-        <text class="tag">{{ resource.pan }}</text>
-        <text class="tag tag-warning">{{ resource.level }}</text>
-        <text class="tag">{{ resource.category }}</text>
+    <view v-if="loading" class="empty">正在加载资源...</view>
+    <view v-else-if="errorText" class="empty">
+      <view>{{ errorText }}</view>
+      <view class="btn retry" @click="loadDetail">重试</view>
+    </view>
+
+    <template v-else-if="resource">
+      <view class="card">
+        <view class="resource-title">{{ resource.title }}</view>
+        <view class="row tag-line">
+          <text class="tag">{{ resource.pan }}</text>
+          <text class="tag tag-warning">{{ levelText(resource.level) }}</text>
+          <text class="tag">{{ resource.category }}</text>
+        </view>
+        <view class="price"><text class="points">{{ resource.cost_points }}</text> 积分获取</view>
       </view>
-      <view class="price"><text class="points">{{ resource.points }}</text> 积分获取</view>
-    </view>
 
-    <view class="card section">
-      <view class="section-title">资源简介</view>
-      <view class="desc">{{ resource.description }}</view>
-    </view>
+      <view class="card section">
+        <view class="section-title">资源简介</view>
+        <view class="desc">{{ resource.description }}</view>
+      </view>
 
-    <view class="card section">
-      <view class="info-line"><text>文件数量</text><text>{{ resource.files }}</text></view>
-      <view class="info-line"><text>文件大小</text><text>{{ resource.size }}</text></view>
-      <view class="info-line"><text>最近验证</text><text>{{ resource.verifiedAt }}</text></view>
-      <view class="info-line"><text>获取次数</text><text>{{ resource.downloads }}</text></view>
-      <view class="info-line"><text>收藏次数</text><text>{{ resource.favorites }}</text></view>
-      <view class="info-line"><text>上传者</text><text>{{ resource.uploader }} · 信用{{ resource.credit }}</text></view>
-    </view>
+      <view class="card section">
+        <view class="info-line"><text>最近验证</text><text>{{ resource.verified_at }}</text></view>
+        <view class="info-line"><text>获取次数</text><text>{{ resource.downloads }}</text></view>
+        <view class="info-line"><text>收藏次数</text><text>{{ resource.favorites }}</text></view>
+        <view class="info-line"><text>资源状态</text><text>{{ resource.is_active ? "可获取" : "已隐藏" }}</text></view>
+      </view>
 
-    <view class="card section secret-box">
-      <view class="section-title">{{ unlocked ? "已解锁资源信息" : "解锁后可见" }}</view>
-      <template v-if="unlocked">
-        <view class="secret-line">链接：{{ resource.link }}</view>
-        <view class="secret-line">提取码：{{ resource.extractCode || "无" }}</view>
-        <view class="secret-line">解压码：{{ resource.unzipCode || "无" }}</view>
-        <view class="btn-secondary btn copy-btn">复制链接</view>
-      </template>
-      <template v-else>
-        <view class="masked">完整网盘链接、提取码、解压码将在消耗积分后展示。</view>
-      </template>
-    </view>
+      <view class="card section secret-box">
+        <view class="section-title">{{ unlocked ? "已解锁资源信息" : "解锁后可见" }}</view>
+        <template v-if="unlocked">
+          <view class="secret-line">链接：{{ access.link }}</view>
+          <view class="secret-line">提取码：{{ access.extract_code || "无" }}</view>
+          <view class="secret-line">解压码：{{ access.unzip_code || "无" }}</view>
+          <view class="btn-secondary btn copy-btn" @click="copyLink">复制链接</view>
+        </template>
+        <template v-else>
+          <view class="masked">完整网盘链接、提取码、解压码将在消耗积分后展示。</view>
+        </template>
+      </view>
 
-    <view class="bottom-actions">
-      <view class="btn" @click="confirmAccess">{{ unlocked ? "已获取" : `获取资源 ${resource.points}分` }}</view>
-      <view class="btn-plain">收藏</view>
-      <view class="btn-plain danger">投诉失效</view>
-    </view>
+      <view class="bottom-actions">
+        <view class="btn" @click="confirmAccess">{{ unlocked ? "已获取" : `获取资源 ${resource.cost_points}分` }}</view>
+        <view class="btn-plain">收藏</view>
+        <view class="btn-plain danger">投诉失效</view>
+      </view>
+    </template>
   </view>
 </template>
 
@@ -117,6 +182,7 @@ const confirmAccess = () => {
   color: $text-main;
   font-size: 27rpx;
   line-height: 1.6;
+  word-break: break-all;
 }
 
 .masked {
@@ -149,5 +215,18 @@ const confirmAccess = () => {
 
 .danger {
   color: $danger;
+}
+
+.empty {
+  margin-top: 180rpx;
+  color: $text-muted;
+  font-size: 28rpx;
+  line-height: 1.8;
+  text-align: center;
+}
+
+.retry {
+  width: 220rpx;
+  margin: 28rpx auto 0;
 }
 </style>
