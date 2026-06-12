@@ -9,6 +9,7 @@
 """
 
 import asyncio
+import hashlib
 import logging
 import os
 from datetime import datetime
@@ -18,6 +19,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.anime_resource import AnimeResource
 from models.base import get_session_ctx
+from models.netdisk_resource import NetdiskResource as NetdiskResourceModel
+from services.netdisk_resource_service import _calculate_resource_quality_score
 
 logger = logging.getLogger("sync_anime")
 
@@ -29,6 +32,7 @@ async def _upsert_anime(session: AsyncSession, item: dict) -> None:
     baidu_url = (item.get("baidu_url") or "").strip()
     quark_url = (item.get("quark_url") or "").strip()
     k4_url = (item.get("4k_url") or "").strip()
+    xunlei_url = (item.get("xunlei_url") or "").strip()
     category = item.get("category", "anime")
     anime_id = item.get("anime_id", "")
 
@@ -47,6 +51,8 @@ async def _upsert_anime(session: AsyncSession, item: dict) -> None:
         conditions.append(AnimeResource.quark_url == quark_url)
     if baidu_url:
         conditions.append(AnimeResource.baidu_url == baidu_url)
+    if xunlei_url:
+        conditions.append(AnimeResource.xunlei_url == xunlei_url)
 
     existing = None
     if conditions:
@@ -64,6 +70,7 @@ async def _upsert_anime(session: AsyncSession, item: dict) -> None:
         existing.baidu_password = item.get("baidu_password")
         existing.quark_url = quark_url or None
         existing.four_k_url = k4_url or None
+        existing.xunlei_url = xunlei_url or None
         existing.source_update_time = source_time
         existing.is_active = True
         existing.updated_at = datetime.utcnow()
@@ -80,10 +87,134 @@ async def _upsert_anime(session: AsyncSession, item: dict) -> None:
             baidu_password=item.get("baidu_password"),
             quark_url=quark_url or None,
             four_k_url=k4_url or None,
+            xunlei_url=xunlei_url or None,
             source_update_time=source_time,
             is_active=True,
         )
         session.add(resource)
+
+
+def _netdisk_resource_id(item: dict, pan: str, link: str) -> str:
+    anime_id = (item.get("anime_id") or item.get("title") or "").strip()
+    digest = hashlib.sha1(f"{anime_id}:{pan}:{link}".encode("utf-8")).hexdigest()[:20]
+    return f"kdocs-{digest}"
+
+
+def _netdisk_source_key(item: dict) -> str:
+    category = (item.get("category") or "anime").strip()
+    anime_id = (item.get("anime_id") or "").strip()
+    digest = hashlib.sha1(f"{category}:{anime_id}".encode("utf-8")).hexdigest()[:16]
+    return f"kdocs:{category}:{digest}"
+
+
+def _detect_pan(link: str, fallback: str) -> str:
+    value = (link or "").lower()
+    if "pan.quark.cn" in value:
+        return "夸克"
+    if "pan.baidu.com" in value:
+        return "百度"
+    if value.startswith(("thunder://", "magnet:", "ed2k://")) or "xunlei" in value:
+        return "迅雷"
+    if "aliyundrive" in value or "alipan" in value:
+        return "阿里"
+    return fallback
+
+
+def _iter_netdisk_links(item: dict) -> list[tuple[str, str, str]]:
+    candidates = [
+        ("百度", (item.get("baidu_url") or "").strip(), item.get("baidu_password") or ""),
+        ("夸克", (item.get("quark_url") or "").strip(), ""),
+        ("阿里", (item.get("4k_url") or "").strip(), ""),
+        ("迅雷", (item.get("xunlei_url") or "").strip(), ""),
+    ]
+    links: list[tuple[str, str, str]] = []
+    seen: set[str] = set()
+    for fallback_pan, link, code in candidates:
+        if not link or link in seen:
+            continue
+        seen.add(link)
+        links.append((_detect_pan(link, fallback_pan), link, code))
+    return links
+
+
+def _dedupe_source_links(items: list[dict]) -> list[dict]:
+    """Clear duplicate links in the same crawl batch to respect URL unique indexes."""
+    seen: set[str] = set()
+    result: list[dict] = []
+    link_fields = ("baidu_url", "quark_url", "4k_url", "xunlei_url")
+    for item in items:
+        clean_item = dict(item)
+        for field in link_fields:
+            link = (clean_item.get(field) or "").strip()
+            if not link:
+                continue
+            key = link.lower()
+            if key in seen:
+                clean_item[field] = ""
+                if field == "baidu_url":
+                    clean_item["baidu_password"] = ""
+                continue
+            seen.add(key)
+        result.append(clean_item)
+    return result
+
+
+def _netdisk_description(item: dict, pan: str) -> str:
+    category_label = {"anime": "番剧", "movie": "电影", "4k": "4K影视"}.get(item.get("category"), "影视剧")
+    update_time = item.get("update_time") or "最近同步"
+    return f"系统每日从金山文档同步的{category_label}资源，当前网盘：{pan}，同步时间：{update_time}。"
+
+
+async def _upsert_netdisk_resources(session: AsyncSession, item: dict) -> list[str]:
+    active_ids: list[str] = []
+    title = (item.get("title") or "").strip()
+    if not title:
+        return active_ids
+
+    for pan, link, extract_code in _iter_netdisk_links(item):
+        resource_id = _netdisk_resource_id(item, pan, link)
+        source_key = _netdisk_source_key(item)
+        active_ids.append(resource_id)
+        resource = await session.get(NetdiskResourceModel, resource_id)
+        if resource:
+            resource.title = title
+            resource.category = "影视剧"
+            resource.pan = pan
+            resource.level = "official"
+            resource.cost_points = 20
+            resource.description = _netdisk_description(item, pan)
+            resource.link = link
+            resource.extract_code = extract_code or ""
+            resource.source_upload_id = source_key
+            resource.uploader_user_id = None
+            resource.is_active = True
+            resource.verified_at = datetime.utcnow()
+            resource.updated_at = datetime.utcnow()
+            resource.quality_score = _calculate_resource_quality_score(resource)
+            session.add(resource)
+            continue
+
+        resource = NetdiskResourceModel(
+            id=resource_id,
+            title=title,
+            category="影视剧",
+            pan=pan,
+            level="official",
+            cost_points=20,
+            downloads=0,
+            favorites=0,
+            description=_netdisk_description(item, pan),
+            link=link,
+            extract_code=extract_code or "",
+            unzip_code="",
+            source_upload_id=source_key,
+            uploader_user_id=None,
+            is_active=True,
+            verified_at=datetime.utcnow(),
+        )
+        resource.quality_score = _calculate_resource_quality_score(resource)
+        session.add(resource)
+    return active_ids
 
 
 async def sync_anime_from_kdocs(types: list[str] | None = None) -> dict:
@@ -100,6 +231,7 @@ async def sync_anime_from_kdocs(types: list[str] | None = None) -> dict:
         all_items = await loop.run_in_executor(None, KDocsService.crawl_all, types)
 
         logger.info("[sync] kdocs fetched %s items", len(all_items))
+        all_items = _dedupe_source_links(all_items)
 
         if not all_items:
             logger.info("[sync] kdocs data is empty, skip sync")
@@ -112,8 +244,10 @@ async def sync_anime_from_kdocs(types: list[str] | None = None) -> dict:
                 if item.get("anime_id")
             }
 
+            active_netdisk_ids: set[str] = set()
             for item in all_items:
                 await _upsert_anime(session, item)
+                active_netdisk_ids.update(await _upsert_netdisk_resources(session, item))
                 result["synced"] += 1
 
             if external_ids:
@@ -129,11 +263,31 @@ async def sync_anime_from_kdocs(types: list[str] | None = None) -> dict:
                 exec_result = await session.execute(stmt)
                 result["inactive"] = exec_result.rowcount or 0
 
+            if active_netdisk_ids:
+                netdisk_stmt = (
+                    sql_update(NetdiskResourceModel)
+                    .where(
+                        NetdiskResourceModel.source_upload_id.like("kdocs:%"),
+                        NetdiskResourceModel.is_active == True,  # noqa: E712
+                        NetdiskResourceModel.id.not_in(active_netdisk_ids),
+                        or_(
+                            *[
+                                NetdiskResourceModel.source_upload_id.like(f"kdocs:{category}:%")
+                                for category in types
+                            ]
+                        ),
+                    )
+                    .values(is_active=False, updated_at=datetime.utcnow())
+                )
+                netdisk_result = await session.execute(netdisk_stmt)
+                result["netdisk_inactive"] = netdisk_result.rowcount or 0
+
             await session.commit()
             logger.info(
-                "[sync] completed: upsert=%s inactive=%s",
+                "[sync] completed: upsert=%s inactive=%s netdisk_inactive=%s",
                 result["synced"],
                 result["inactive"],
+                result.get("netdisk_inactive", 0),
             )
 
     except Exception as exc:

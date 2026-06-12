@@ -20,7 +20,7 @@ class NetdiskResource(SQLModel, table=True):
     downloads: int = Field(default=0, sa_column=Column(BigInteger, nullable=False, server_default="0"))
     favorites: int = Field(default=0, sa_column=Column(BigInteger, nullable=False, server_default="0"))
     description: str = Field(default="", sa_column=Column(Text, nullable=False, server_default=""))
-    link: str = Field(sa_column=Column(String(500), nullable=False))
+    link: str = Field(sa_column=Column(Text, nullable=False))
     extract_code: str = Field(default="", sa_column=Column(String(64), nullable=False, server_default=""))
     unzip_code: str = Field(default="", sa_column=Column(String(64), nullable=False, server_default=""))
     source_upload_id: str = Field(default="", sa_column=Column(String(64), nullable=False, server_default="", index=True))
