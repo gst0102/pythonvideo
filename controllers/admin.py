@@ -595,6 +595,7 @@ async def admin_get_netdisk_audit_config(session: AsyncSession = Depends(get_ses
 @router.get("/netdisk/ops-dashboard", summary="netdisk operations dashboard")
 async def admin_netdisk_ops_dashboard(
     points_range: str = Query("today", pattern="^(today|7d)$"),
+    quality_range: str = Query("7d", pattern="^(today|7d|all)$"),
     session: AsyncSession = Depends(get_session),
 ):
     today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
@@ -690,8 +691,9 @@ async def admin_netdisk_ops_dashboard(
     ).scalar() or 0
     trends = await _build_netdisk_ops_trends(session, today_start)
     point_sources = await _build_point_source_distribution(session, point_source_start)
-    resource_quality_rankings = await _build_resource_quality_rankings(session)
+    resource_quality_rankings = await _build_resource_quality_rankings(session, range_mode=quality_range)
     quality_alerts = await _build_resource_quality_alerts(session)
+    quality_runtime = await ConfigService.get(session, "netdisk_quality_stats_runtime")
 
     return response(
         data={
@@ -715,6 +717,7 @@ async def admin_netdisk_ops_dashboard(
                 "hidden_resources": int(hidden_resources),
                 "open_risk_records": int(risk_totals[0] or 0),
                 "quality_alerts": len(quality_alerts),
+                "quality_review_pool": len(quality_alerts),
             },
             "today_activity": {
                 "uploads": int(today_uploads),
@@ -724,8 +727,10 @@ async def admin_netdisk_ops_dashboard(
             "trends": trends,
             "point_source_range": points_range,
             "point_sources": point_sources,
+            "quality_range": quality_range,
             "resource_quality_rankings": resource_quality_rankings,
             "resource_quality_alerts": quality_alerts,
+            "quality_stats_runtime": quality_runtime,
             "generated_at": datetime.utcnow().isoformat(),
         }
     )
@@ -859,6 +864,7 @@ async def admin_seed_netdisk_review_demo(session: AsyncSession = Depends(get_ses
 @router.get("/netdisk/resource-quality", summary="netdisk resource quality ranking")
 async def admin_list_netdisk_resource_quality(
     filter: str = Query("all", pattern="^(all|hidden|high_report|high_unlock)$"),
+    range: str = Query("7d", pattern="^(today|7d|all)$"),
     page_size: int = Query(20, ge=1, le=100),
     session: AsyncSession = Depends(get_session),
 ):
@@ -866,10 +872,11 @@ async def admin_list_netdisk_resource_quality(
     rankings = await _build_resource_quality_rankings(
         session,
         filter_mode=filter,
+        range_mode=range,
         limit=page_size,
         thresholds=thresholds,
     )
-    return response(data={"rankings": rankings, "filter": filter, "thresholds": thresholds})
+    return response(data={"rankings": rankings, "filter": filter, "range": range, "thresholds": thresholds})
 
 
 @router.get("/netdisk/quality-alerts", summary="netdisk quality alert list")
@@ -1010,6 +1017,46 @@ async def admin_handle_netdisk_resource_quality_alert(
         req.note,
     )
     return response(data=_quality_alert_to_dict(item), msg="quality alert updated")
+
+
+@router.post("/netdisk/resource-quality/alerts-batch/{action}", summary="batch handle netdisk quality alerts")
+async def admin_batch_handle_netdisk_resource_quality_alerts(
+    action: str,
+    payload: dict,
+    session: AsyncSession = Depends(get_session),
+):
+    if action not in {"read", "resolve", "ignore"}:
+        return response([], 400, "invalid batch alert action")
+    ids = payload.get("ids") or []
+    note = str(payload.get("note") or "").strip()
+    if not ids:
+        return response([], 400, "ids required")
+
+    handled = []
+    for alert_id in ids:
+        try:
+            uid = UUID(str(alert_id))
+        except ValueError:
+            continue
+        item = await session.get(NetdiskQualityAlert, uid)
+        if not item:
+            continue
+        status_map = {"read": "read", "resolve": "resolved", "ignore": "ignored"}
+        item.status = status_map[action]
+        item.note = _append_note(item.note, note or _quality_alert_action_note(action))
+        item.handled_at = datetime.utcnow()
+        item.updated_at = datetime.utcnow()
+        handled.append(item)
+        await _record_netdisk_audit_log(
+            session,
+            f"quality_alert_batch_{action}",
+            "netdisk_quality_alert",
+            str(item.id),
+            item.title,
+            note,
+        )
+    await session.flush()
+    return response(data={"handled": len(handled), "alerts": [_quality_alert_to_dict(item) for item in handled]})
 
 
 @router.post("/netdisk/resource-quality/refresh-stats", summary="refresh netdisk quality daily stats")
@@ -1239,11 +1286,12 @@ async def _build_point_source_distribution(session: AsyncSession, start_dt: date
 async def _build_resource_quality_rankings(
     session: AsyncSession,
     filter_mode: str = "all",
+    range_mode: str = "7d",
     limit: int = 10,
     thresholds: dict | None = None,
 ) -> list[dict]:
     thresholds = thresholds or await _get_resource_quality_thresholds(session)
-    stat_rankings = await _build_resource_quality_rankings_from_stats(session, filter_mode, limit, thresholds)
+    stat_rankings = await _build_resource_quality_rankings_from_stats(session, filter_mode, range_mode, limit, thresholds)
     if stat_rankings:
         return stat_rankings
 
@@ -1291,18 +1339,24 @@ async def _build_resource_quality_rankings(
 async def _build_resource_quality_rankings_from_stats(
     session: AsyncSession,
     filter_mode: str,
+    range_mode: str,
     limit: int,
     thresholds: dict,
 ) -> list[dict]:
     today = datetime.utcnow().date()
-    start_day = today - timedelta(days=6)
+    if range_mode == "today":
+        start_day = today
+    elif range_mode == "all":
+        start_day = None
+    else:
+        start_day = today - timedelta(days=6)
+    conditions = [NetdiskQualityDailyStat.stat_date <= today]
+    if start_day:
+        conditions.append(NetdiskQualityDailyStat.stat_date >= start_day)
     stats = (
         await session.execute(
             select(NetdiskQualityDailyStat)
-            .where(
-                NetdiskQualityDailyStat.stat_date >= start_day,
-                NetdiskQualityDailyStat.stat_date <= today,
-            )
+            .where(*conditions)
             .order_by(NetdiskQualityDailyStat.stat_date.desc())
         )
     ).scalars().all()
@@ -1338,6 +1392,7 @@ async def _build_resource_quality_rankings_from_stats(
                 "recent_unlocks_24h": 0,
                 "score": 0,
                 "stat_source": "daily_stats",
+                "range": range_mode,
             },
         )
         row["reports"] += int(item.reports or 0)
@@ -1648,10 +1703,13 @@ def _resource_quality_resource_to_dict(item: NetdiskResourceModel) -> dict:
 
 def _quality_alert_to_dict(item: NetdiskQualityAlert, level: str | None = None) -> dict:
     level_map = {"high_report": "danger", "unlock_report_burst": "warning"}
+    in_review_pool = item.status in {"open", "read"}
     return {
         "id": str(item.id),
         "type": item.alert_type,
         "level": level or level_map.get(item.alert_type, "warning"),
+        "review_state": "pending_review" if in_review_pool else "closed",
+        "in_review_pool": in_review_pool,
         "resource_id": item.resource_id,
         "title": item.title,
         "message": item.message,
