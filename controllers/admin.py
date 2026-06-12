@@ -399,6 +399,7 @@ async def admin_confirm_invalid_netdisk_upload(
 async def admin_list_netdisk_repairs(
     status: Optional[str] = Query(None),
     mode: Optional[str] = Query(None),
+    repair_id: Optional[str] = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
     session: AsyncSession = Depends(get_session),
@@ -407,6 +408,7 @@ async def admin_list_netdisk_repairs(
         session=session,
         status=status,
         mode=mode,
+        repair_id=repair_id,
         page=page,
         page_size=page_size,
     )
@@ -870,6 +872,41 @@ async def admin_list_netdisk_resource_quality(
     return response(data={"rankings": rankings, "filter": filter, "thresholds": thresholds})
 
 
+@router.get("/netdisk/quality-alerts", summary="netdisk quality alert list")
+async def admin_list_netdisk_quality_alerts(
+    status: Optional[str] = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    session: AsyncSession = Depends(get_session),
+):
+    query = select(NetdiskQualityAlert)
+    if status:
+        query = query.where(NetdiskQualityAlert.status == status)
+    total = (await session.execute(select(func.count()).select_from(query.subquery()))).scalar() or 0
+    items = (
+        await session.execute(
+            query.order_by(NetdiskQualityAlert.last_triggered_at.desc())
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        )
+    ).scalars().all()
+    return response(
+        data={
+            "alerts": [_quality_alert_to_dict(item) for item in items],
+            "total": int(total),
+            "page": page,
+            "page_size": page_size,
+            "has_more": ((page - 1) * page_size + len(items)) < total,
+        }
+    )
+
+
+@router.get("/netdisk/resource-quality/stats-runtime", summary="netdisk quality stats runtime")
+async def admin_get_netdisk_resource_quality_stats_runtime(session: AsyncSession = Depends(get_session)):
+    runtime = await ConfigService.get(session, "netdisk_quality_stats_runtime")
+    return response(data=runtime)
+
+
 @router.get("/netdisk/resource-quality/{resource_id}", summary="netdisk resource quality detail")
 async def admin_get_netdisk_resource_quality_detail(
     resource_id: str,
@@ -1206,6 +1243,10 @@ async def _build_resource_quality_rankings(
     thresholds: dict | None = None,
 ) -> list[dict]:
     thresholds = thresholds or await _get_resource_quality_thresholds(session)
+    stat_rankings = await _build_resource_quality_rankings_from_stats(session, filter_mode, limit, thresholds)
+    if stat_rankings:
+        return stat_rankings
+
     reports_sq, restores_sq, unlocks_sq, recent_reports_sq, recent_unlocks_sq = _resource_quality_subqueries()
     report_count = func.coalesce(reports_sq.c.reports, 0)
     restore_count = func.coalesce(restores_sq.c.restores, 0)
@@ -1245,6 +1286,85 @@ async def _build_resource_quality_rankings(
         )
     ).all()
     return [_resource_quality_row_to_dict(row) for row in rows]
+
+
+async def _build_resource_quality_rankings_from_stats(
+    session: AsyncSession,
+    filter_mode: str,
+    limit: int,
+    thresholds: dict,
+) -> list[dict]:
+    today = datetime.utcnow().date()
+    start_day = today - timedelta(days=6)
+    stats = (
+        await session.execute(
+            select(NetdiskQualityDailyStat)
+            .where(
+                NetdiskQualityDailyStat.stat_date >= start_day,
+                NetdiskQualityDailyStat.stat_date <= today,
+            )
+            .order_by(NetdiskQualityDailyStat.stat_date.desc())
+        )
+    ).scalars().all()
+    if not stats:
+        return []
+
+    resource_ids = list({item.resource_id for item in stats})
+    resources = (
+        await session.execute(select(NetdiskResourceModel).where(NetdiskResourceModel.id.in_(resource_ids)))
+    ).scalars().all()
+    resource_map = {item.id: item for item in resources}
+    grouped: dict[str, dict] = {}
+    for item in stats:
+        row = grouped.setdefault(
+            item.resource_id,
+            {
+                "resource_id": item.resource_id,
+                "id": item.resource_id,
+                "title": item.title,
+                "category": item.category,
+                "pan": item.pan,
+                "level": resource_map.get(item.resource_id).level if resource_map.get(item.resource_id) else "",
+                "cost_points": int(resource_map.get(item.resource_id).cost_points or 0) if resource_map.get(item.resource_id) else 0,
+                "is_active": bool(item.is_active),
+                "downloads": int(resource_map.get(item.resource_id).downloads or 0) if resource_map.get(item.resource_id) else 0,
+                "favorites": int(resource_map.get(item.resource_id).favorites or 0) if resource_map.get(item.resource_id) else 0,
+                "description": resource_map.get(item.resource_id).description if resource_map.get(item.resource_id) else "",
+                "reports": 0,
+                "restores": 0,
+                "unlocks": 0,
+                "unlock_users": 0,
+                "recent_reports_24h": 0,
+                "recent_unlocks_24h": 0,
+                "score": 0,
+                "stat_source": "daily_stats",
+            },
+        )
+        row["reports"] += int(item.reports or 0)
+        row["restores"] += int(item.restores or 0)
+        row["unlocks"] += int(item.unlocks or 0)
+        row["unlock_users"] += int(item.unlock_users or 0)
+        row["score"] += int(item.score or 0)
+        if item.stat_date == today:
+            row["recent_reports_24h"] = int(item.reports or 0)
+            row["recent_unlocks_24h"] = int(item.unlocks or 0)
+            row["is_active"] = bool(item.is_active)
+            row["title"] = item.title
+            row["category"] = item.category
+            row["pan"] = item.pan
+
+    rankings = list(grouped.values())
+    if filter_mode == "hidden":
+        rankings = [item for item in rankings if not item["is_active"]]
+    elif filter_mode == "high_report":
+        rankings = [item for item in rankings if item["reports"] >= thresholds["high_report_threshold"]]
+    elif filter_mode == "high_unlock":
+        rankings = [item for item in rankings if item["unlocks"] >= thresholds["high_unlock_threshold"]]
+    else:
+        rankings = [item for item in rankings if item["score"] > 0]
+
+    rankings.sort(key=lambda row: (row["score"], row["reports"], row["unlocks"]), reverse=True)
+    return rankings[:limit]
 
 
 async def _build_resource_quality_alerts(session: AsyncSession) -> list[dict]:

@@ -11,56 +11,93 @@ from models.netdisk_quality_daily_stat import NetdiskQualityDailyStat
 from models.netdisk_repair import NetdiskRepair
 from models.netdisk_resource import NetdiskResource as NetdiskResourceModel
 from models.points_ledger import PointsLedger
+from services.config_service import ConfigService
 
 QUALITY_STATS_ENABLED = os.getenv("NETDISK_QUALITY_STATS_ENABLED", "true").lower() == "true"
 
 
 async def refresh_netdisk_quality_daily_stats(session: AsyncSession, days: int = 7) -> int:
-    resources = (await session.execute(select(NetdiskResourceModel))).scalars().all()
-    today = datetime.utcnow().date()
-    rows = 0
-    for resource in resources:
-        for offset in range(max(1, days)):
-            day = today - timedelta(days=offset)
-            stat = await build_resource_quality_day_stat(session, resource.id, day, resource)
-            existing = (
-                await session.execute(
-                    select(NetdiskQualityDailyStat).where(
-                        NetdiskQualityDailyStat.resource_id == resource.id,
-                        NetdiskQualityDailyStat.stat_date == day,
+    started_at = datetime.utcnow()
+    try:
+        resources = (await session.execute(select(NetdiskResourceModel))).scalars().all()
+        today = datetime.utcnow().date()
+        rows = 0
+        for resource in resources:
+            for offset in range(max(1, days)):
+                day = today - timedelta(days=offset)
+                stat = await build_resource_quality_day_stat(session, resource.id, day, resource)
+                existing = (
+                    await session.execute(
+                        select(NetdiskQualityDailyStat).where(
+                            NetdiskQualityDailyStat.resource_id == resource.id,
+                            NetdiskQualityDailyStat.stat_date == day,
+                        )
                     )
-                )
-            ).scalar_one_or_none()
-            if existing:
-                existing.title = stat["title"]
-                existing.category = stat["category"]
-                existing.pan = stat["pan"]
-                existing.is_active = stat["is_active"]
-                existing.reports = stat["reports"]
-                existing.restores = stat["restores"]
-                existing.unlocks = stat["unlocks"]
-                existing.unlock_users = stat["unlock_users"]
-                existing.score = stat["score"]
-                existing.updated_at = datetime.utcnow()
-            else:
-                session.add(
-                    NetdiskQualityDailyStat(
-                        resource_id=resource.id,
-                        stat_date=day,
-                        title=stat["title"],
-                        category=stat["category"],
-                        pan=stat["pan"],
-                        is_active=stat["is_active"],
-                        reports=stat["reports"],
-                        restores=stat["restores"],
-                        unlocks=stat["unlocks"],
-                        unlock_users=stat["unlock_users"],
-                        score=stat["score"],
+                ).scalar_one_or_none()
+                if existing:
+                    existing.title = stat["title"]
+                    existing.category = stat["category"]
+                    existing.pan = stat["pan"]
+                    existing.is_active = stat["is_active"]
+                    existing.reports = stat["reports"]
+                    existing.restores = stat["restores"]
+                    existing.unlocks = stat["unlocks"]
+                    existing.unlock_users = stat["unlock_users"]
+                    existing.score = stat["score"]
+                    existing.updated_at = datetime.utcnow()
+                else:
+                    session.add(
+                        NetdiskQualityDailyStat(
+                            resource_id=resource.id,
+                            stat_date=day,
+                            title=stat["title"],
+                            category=stat["category"],
+                            pan=stat["pan"],
+                            is_active=stat["is_active"],
+                            reports=stat["reports"],
+                            restores=stat["restores"],
+                            unlocks=stat["unlocks"],
+                            unlock_users=stat["unlock_users"],
+                            score=stat["score"],
+                        )
                     )
-                )
-            rows += 1
-    await session.flush()
-    return rows
+                rows += 1
+        await _save_quality_stats_runtime(session, "success", started_at, rows, days, "")
+        await session.flush()
+        return rows
+    except Exception as exc:
+        await _save_quality_stats_runtime(session, "failed", started_at, 0, days, str(exc))
+        await session.flush()
+        raise
+
+
+async def _save_quality_stats_runtime(
+    session: AsyncSession,
+    status: str,
+    started_at: datetime,
+    rows: int,
+    days: int,
+    error: str,
+) -> None:
+    finished_at = datetime.utcnow()
+    await ConfigService.set(
+        session,
+        "netdisk_quality_stats_runtime",
+        {
+            "status": status,
+            "last_started_at": started_at.isoformat(),
+            "last_finished_at": finished_at.isoformat(),
+            "last_rows": int(rows),
+            "days": int(days),
+            "last_error": error,
+            "duration_ms": int((finished_at - started_at).total_seconds() * 1000),
+            "schedule": {
+                "enabled": QUALITY_STATS_ENABLED,
+                "hour": int(os.getenv("NETDISK_QUALITY_STATS_CRON_HOUR", "3")),
+                "minute": int(os.getenv("NETDISK_QUALITY_STATS_CRON_MINUTE", "20")),
+            },
+        },
+    )
 
 
 async def build_resource_quality_day_stat(

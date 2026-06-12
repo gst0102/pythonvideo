@@ -484,10 +484,16 @@ class NetdiskResourceService:
         session: AsyncSession,
         status: str | None = None,
         mode: str | None = None,
+        repair_id: str | None = None,
         page: int = 1,
         page_size: int = 50,
     ) -> dict:
         query = select(NetdiskRepair)
+        if repair_id:
+            try:
+                query = query.where(NetdiskRepair.id == UUID(repair_id))
+            except ValueError:
+                return _build_admin_list_payload("repairs", [], 0, page, page_size)
         if status:
             query = query.where(NetdiskRepair.status == status)
         if mode:
