@@ -1,10 +1,12 @@
+import csv
+import io
 import logging
 import os
 from datetime import datetime, timedelta
 from typing import Optional
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Response
 from fastapi.encoders import jsonable_encoder
 from sqlmodel import and_, func, select
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -29,6 +31,7 @@ from services.config_service import ConfigService
 from services.game_ad_service import build_game_bonus_ad_config_payload, normalize_game_bonus_ad_config
 from services.game_settlement_service import GameSettlementService
 from services.netdisk_resource_service import NetdiskResourceService
+from services.points_account_service import PointsAccountService
 from services.withdrawal_service import WithdrawalService
 
 logger = logging.getLogger(__name__)
@@ -461,19 +464,63 @@ async def admin_list_netdisk_risk_records(
     return response(data=jsonable_encoder(payload))
 
 
+@router.post("/netdisk/risk-records/{record_id}/collect", summary="collect netdisk pending recovery points")
+async def admin_collect_netdisk_risk_record(
+    record_id: str,
+    req: NetdiskAdminAuditRequest,
+    session: AsyncSession = Depends(get_session),
+):
+    try:
+        payload = await _collect_netdisk_risk_record(session, record_id, req.note)
+    except ValueError as exc:
+        return response([], 400, str(exc))
+    await _record_netdisk_audit_log(
+        session,
+        "risk_collect",
+        "netdisk_risk_record",
+        record_id,
+        payload["risk_record"].get("related_id", ""),
+        req.note,
+    )
+    return response(data=jsonable_encoder(payload), msg="netdisk risk record collected")
+
+
+@router.post("/netdisk/risk-records/{record_id}/waive", summary="waive netdisk pending recovery points")
+async def admin_waive_netdisk_risk_record(
+    record_id: str,
+    req: NetdiskAdminAuditRequest,
+    session: AsyncSession = Depends(get_session),
+):
+    try:
+        payload = await _waive_netdisk_risk_record(session, record_id, req.note)
+    except ValueError as exc:
+        return response([], 400, str(exc))
+    await _record_netdisk_audit_log(
+        session,
+        "risk_waive",
+        "netdisk_risk_record",
+        record_id,
+        payload["risk_record"].get("related_id", ""),
+        req.note,
+    )
+    return response(data=jsonable_encoder(payload), msg="netdisk risk record waived")
+
+
 @router.get("/netdisk/audit-logs", summary="admin netdisk audit operation logs")
 async def admin_list_netdisk_audit_logs(
     action: Optional[str] = Query(None),
     target_type: Optional[str] = Query(None),
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
     session: AsyncSession = Depends(get_session),
 ):
-    query = select(NetdiskAuditLog)
-    if action:
-        query = query.where(NetdiskAuditLog.action == action)
-    if target_type:
-        query = query.where(NetdiskAuditLog.target_type == target_type)
+    try:
+        start_dt, end_dt = _parse_date_range(start_date, end_date)
+    except ValueError:
+        return response([], 400, "invalid date format, expected YYYY-MM-DD")
+    query = _build_netdisk_audit_log_query(action, target_type, start_dt, end_dt)
 
     total = (await session.execute(select(func.count()).select_from(query.subquery()))).scalar() or 0
     items = (
@@ -491,6 +538,45 @@ async def admin_list_netdisk_audit_logs(
             "page_size": page_size,
             "has_more": ((page - 1) * page_size + len(items)) < total,
         }
+    )
+
+
+@router.get("/netdisk/audit-logs/export", summary="export netdisk audit operation logs")
+async def admin_export_netdisk_audit_logs(
+    action: Optional[str] = Query(None),
+    target_type: Optional[str] = Query(None),
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    session: AsyncSession = Depends(get_session),
+):
+    try:
+        start_dt, end_dt = _parse_date_range(start_date, end_date)
+    except ValueError:
+        return response([], 400, "invalid date format, expected YYYY-MM-DD")
+    query = _build_netdisk_audit_log_query(action, target_type, start_dt, end_dt)
+    items = (await session.execute(query.order_by(NetdiskAuditLog.created_at.desc()).limit(5000))).scalars().all()
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["时间", "管理员", "动作", "对象类型", "对象ID", "标题", "备注", "结果"])
+    for item in items:
+        writer.writerow(
+            [
+                item.created_at.isoformat() if item.created_at else "",
+                item.admin_name,
+                item.action,
+                item.target_type,
+                item.target_id,
+                item.target_title,
+                item.note,
+                item.result,
+            ]
+        )
+    filename = f"netdisk-audit-logs-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}.csv"
+    return Response(
+        content="\ufeff" + output.getvalue(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 
@@ -593,6 +679,7 @@ async def admin_netdisk_ops_dashboard(session: AsyncSession = Depends(get_sessio
         )
     ).scalar() or 0
     trends = await _build_netdisk_ops_trends(session, today_start)
+    point_sources = await _build_point_source_distribution(session, today_start)
 
     return response(
         data={
@@ -622,6 +709,7 @@ async def admin_netdisk_ops_dashboard(session: AsyncSession = Depends(get_sessio
                 "reports": int(today_reports),
             },
             "trends": trends,
+            "point_sources": point_sources,
             "generated_at": datetime.utcnow().isoformat(),
         }
     )
@@ -944,6 +1032,123 @@ async def _build_netdisk_ops_trends(session: AsyncSession, today_start: datetime
     return trends
 
 
+async def _build_point_source_distribution(session: AsyncSession, today_start: datetime) -> list[dict]:
+    rows = (
+        await session.execute(
+            select(
+                PointsLedger.source,
+                PointsLedger.change_type,
+                func.coalesce(func.sum(PointsLedger.points_delta), 0),
+                func.count(),
+            )
+            .where(PointsLedger.created_at >= today_start, PointsLedger.points_delta != 0)
+            .group_by(PointsLedger.source, PointsLedger.change_type)
+            .order_by(func.abs(func.coalesce(func.sum(PointsLedger.points_delta), 0)).desc())
+            .limit(12)
+        )
+    ).all()
+    return [
+        {
+            "source": row[0],
+            "change_type": row[1],
+            "points": int(row[2] or 0),
+            "count": int(row[3] or 0),
+        }
+        for row in rows
+    ]
+
+
+def _parse_date_range(start_date: str | None, end_date: str | None) -> tuple[datetime | None, datetime | None]:
+    start_dt = None
+    end_dt = None
+    if start_date:
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+    if end_date:
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)
+    return start_dt, end_dt
+
+
+def _build_netdisk_audit_log_query(
+    action: str | None,
+    target_type: str | None,
+    start_dt: datetime | None,
+    end_dt: datetime | None,
+):
+    query = select(NetdiskAuditLog)
+    if action:
+        query = query.where(NetdiskAuditLog.action == action)
+    if target_type:
+        query = query.where(NetdiskAuditLog.target_type == target_type)
+    if start_dt:
+        query = query.where(NetdiskAuditLog.created_at >= start_dt)
+    if end_dt:
+        query = query.where(NetdiskAuditLog.created_at < end_dt)
+    return query
+
+
+async def _collect_netdisk_risk_record(session: AsyncSession, record_id: str, note: str = "") -> dict:
+    try:
+        uid = UUID(record_id)
+    except ValueError:
+        raise ValueError("invalid risk record id") from None
+    item = await session.get(NetdiskRiskRecord, uid)
+    if not item:
+        raise ValueError("risk record not found")
+    if item.status != "open":
+        return {"risk_record": _netdisk_risk_record_to_dict(item), "collected_points": 0}
+    account, _ = await PointsAccountService.ensure_user_account(session, item.user_id)
+    pending_points = int(item.points_due)
+    collect_points = min(pending_points, int(account.consumable_points))
+    if collect_points <= 0:
+        raise ValueError("用户当前可用积分不足，暂无法追缴")
+
+    await PointsAccountService.consume_consumable_points(
+        session=session,
+        user_id=item.user_id,
+        points=collect_points,
+        source="netdisk",
+        change_type="risk_recovery_collect",
+        idempotency_key=f"netdisk_risk_collect:{item.id}:{int(item.points_collected)}:{collect_points}",
+        related_type="netdisk_risk_record",
+        related_id=str(item.id),
+        remark=note.strip() or f"网盘待追缴扣除：{item.related_type}:{item.related_id}",
+    )
+    item.points_due = pending_points - collect_points
+    item.points_collected = int(item.points_collected) + collect_points
+    if int(item.points_due) <= 0:
+        item.points_due = 0
+        item.status = "cleared"
+    item.note = _append_note(item.note, note.strip() or f"后台追缴扣除 {collect_points} 分")
+    item.updated_at = datetime.utcnow()
+    await session.flush()
+    await session.refresh(item)
+    return {"risk_record": _netdisk_risk_record_to_dict(item), "collected_points": collect_points}
+
+
+async def _waive_netdisk_risk_record(session: AsyncSession, record_id: str, note: str = "") -> dict:
+    try:
+        uid = UUID(record_id)
+    except ValueError:
+        raise ValueError("invalid risk record id") from None
+    item = await session.get(NetdiskRiskRecord, uid)
+    if not item:
+        raise ValueError("risk record not found")
+    item.status = "cleared"
+    item.note = _append_note(item.note, note.strip() or "后台人工关闭待追缴")
+    item.updated_at = datetime.utcnow()
+    await session.flush()
+    await session.refresh(item)
+    return {"risk_record": _netdisk_risk_record_to_dict(item)}
+
+
+def _append_note(old_note: str, new_note: str) -> str:
+    if not new_note:
+        return old_note or ""
+    if not old_note:
+        return new_note
+    return f"{old_note}\n{new_note}"
+
+
 def _netdisk_audit_log_to_dict(item: NetdiskAuditLog) -> dict:
     return {
         "id": str(item.id),
@@ -955,6 +1160,22 @@ def _netdisk_audit_log_to_dict(item: NetdiskAuditLog) -> dict:
         "note": item.note,
         "result": item.result,
         "created_at": item.created_at.isoformat() if item.created_at else None,
+    }
+
+
+def _netdisk_risk_record_to_dict(item: NetdiskRiskRecord) -> dict:
+    return {
+        "id": str(item.id),
+        "user_id": str(item.user_id),
+        "related_type": item.related_type,
+        "related_id": item.related_id,
+        "reason": item.reason,
+        "points_due": int(item.points_due),
+        "points_collected": int(item.points_collected),
+        "status": item.status,
+        "note": item.note,
+        "created_at": item.created_at.isoformat() if item.created_at else None,
+        "updated_at": item.updated_at.isoformat() if item.updated_at else None,
     }
 
 
