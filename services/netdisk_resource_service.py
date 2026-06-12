@@ -626,6 +626,59 @@ class NetdiskResourceService:
         return {"resource": _build_resource_payload(resource), "note": note.strip()}
 
     @staticmethod
+    async def confirm_resource_invalid(session: AsyncSession, resource_id: str, note: str = "") -> dict:
+        result = await session.execute(select(NetdiskResourceModel).where(NetdiskResourceModel.id == resource_id))
+        resource = result.scalar_one_or_none()
+        if not resource:
+            raise ValueError("resource not found")
+
+        clean_note = note.strip() or "资源确认失效，进入待追缴流程。"
+        resource.is_active = False
+        resource.updated_at = datetime.utcnow()
+
+        approved_repairs = (
+            await session.execute(
+                select(NetdiskRepair).where(
+                    NetdiskRepair.resource_id == resource_id,
+                    NetdiskRepair.mode == "repair",
+                    NetdiskRepair.status == "approved",
+                )
+            )
+        ).scalars().all()
+        config = await _get_netdisk_audit_config(session)
+        risk_records_created = 0
+        for repair in approved_repairs:
+            reward_points = int(repair.reward_points or 0)
+            if reward_points <= 0:
+                continue
+            penalty_points = reward_points * int(config["invalid_penalty_multiplier"])
+            repair.status = "invalid_confirmed"
+            repair.audit_note = _append_note(repair.audit_note, clean_note)
+            repair.updated_at = datetime.utcnow()
+            created = await _create_risk_record(
+                session=session,
+                user_id=repair.user_id,
+                related_type="netdisk_repair",
+                related_id=str(repair.id),
+                reason="resource_invalid_pending_penalty",
+                points_due=penalty_points,
+                points_collected=0,
+                idempotency_key=f"netdisk_resource_invalid_risk:{resource_id}:repair:{repair.id}",
+                note=f"{clean_note} 待追缴 {penalty_points} 分；关联资源：{resource.title}",
+            )
+            if created:
+                risk_records_created += 1
+
+        await session.flush()
+        await session.refresh(resource)
+        return {
+            "resource": _build_resource_payload(resource),
+            "risk_records_created": risk_records_created,
+            "affected_repairs": len(approved_repairs),
+            "note": clean_note,
+        }
+
+    @staticmethod
     async def list_admin_resources(
         session: AsyncSession,
         active: bool | None = None,
@@ -910,6 +963,14 @@ def _frozen_reward_key_for_related(related_type: str, related_id: str) -> str:
     return ""
 
 
+def _append_note(old_note: str, new_note: str) -> str:
+    if not new_note:
+        return old_note or ""
+    if not old_note:
+        return new_note
+    return f"{old_note}\n{new_note}"
+
+
 async def _deduct_consumable_penalty(
     session: AsyncSession,
     user_id,
@@ -1003,12 +1064,12 @@ async def _create_risk_record(
     points_collected: int,
     idempotency_key: str,
     note: str,
-) -> None:
+) -> bool:
     existing = (
         await session.execute(select(NetdiskRiskRecord).where(NetdiskRiskRecord.idempotency_key == idempotency_key))
     ).scalar_one_or_none()
     if existing:
-        return
+        return False
 
     item = NetdiskRiskRecord(
         user_id=user_id,
@@ -1023,6 +1084,7 @@ async def _create_risk_record(
     )
     session.add(item)
     await session.flush()
+    return True
 
 
 async def _get_netdisk_audit_config(session: AsyncSession) -> dict:

@@ -1675,18 +1675,16 @@ async def _apply_quality_alert_result_action(
         return payload
 
     if result_action == "confirm_invalid":
-        resource.is_active = False
-        resource.updated_at = datetime.utcnow()
+        payload = await NetdiskResourceService.confirm_resource_invalid(session, alert.resource_id, clean_note)
         await _record_netdisk_audit_log(
             session,
             "resource_quality_confirm_invalid",
             "netdisk_resource",
-            resource.id,
-            resource.title,
+            alert.resource_id,
+            payload["resource"].get("title", ""),
             clean_note,
         )
-        await session.flush()
-        return {"resource": _resource_quality_resource_to_dict(resource)}
+        return payload
 
     resource.is_active = False
     resource.updated_at = datetime.utcnow()
