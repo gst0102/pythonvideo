@@ -8,6 +8,7 @@ from sqlalchemy import func
 from sqlmodel import select
 
 from models.netdisk_favorite import NetdiskFavorite
+from models.netdisk_repair import NetdiskRepair
 from models.netdisk_upload import NetdiskUpload
 from models.user import User
 from services.config_service import ConfigService
@@ -90,6 +91,7 @@ class MineAssetsService:
 async def _build_netdisk_stats(session, user: User, overview: Dict[str, Any]) -> Dict[str, int]:
     favorite_count = await _count_rows(session, NetdiskFavorite, NetdiskFavorite.user_id == user.id)
     upload_count = await _count_rows(session, NetdiskUpload, NetdiskUpload.user_id == user.id)
+    repair_count = await _count_rows(session, NetdiskRepair, NetdiskRepair.user_id == user.id)
     game_task = overview.get("game_task") or {}
     today_remaining = int(game_task.get("today_remaining") or 0)
     max_points = _resolve_max_game_points(game_task)
@@ -97,7 +99,7 @@ async def _build_netdisk_stats(session, user: User, overview: Dict[str, Any]) ->
     return {
         "favorite_count": favorite_count,
         "upload_count": upload_count,
-        "repair_count": 0,
+        "repair_count": repair_count,
         "today_can_earn": max(today_remaining * max_points, 0),
     }
 

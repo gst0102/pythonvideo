@@ -11,6 +11,9 @@ from models.user import User
 from schemas.netdisk import (
     NetdiskFavoriteListResponse,
     NetdiskFavoriteResponse,
+    NetdiskRepairCreate,
+    NetdiskRepairListResponse,
+    NetdiskRepairResponse,
     NetdiskRequestCreate,
     NetdiskRequestListResponse,
     NetdiskRequestResponse,
@@ -143,6 +146,53 @@ async def create_netdisk_upload(
         return response([], 400, str(exc))
 
     return response(data=NetdiskUploadResponse(**result).model_dump(mode="json"), msg="upload created")
+
+
+@router.get("/repairs", summary="list netdisk repair/report submissions")
+async def list_netdisk_repairs(session: AsyncSession = Depends(get_session)):
+    payload = await NetdiskResourceService.list_repairs(session)
+    return response(data=NetdiskRepairListResponse(**payload).model_dump(mode="json"))
+
+
+@router.get("/repairs/mine", summary="list current user's netdisk repair/report submissions")
+async def list_my_netdisk_repairs(
+    openid: str = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    user = await _get_user_by_openid(session, openid)
+    if not user:
+        return response([], 404, "user not found")
+
+    payload = await NetdiskResourceService.list_my_repairs(session, user)
+    return response(data=NetdiskRepairListResponse(**payload).model_dump(mode="json"))
+
+
+@router.post("/repairs", summary="create netdisk repair/report submission")
+async def create_netdisk_repair(
+    payload: NetdiskRepairCreate,
+    openid: str = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    user = await _get_user_by_openid(session, openid)
+    if not user:
+        return response([], 404, "user not found")
+
+    try:
+        result = await NetdiskResourceService.create_repair(
+            session=session,
+            user=user,
+            resource_id=payload.resource_id,
+            mode=payload.mode,
+            pan=payload.pan,
+            link=payload.link,
+            extract_code=payload.extract_code,
+            unzip_code=payload.unzip_code,
+            note=payload.note,
+        )
+    except ValueError as exc:
+        return response([], 400, str(exc))
+
+    return response(data=NetdiskRepairResponse(**result).model_dump(mode="json"), msg="repair created")
 
 
 @router.get("/resources/{resource_id}", summary="get netdisk resource detail")

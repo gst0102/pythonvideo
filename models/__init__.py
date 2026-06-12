@@ -40,6 +40,7 @@ from models.game_settlement_batch import GameSettlementBatch
 from models.game_user_settlement import GameUserSettlement
 from models.invite_relation import InviteRelation
 from models.netdisk_favorite import NetdiskFavorite
+from models.netdisk_repair import NetdiskRepair
 from models.netdisk_request import NetdiskRequest
 from models.netdisk_resource import NetdiskResource
 from models.netdisk_upload import NetdiskUpload
@@ -65,6 +66,7 @@ __all__ = [
     "GameUserSettlement",
     "InviteRelation",
     "NetdiskFavorite",
+    "NetdiskRepair",
     "NetdiskRequest",
     "NetdiskResource",
     "NetdiskUpload",

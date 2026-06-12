@@ -11,6 +11,7 @@ from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from models.netdisk_favorite import NetdiskFavorite
+from models.netdisk_repair import NetdiskRepair
 from models.netdisk_request import NetdiskRequest
 from models.netdisk_resource import NetdiskResource as NetdiskResourceModel
 from models.netdisk_upload import NetdiskUpload
@@ -246,6 +247,7 @@ class NetdiskResourceService:
 
         favorite = NetdiskFavorite(user_id=user.id, resource_id=resource.id)
         session.add(favorite)
+        resource.favorites = int(resource.favorites) + 1
         await session.flush()
         await session.refresh(favorite)
         return _build_favorite_payload(favorite, resource), True
@@ -261,6 +263,7 @@ class NetdiskResourceService:
         favorite = await _get_favorite(session, user.id, resource.id)
         if favorite:
             await session.delete(favorite)
+            resource.favorites = max(int(resource.favorites) - 1, 0)
             await session.flush()
 
         return {"resource": _build_resource_payload(resource), "favorited": False}
@@ -375,6 +378,72 @@ class NetdiskResourceService:
         await session.flush()
         await session.refresh(item)
         return {"upload": _build_upload_payload(item)}
+
+    @staticmethod
+    async def list_repairs(session: AsyncSession, user: User | None = None) -> dict:
+        result = await session.execute(
+            select(NetdiskRepair).order_by(NetdiskRepair.created_at.desc()).limit(100)
+        )
+        items = result.scalars().all()
+        user_id = user.id if user else None
+        return {"repairs": [_build_repair_payload(item, user_id) for item in items]}
+
+    @staticmethod
+    async def list_my_repairs(session: AsyncSession, user: User) -> dict:
+        result = await session.execute(
+            select(NetdiskRepair)
+            .where(NetdiskRepair.user_id == user.id)
+            .order_by(NetdiskRepair.created_at.desc())
+            .limit(100)
+        )
+        return {"repairs": [_build_repair_payload(item, user.id) for item in result.scalars().all()]}
+
+    @staticmethod
+    async def create_repair(
+        session: AsyncSession,
+        user: User,
+        resource_id: str,
+        mode: str,
+        pan: str,
+        link: str,
+        extract_code: str,
+        unzip_code: str,
+        note: str,
+    ) -> dict:
+        await _ensure_seed_resources(session)
+        resource = await _get_resource_or_raise(session, resource_id)
+        clean_mode = (mode or "").strip()
+        clean_pan = (pan or "").strip()
+        clean_link = (link or "").strip()
+        clean_note = (note or "").strip()
+        if clean_mode not in {"repair", "report"}:
+            raise ValueError("mode must be repair or report")
+        if not clean_pan:
+            raise ValueError("pan is required")
+        if clean_mode == "repair" and not clean_link:
+            raise ValueError("link is required")
+        if not clean_note:
+            raise ValueError("note is required")
+
+        reward_points = 5 if clean_mode == "repair" else 0
+        item = NetdiskRepair(
+            user_id=user.id,
+            resource_id=resource.id,
+            resource_title=resource.title,
+            mode=clean_mode,
+            pan=clean_pan[:32],
+            link=clean_link[:500],
+            extract_code=(extract_code or "").strip()[:64],
+            unzip_code=(unzip_code or "").strip()[:64],
+            note=clean_note[:500],
+            status="pending",
+            reward_points=reward_points,
+            audit_note="已提交补链，等待审核。" if clean_mode == "repair" else "已提交投诉，等待核验。",
+        )
+        session.add(item)
+        await session.flush()
+        await session.refresh(item)
+        return {"repair": _build_repair_payload(item, user.id)}
 
 
 async def _get_unlock_ledger(session: AsyncSession, user_id, resource_id: str) -> PointsLedger | None:
@@ -561,6 +630,22 @@ def _build_upload_payload(item: NetdiskUpload) -> dict:
         "reward_points": int(item.reward_points),
         "audit_note": item.audit_note,
         "created_at": item.created_at,
+    }
+
+
+def _build_repair_payload(item: NetdiskRepair, user_id=None) -> dict:
+    return {
+        "id": str(item.id),
+        "resource_id": item.resource_id,
+        "resource_title": item.resource_title,
+        "mode": item.mode,
+        "pan": item.pan,
+        "status": item.status,
+        "reward_points": int(item.reward_points),
+        "audit_note": item.audit_note,
+        "note": item.note,
+        "created_at": item.created_at,
+        "mine": bool(user_id and item.user_id == user_id),
     }
 
 

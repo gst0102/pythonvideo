@@ -148,3 +148,35 @@ class NetdiskUploadListResponse(BaseModel):
 
 class NetdiskUploadResponse(BaseModel):
     upload: NetdiskUploadItem
+
+
+class NetdiskRepairCreate(BaseModel):
+    resource_id: str
+    mode: str
+    pan: str
+    link: str = ""
+    extract_code: str = ""
+    unzip_code: str = ""
+    note: str
+
+
+class NetdiskRepairItem(BaseModel):
+    id: str
+    resource_id: str
+    resource_title: str
+    mode: str
+    pan: str
+    status: str
+    reward_points: int
+    audit_note: str
+    note: str
+    created_at: datetime
+    mine: bool = False
+
+
+class NetdiskRepairListResponse(BaseModel):
+    repairs: list[NetdiskRepairItem]
+
+
+class NetdiskRepairResponse(BaseModel):
+    repair: NetdiskRepairItem
