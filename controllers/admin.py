@@ -587,8 +587,12 @@ async def admin_get_netdisk_audit_config(session: AsyncSession = Depends(get_ses
 
 
 @router.get("/netdisk/ops-dashboard", summary="netdisk operations dashboard")
-async def admin_netdisk_ops_dashboard(session: AsyncSession = Depends(get_session)):
+async def admin_netdisk_ops_dashboard(
+    points_range: str = Query("today", pattern="^(today|7d)$"),
+    session: AsyncSession = Depends(get_session),
+):
     today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    point_source_start = today_start - timedelta(days=6) if points_range == "7d" else today_start
 
     total_users = (await session.execute(select(func.count()).select_from(User))).scalar() or 0
     today_new_users = (
@@ -679,7 +683,8 @@ async def admin_netdisk_ops_dashboard(session: AsyncSession = Depends(get_sessio
         )
     ).scalar() or 0
     trends = await _build_netdisk_ops_trends(session, today_start)
-    point_sources = await _build_point_source_distribution(session, today_start)
+    point_sources = await _build_point_source_distribution(session, point_source_start)
+    resource_quality_rankings = await _build_resource_quality_rankings(session)
 
     return response(
         data={
@@ -709,7 +714,9 @@ async def admin_netdisk_ops_dashboard(session: AsyncSession = Depends(get_sessio
                 "reports": int(today_reports),
             },
             "trends": trends,
+            "point_source_range": points_range,
             "point_sources": point_sources,
+            "resource_quality_rankings": resource_quality_rankings,
             "generated_at": datetime.utcnow().isoformat(),
         }
     )
@@ -1032,7 +1039,7 @@ async def _build_netdisk_ops_trends(session: AsyncSession, today_start: datetime
     return trends
 
 
-async def _build_point_source_distribution(session: AsyncSession, today_start: datetime) -> list[dict]:
+async def _build_point_source_distribution(session: AsyncSession, start_dt: datetime) -> list[dict]:
     rows = (
         await session.execute(
             select(
@@ -1041,7 +1048,7 @@ async def _build_point_source_distribution(session: AsyncSession, today_start: d
                 func.coalesce(func.sum(PointsLedger.points_delta), 0),
                 func.count(),
             )
-            .where(PointsLedger.created_at >= today_start, PointsLedger.points_delta != 0)
+            .where(PointsLedger.created_at >= start_dt, PointsLedger.points_delta != 0)
             .group_by(PointsLedger.source, PointsLedger.change_type)
             .order_by(func.abs(func.coalesce(func.sum(PointsLedger.points_delta), 0)).desc())
             .limit(12)
@@ -1056,6 +1063,61 @@ async def _build_point_source_distribution(session: AsyncSession, today_start: d
         }
         for row in rows
     ]
+
+
+async def _build_resource_quality_rankings(session: AsyncSession) -> list[dict]:
+    resources = (
+        await session.execute(select(NetdiskResourceModel).order_by(NetdiskResourceModel.created_at.desc()).limit(200))
+    ).scalars().all()
+    rankings = []
+    for item in resources:
+        reports = (
+            await session.execute(
+                select(func.count()).select_from(NetdiskRepair).where(
+                    NetdiskRepair.resource_id == item.id,
+                    NetdiskRepair.mode == "report",
+                )
+            )
+        ).scalar() or 0
+        restores = (
+            await session.execute(
+                select(func.count()).select_from(NetdiskAuditLog).where(
+                    NetdiskAuditLog.target_type == "netdisk_resource",
+                    NetdiskAuditLog.target_id == item.id,
+                    NetdiskAuditLog.action == "resource_restore",
+                )
+            )
+        ).scalar() or 0
+        unlocks = (
+            await session.execute(
+                select(func.count()).select_from(PointsLedger).where(
+                    PointsLedger.source == "netdisk",
+                    PointsLedger.change_type == "resource_unlock",
+                    PointsLedger.related_type == "netdisk_resource",
+                    PointsLedger.related_id == item.id,
+                )
+            )
+        ).scalar() or 0
+        score = int(reports or 0) * 3 + int(restores or 0) * 2 + int(unlocks or 0)
+        if score <= 0:
+            continue
+        rankings.append(
+            {
+                "resource_id": item.id,
+                "title": item.title,
+                "category": item.category,
+                "pan": item.pan,
+                "is_active": item.is_active,
+                "downloads": int(item.downloads or 0),
+                "favorites": int(item.favorites or 0),
+                "reports": int(reports or 0),
+                "restores": int(restores or 0),
+                "unlocks": int(unlocks or 0),
+                "score": score,
+            }
+        )
+    rankings.sort(key=lambda row: (row["score"], row["reports"], row["unlocks"]), reverse=True)
+    return rankings[:10]
 
 
 def _parse_date_range(start_date: str | None, end_date: str | None) -> tuple[datetime | None, datetime | None]:
