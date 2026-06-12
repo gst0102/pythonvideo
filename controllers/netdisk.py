@@ -34,8 +34,26 @@ async def _get_user_by_openid(session: AsyncSession, openid: str) -> User | None
 
 
 @router.get("/resources", summary="list netdisk resources")
-async def list_netdisk_resources(pan: str | None = None):
-    payload = {"resources": NetdiskResourceService.list_resources(pan=pan)}
+async def list_netdisk_resources(
+    keyword: str | None = None,
+    pan: str | None = None,
+    category: str | None = None,
+    level: str | None = None,
+    time: str | None = None,
+    sort: str | None = None,
+    page: int = 1,
+    page_size: int = 20,
+):
+    payload = NetdiskResourceService.list_resources(
+        keyword=keyword,
+        pan=pan,
+        category=category,
+        level=level,
+        time=time,
+        sort=sort,
+        page=page,
+        page_size=page_size,
+    )
     return response(data=NetdiskResourceListResponse(**payload).model_dump(mode="json"))
 
 

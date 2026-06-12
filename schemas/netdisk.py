@@ -22,6 +22,10 @@ class NetdiskResourceSummary(BaseModel):
 
 class NetdiskResourceListResponse(BaseModel):
     resources: list[NetdiskResourceSummary]
+    total: int
+    page: int
+    page_size: int
+    has_more: bool
 
 
 class NetdiskResourceDetailResponse(BaseModel):

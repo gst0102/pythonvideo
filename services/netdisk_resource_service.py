@@ -88,12 +88,61 @@ class NetdiskResourceService:
     """Unlock resources by consuming points and writing idempotent ledger rows."""
 
     @staticmethod
-    def list_resources(pan: str | None = None) -> list[dict]:
+    def list_resources(
+        keyword: str | None = None,
+        pan: str | None = None,
+        category: str | None = None,
+        level: str | None = None,
+        time: str | None = None,
+        sort: str | None = None,
+        page: int = 1,
+        page_size: int = 20,
+    ) -> dict:
+        selected_keyword = (keyword or "").strip().lower()
         selected_pan = (pan or "").strip()
-        resources = NETDISK_RESOURCE_CATALOG.values()
+        selected_category = (category or "").strip()
+        selected_level = _normalize_level(level)
+        selected_time = (time or "all").strip()
+        selected_sort = (sort or "latest").strip()
+        current_page = max(1, int(page or 1))
+        current_page_size = max(1, min(50, int(page_size or 20)))
+
+        resources = list(NETDISK_RESOURCE_CATALOG.values())
+        if selected_keyword:
+            resources = [
+                resource
+                for resource in resources
+                if selected_keyword in " ".join(
+                    [
+                        resource.title,
+                        resource.category,
+                        resource.pan,
+                        resource.level,
+                        resource.description,
+                    ]
+                ).lower()
+            ]
         if selected_pan and selected_pan != "全部":
             resources = [resource for resource in resources if resource.pan == selected_pan]
-        return [_build_resource_payload(resource) for resource in resources]
+        if selected_category and selected_category != "全部分类":
+            resources = [resource for resource in resources if resource.category == selected_category]
+        if selected_level and selected_level != "all":
+            resources = [resource for resource in resources if resource.level == selected_level]
+        if selected_time and selected_time != "all":
+            resources = [resource for resource in resources if _match_time(resource.verified_at, selected_time)]
+
+        resources = _sort_resources(resources, selected_sort)
+        total = len(resources)
+        start = (current_page - 1) * current_page_size
+        end = start + current_page_size
+        page_items = resources[start:end]
+        return {
+            "resources": [_build_resource_payload(resource) for resource in page_items],
+            "total": total,
+            "page": current_page,
+            "page_size": current_page_size,
+            "has_more": end < total,
+        }
 
     @staticmethod
     def get_resource_detail(resource_id: str) -> dict:
@@ -343,6 +392,49 @@ def _get_resource_or_raise(resource_id: str) -> NetdiskResource:
     if not resource:
         raise ValueError("resource not found")
     return resource
+
+
+def _normalize_level(level: str | None) -> str:
+    selected = (level or "").strip()
+    level_map = {
+        "普通": "normal",
+        "精选": "featured",
+        "官方": "official",
+        "normal": "normal",
+        "featured": "featured",
+        "official": "official",
+        "全部标签": "all",
+        "all": "all",
+    }
+    return level_map.get(selected, selected)
+
+
+def _verified_rank(verified_at: str) -> int:
+    if "小时" in verified_at:
+        return 0
+    if "今天" in verified_at:
+        return 1
+    if "昨天" in verified_at:
+        return 2
+    return 3
+
+
+def _match_time(verified_at: str, time_filter: str) -> bool:
+    if time_filter == "today":
+        return "小时" in verified_at or "今天" in verified_at
+    if time_filter == "week":
+        return "小时" in verified_at or "今天" in verified_at or "昨天" in verified_at
+    return True
+
+
+def _sort_resources(resources: list[NetdiskResource], sort: str) -> list[NetdiskResource]:
+    if sort == "hot":
+        return sorted(resources, key=lambda item: item.downloads, reverse=True)
+    if sort == "pointsAsc":
+        return sorted(resources, key=lambda item: item.cost_points)
+    if sort == "pointsDesc":
+        return sorted(resources, key=lambda item: item.cost_points, reverse=True)
+    return sorted(resources, key=lambda item: _verified_rank(item.verified_at))
 
 
 def _build_resource_payload(resource: NetdiskResource) -> dict:
