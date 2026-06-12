@@ -48,6 +48,7 @@ from models.netdisk_request import NetdiskRequest
 from models.netdisk_resource import NetdiskResource
 from models.netdisk_risk_record import NetdiskRiskRecord
 from models.netdisk_upload import NetdiskUpload
+from models.netdisk_user_notification import NetdiskUserNotification
 
 # 所有表，供 Alembic 自动发现
 __all__ = [
@@ -78,6 +79,7 @@ __all__ = [
     "NetdiskResource",
     "NetdiskRiskRecord",
     "NetdiskUpload",
+    "NetdiskUserNotification",
     "get_session",
     "get_session_ctx",
     "init_db",

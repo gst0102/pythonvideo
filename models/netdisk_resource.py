@@ -21,6 +21,7 @@ class NetdiskResource(SQLModel, table=True):
     link: str = Field(sa_column=Column(String(500), nullable=False))
     extract_code: str = Field(default="", sa_column=Column(String(64), nullable=False, server_default=""))
     unzip_code: str = Field(default="", sa_column=Column(String(64), nullable=False, server_default=""))
+    source_upload_id: str = Field(default="", sa_column=Column(String(64), nullable=False, server_default="", index=True))
     is_active: bool = Field(default=True, sa_column=Column(Boolean, nullable=False, server_default="true", index=True))
     verified_at: datetime = Field(
         default_factory=datetime.utcnow,

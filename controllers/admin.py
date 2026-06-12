@@ -22,6 +22,7 @@ from models.netdisk_repair import NetdiskRepair
 from models.netdisk_resource import NetdiskResource as NetdiskResourceModel
 from models.netdisk_risk_record import NetdiskRiskRecord
 from models.netdisk_upload import NetdiskUpload
+from models.netdisk_user_notification import NetdiskUserNotification
 from models.points_ledger import PointsLedger
 from models.user import User
 from models.user_account import UserAccount
@@ -474,6 +475,52 @@ async def admin_list_netdisk_risk_records(
         page_size=page_size,
     )
     return response(data=jsonable_encoder(payload))
+
+
+@router.get("/netdisk/risk-records/{record_id}", summary="admin netdisk pending recovery detail")
+async def admin_get_netdisk_risk_record_detail(
+    record_id: str,
+    session: AsyncSession = Depends(get_session),
+):
+    try:
+        uid = UUID(record_id)
+    except ValueError:
+        return response([], 400, "invalid risk record id")
+    item = await session.get(NetdiskRiskRecord, uid)
+    if not item:
+        return response([], 404, "risk record not found")
+    account, _ = await PointsAccountService.ensure_user_account(session, item.user_id)
+    related = await _build_netdisk_risk_related_detail(session, item)
+    notifications = (
+        await session.execute(
+            select(NetdiskUserNotification)
+            .where(
+                NetdiskUserNotification.user_id == item.user_id,
+                NetdiskUserNotification.related_type == item.related_type,
+                NetdiskUserNotification.related_id == item.related_id,
+            )
+            .order_by(NetdiskUserNotification.created_at.desc())
+            .limit(20)
+        )
+    ).scalars().all()
+    consumable_points = int(account.consumable_points or 0)
+    points_due = int(item.points_due or 0)
+    return response(
+        data={
+            "risk_record": _netdisk_risk_record_to_dict(item),
+            "account": {
+                "consumable_points": consumable_points,
+                "frozen_points": int(account.frozen_points or 0),
+                "total_points": int(account.total_points or 0),
+            },
+            "collect_preview": {
+                "will_collect": min(points_due, consumable_points),
+                "shortfall_after_collect": max(points_due - consumable_points, 0),
+            },
+            "related": related,
+            "notifications": [_netdisk_user_notification_to_dict(row) for row in notifications],
+        }
+    )
 
 
 @router.post("/netdisk/risk-records/{record_id}/collect", summary="collect netdisk pending recovery points")
@@ -1907,6 +1954,7 @@ def _resource_quality_resource_to_dict(item: NetdiskResourceModel) -> dict:
         "downloads": int(item.downloads or 0),
         "favorites": int(item.favorites or 0),
         "description": item.description,
+        "source_upload_id": item.source_upload_id,
         "created_at": item.created_at.isoformat() if item.created_at else None,
         "updated_at": item.updated_at.isoformat() if item.updated_at else None,
         "verified_at": item.verified_at.isoformat() if item.verified_at else None,
@@ -2093,6 +2141,21 @@ def _netdisk_repair_to_dict(item: NetdiskRepair) -> dict:
     }
 
 
+def _netdisk_upload_to_dict(item: NetdiskUpload) -> dict:
+    return {
+        "id": str(item.id),
+        "user_id": str(item.user_id),
+        "title": item.title,
+        "category": item.category,
+        "pan": item.pan,
+        "status": item.status,
+        "reward_points": int(item.reward_points or 0),
+        "audit_note": item.audit_note,
+        "created_at": item.created_at.isoformat() if item.created_at else None,
+        "updated_at": item.updated_at.isoformat() if item.updated_at else None,
+    }
+
+
 def _netdisk_unlock_ledger_to_dict(item: PointsLedger) -> dict:
     return {
         "id": str(item.id),
@@ -2121,6 +2184,53 @@ def _netdisk_risk_record_to_dict(item: NetdiskRiskRecord) -> dict:
         "note": item.note,
         "created_at": item.created_at.isoformat() if item.created_at else None,
         "updated_at": item.updated_at.isoformat() if item.updated_at else None,
+    }
+
+
+async def _build_netdisk_risk_related_detail(session: AsyncSession, item: NetdiskRiskRecord) -> dict:
+    if item.related_type == "netdisk_upload":
+        try:
+            upload = await session.get(NetdiskUpload, UUID(item.related_id))
+        except ValueError:
+            upload = None
+        resource = None
+        if upload:
+            resource = (
+                await session.execute(
+                    select(NetdiskResourceModel).where(NetdiskResourceModel.source_upload_id == str(upload.id))
+                )
+            ).scalar_one_or_none()
+        return {
+            "upload": _netdisk_upload_to_dict(upload) if upload else None,
+            "resource": _resource_quality_resource_to_dict(resource) if resource else None,
+        }
+
+    if item.related_type == "netdisk_repair":
+        try:
+            repair = await session.get(NetdiskRepair, UUID(item.related_id))
+        except ValueError:
+            repair = None
+        resource = await session.get(NetdiskResourceModel, repair.resource_id) if repair else None
+        return {
+            "repair": _netdisk_repair_to_dict(repair) if repair else None,
+            "resource": _resource_quality_resource_to_dict(resource) if resource else None,
+        }
+
+    resource = await session.get(NetdiskResourceModel, item.related_id)
+    return {"resource": _resource_quality_resource_to_dict(resource) if resource else None}
+
+
+def _netdisk_user_notification_to_dict(item: NetdiskUserNotification) -> dict:
+    return {
+        "id": str(item.id),
+        "user_id": str(item.user_id),
+        "notice_type": item.notice_type,
+        "title": item.title,
+        "content": item.content,
+        "related_type": item.related_type,
+        "related_id": item.related_id,
+        "status": item.status,
+        "created_at": item.created_at.isoformat() if item.created_at else None,
     }
 
 

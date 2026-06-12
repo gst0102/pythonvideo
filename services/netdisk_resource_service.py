@@ -17,6 +17,7 @@ from models.netdisk_request import NetdiskRequest
 from models.netdisk_resource import NetdiskResource as NetdiskResourceModel
 from models.netdisk_risk_record import NetdiskRiskRecord
 from models.netdisk_upload import NetdiskUpload
+from models.netdisk_user_notification import NetdiskUserNotification
 from models.points_ledger import PointsLedger
 from models.user import User
 from models.user_account import UserAccount
@@ -519,9 +520,10 @@ class NetdiskResourceService:
         item.audit_note = note.strip() or "系统验证通过，待验证奖励已释放为可用积分。"
         item.updated_at = datetime.utcnow()
         await _release_upload_reward(session, item)
+        resource = await _ensure_resource_from_upload(session, item)
         await session.flush()
         await session.refresh(item)
-        return {"upload": _build_upload_payload(item)}
+        return {"upload": _build_upload_payload(item), "resource": _build_resource_payload(resource)}
 
     @staticmethod
     async def reject_upload(session: AsyncSession, upload_id: str, note: str = "") -> dict:
@@ -647,6 +649,34 @@ class NetdiskResourceService:
         ).scalars().all()
         config = await _get_netdisk_audit_config(session)
         risk_records_created = 0
+        source_upload = await _get_source_upload_for_resource(session, resource)
+        if source_upload and source_upload.status == "approved" and int(source_upload.reward_points or 0) > 0:
+            source_upload.status = "invalid_confirmed"
+            source_upload.audit_note = _append_note(source_upload.audit_note, clean_note)
+            source_upload.updated_at = datetime.utcnow()
+            upload_penalty_points = int(source_upload.reward_points or 0) * int(config["invalid_penalty_multiplier"])
+            created = await _create_risk_record(
+                session=session,
+                user_id=source_upload.user_id,
+                related_type="netdisk_upload",
+                related_id=str(source_upload.id),
+                reason="resource_invalid_pending_penalty",
+                points_due=upload_penalty_points,
+                points_collected=0,
+                idempotency_key=f"netdisk_resource_invalid_risk:{resource_id}:upload:{source_upload.id}",
+                note=f"{clean_note} 待追缴 {upload_penalty_points} 分；关联资源：{resource.title}",
+            )
+            if created:
+                risk_records_created += 1
+                await _create_user_notification(
+                    session=session,
+                    user_id=source_upload.user_id,
+                    notice_type="netdisk_risk_pending",
+                    title="上传资源确认失效",
+                    content=f"你上传的资源「{resource.title}」已被确认失效，后台已生成待追缴 {upload_penalty_points} 分记录。",
+                    related_type="netdisk_upload",
+                    related_id=str(source_upload.id),
+                )
         for repair in approved_repairs:
             reward_points = int(repair.reward_points or 0)
             if reward_points <= 0:
@@ -668,6 +698,15 @@ class NetdiskResourceService:
             )
             if created:
                 risk_records_created += 1
+                await _create_user_notification(
+                    session=session,
+                    user_id=repair.user_id,
+                    notice_type="netdisk_risk_pending",
+                    title="补链资源确认失效",
+                    content=f"你补链的资源「{resource.title}」已被确认失效，后台已生成待追缴 {penalty_points} 分记录。",
+                    related_type="netdisk_repair",
+                    related_id=str(repair.id),
+                )
 
         await session.flush()
         await session.refresh(resource)
@@ -675,6 +714,7 @@ class NetdiskResourceService:
             "resource": _build_resource_payload(resource),
             "risk_records_created": risk_records_created,
             "affected_repairs": len(approved_repairs),
+            "affected_upload": bool(source_upload),
             "note": clean_note,
         }
 
@@ -740,6 +780,82 @@ async def _get_unlock_ledger(session: AsyncSession, user_id, resource_id: str) -
         )
     )
     return result.scalar_one_or_none()
+
+
+async def _ensure_resource_from_upload(session: AsyncSession, item: NetdiskUpload) -> NetdiskResourceModel:
+    resource_id = f"upload-{str(item.id).replace('-', '')[:24]}"
+    result = await session.execute(select(NetdiskResourceModel).where(NetdiskResourceModel.source_upload_id == str(item.id)))
+    resource = result.scalar_one_or_none()
+    if not resource:
+        resource = await session.get(NetdiskResourceModel, resource_id)
+    if resource:
+        resource.title = item.title
+        resource.category = item.category
+        resource.pan = item.pan
+        resource.level = resource.level or "normal"
+        resource.cost_points = int(resource.cost_points or 5)
+        resource.description = item.description
+        resource.link = item.link
+        resource.extract_code = item.extract_code
+        resource.unzip_code = item.unzip_code
+        resource.source_upload_id = str(item.id)
+        resource.is_active = True
+        resource.verified_at = datetime.utcnow()
+        resource.updated_at = datetime.utcnow()
+        await session.flush()
+        return resource
+
+    resource = NetdiskResourceModel(
+        id=resource_id,
+        title=item.title,
+        category=item.category,
+        pan=item.pan,
+        level="normal",
+        cost_points=5,
+        downloads=0,
+        favorites=0,
+        description=item.description,
+        link=item.link,
+        extract_code=item.extract_code,
+        unzip_code=item.unzip_code,
+        source_upload_id=str(item.id),
+        is_active=True,
+        verified_at=datetime.utcnow(),
+    )
+    session.add(resource)
+    await session.flush()
+    return resource
+
+
+async def _get_source_upload_for_resource(session: AsyncSession, resource: NetdiskResourceModel) -> NetdiskUpload | None:
+    if not resource.source_upload_id:
+        return None
+    try:
+        return await session.get(NetdiskUpload, UUID(resource.source_upload_id))
+    except ValueError:
+        return None
+
+
+async def _create_user_notification(
+    session: AsyncSession,
+    user_id,
+    notice_type: str,
+    title: str,
+    content: str,
+    related_type: str,
+    related_id: str,
+) -> None:
+    session.add(
+        NetdiskUserNotification(
+            user_id=user_id,
+            notice_type=notice_type,
+            title=title,
+            content=content,
+            related_type=related_type,
+            related_id=related_id,
+            status="unread",
+        )
+    )
 
 
 async def _grant_upload_frozen_reward(
@@ -1265,6 +1381,7 @@ def _build_resource_payload(resource: NetdiskResource | NetdiskResourceModel) ->
         "favorites": resource.favorites,
         "description": resource.description,
         "is_active": bool(getattr(resource, "is_active", True)),
+        "source_upload_id": getattr(resource, "source_upload_id", ""),
     }
 
 
