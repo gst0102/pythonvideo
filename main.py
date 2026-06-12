@@ -112,6 +112,17 @@ os.makedirs(downloads_folder, exist_ok=True)
 app.mount("/downloads", StaticFiles(directory=downloads_folder))
 
 # 健康检查
+@app.get("/")
+def root_status():
+    return {
+        "status": "ok",
+        "service": "yuexiang-backend",
+        "message": "服务运行正常",
+        "health": "/health",
+        "netdisk_resources": "/netdisk/resources",
+    }
+
+
 @app.get("/health")
 def health_check():
     return {"status": "ok", "message": "服务运行正常"}
