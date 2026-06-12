@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, Query, Response
 from fastapi.encoders import jsonable_encoder
+from sqlalchemy import or_
 from sqlmodel import and_, func, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
@@ -685,6 +686,7 @@ async def admin_netdisk_ops_dashboard(
     trends = await _build_netdisk_ops_trends(session, today_start)
     point_sources = await _build_point_source_distribution(session, point_source_start)
     resource_quality_rankings = await _build_resource_quality_rankings(session)
+    quality_alerts = await _build_resource_quality_alerts(session)
 
     return response(
         data={
@@ -707,6 +709,7 @@ async def admin_netdisk_ops_dashboard(
                 "pending_reports": int(pending_reports),
                 "hidden_resources": int(hidden_resources),
                 "open_risk_records": int(risk_totals[0] or 0),
+                "quality_alerts": len(quality_alerts),
             },
             "today_activity": {
                 "uploads": int(today_uploads),
@@ -717,6 +720,7 @@ async def admin_netdisk_ops_dashboard(
             "point_source_range": points_range,
             "point_sources": point_sources,
             "resource_quality_rankings": resource_quality_rankings,
+            "resource_quality_alerts": quality_alerts,
             "generated_at": datetime.utcnow().isoformat(),
         }
     )
@@ -844,6 +848,90 @@ async def admin_seed_netdisk_review_demo(session: AsyncSession = Depends(get_ses
             "risk_records": 1,
         },
         msg="netdisk review demo data seeded",
+    )
+
+
+@router.get("/netdisk/resource-quality", summary="netdisk resource quality ranking")
+async def admin_list_netdisk_resource_quality(
+    filter: str = Query("all", pattern="^(all|hidden|high_report|high_unlock)$"),
+    page_size: int = Query(20, ge=1, le=100),
+    session: AsyncSession = Depends(get_session),
+):
+    thresholds = await _get_resource_quality_thresholds(session)
+    rankings = await _build_resource_quality_rankings(
+        session,
+        filter_mode=filter,
+        limit=page_size,
+        thresholds=thresholds,
+    )
+    return response(data={"rankings": rankings, "filter": filter, "thresholds": thresholds})
+
+
+@router.get("/netdisk/resource-quality/{resource_id}", summary="netdisk resource quality detail")
+async def admin_get_netdisk_resource_quality_detail(
+    resource_id: str,
+    session: AsyncSession = Depends(get_session),
+):
+    resource = await session.get(NetdiskResourceModel, resource_id)
+    if not resource:
+        return response([], 404, "resource not found")
+
+    stat = await _build_resource_quality_stat(session, resource)
+    reports = (
+        await session.execute(
+            select(NetdiskRepair)
+            .where(NetdiskRepair.resource_id == resource_id, NetdiskRepair.mode == "report")
+            .order_by(NetdiskRepair.created_at.desc())
+            .limit(30)
+        )
+    ).scalars().all()
+    restore_logs = (
+        await session.execute(
+            select(NetdiskAuditLog)
+            .where(
+                NetdiskAuditLog.target_type == "netdisk_resource",
+                NetdiskAuditLog.target_id == resource_id,
+                NetdiskAuditLog.action == "resource_restore",
+            )
+            .order_by(NetdiskAuditLog.created_at.desc())
+            .limit(20)
+        )
+    ).scalars().all()
+    unlocks = (
+        await session.execute(
+            select(PointsLedger)
+            .where(
+                PointsLedger.source == "netdisk",
+                PointsLedger.change_type == "resource_unlock",
+                PointsLedger.related_type == "netdisk_resource",
+                PointsLedger.related_id == resource_id,
+            )
+            .order_by(PointsLedger.created_at.desc())
+            .limit(30)
+        )
+    ).scalars().all()
+    report_ids = [str(item.id) for item in reports]
+    log_filters = [and_(NetdiskAuditLog.target_type == "netdisk_resource", NetdiskAuditLog.target_id == resource_id)]
+    if report_ids:
+        log_filters.append(and_(NetdiskAuditLog.target_type == "netdisk_repair", NetdiskAuditLog.target_id.in_(report_ids)))
+    recent_logs = (
+        await session.execute(
+            select(NetdiskAuditLog)
+            .where(or_(*log_filters))
+            .order_by(NetdiskAuditLog.created_at.desc())
+            .limit(30)
+        )
+    ).scalars().all()
+
+    return response(
+        data={
+            "resource": _resource_quality_resource_to_dict(resource),
+            "stats": stat,
+            "reports": [_netdisk_repair_to_dict(item) for item in reports],
+            "restore_logs": [_netdisk_audit_log_to_dict(item) for item in restore_logs],
+            "unlocks": [_netdisk_unlock_ledger_to_dict(item) for item in unlocks],
+            "recent_logs": [_netdisk_audit_log_to_dict(item) for item in recent_logs],
+        }
     )
 
 
@@ -1065,59 +1153,261 @@ async def _build_point_source_distribution(session: AsyncSession, start_dt: date
     ]
 
 
-async def _build_resource_quality_rankings(session: AsyncSession) -> list[dict]:
-    resources = (
-        await session.execute(select(NetdiskResourceModel).order_by(NetdiskResourceModel.created_at.desc()).limit(200))
-    ).scalars().all()
-    rankings = []
-    for item in resources:
-        reports = (
-            await session.execute(
-                select(func.count()).select_from(NetdiskRepair).where(
-                    NetdiskRepair.resource_id == item.id,
-                    NetdiskRepair.mode == "report",
-                )
-            )
-        ).scalar() or 0
-        restores = (
-            await session.execute(
-                select(func.count()).select_from(NetdiskAuditLog).where(
-                    NetdiskAuditLog.target_type == "netdisk_resource",
-                    NetdiskAuditLog.target_id == item.id,
-                    NetdiskAuditLog.action == "resource_restore",
-                )
-            )
-        ).scalar() or 0
-        unlocks = (
-            await session.execute(
-                select(func.count()).select_from(PointsLedger).where(
-                    PointsLedger.source == "netdisk",
-                    PointsLedger.change_type == "resource_unlock",
-                    PointsLedger.related_type == "netdisk_resource",
-                    PointsLedger.related_id == item.id,
-                )
-            )
-        ).scalar() or 0
-        score = int(reports or 0) * 3 + int(restores or 0) * 2 + int(unlocks or 0)
-        if score <= 0:
-            continue
-        rankings.append(
-            {
-                "resource_id": item.id,
-                "title": item.title,
-                "category": item.category,
-                "pan": item.pan,
-                "is_active": item.is_active,
-                "downloads": int(item.downloads or 0),
-                "favorites": int(item.favorites or 0),
-                "reports": int(reports or 0),
-                "restores": int(restores or 0),
-                "unlocks": int(unlocks or 0),
-                "score": score,
-            }
+async def _build_resource_quality_rankings(
+    session: AsyncSession,
+    filter_mode: str = "all",
+    limit: int = 10,
+    thresholds: dict | None = None,
+) -> list[dict]:
+    thresholds = thresholds or await _get_resource_quality_thresholds(session)
+    reports_sq, restores_sq, unlocks_sq, recent_reports_sq, recent_unlocks_sq = _resource_quality_subqueries()
+    report_count = func.coalesce(reports_sq.c.reports, 0)
+    restore_count = func.coalesce(restores_sq.c.restores, 0)
+    unlock_count = func.coalesce(unlocks_sq.c.unlocks, 0)
+    score_expr = report_count * 3 + restore_count * 2 + unlock_count
+    query = (
+        select(
+            NetdiskResourceModel,
+            report_count.label("reports"),
+            restore_count.label("restores"),
+            unlock_count.label("unlocks"),
+            func.coalesce(unlocks_sq.c.unlock_users, 0).label("unlock_users"),
+            func.coalesce(recent_reports_sq.c.recent_reports, 0).label("recent_reports_24h"),
+            func.coalesce(recent_unlocks_sq.c.recent_unlocks, 0).label("recent_unlocks_24h"),
+            score_expr.label("score"),
         )
-    rankings.sort(key=lambda row: (row["score"], row["reports"], row["unlocks"]), reverse=True)
-    return rankings[:10]
+        .select_from(NetdiskResourceModel)
+        .outerjoin(reports_sq, reports_sq.c.resource_id == NetdiskResourceModel.id)
+        .outerjoin(restores_sq, restores_sq.c.resource_id == NetdiskResourceModel.id)
+        .outerjoin(unlocks_sq, unlocks_sq.c.resource_id == NetdiskResourceModel.id)
+        .outerjoin(recent_reports_sq, recent_reports_sq.c.resource_id == NetdiskResourceModel.id)
+        .outerjoin(recent_unlocks_sq, recent_unlocks_sq.c.resource_id == NetdiskResourceModel.id)
+    )
+    if filter_mode == "hidden":
+        query = query.where(NetdiskResourceModel.is_active == False)  # noqa: E712
+    elif filter_mode == "high_report":
+        query = query.where(report_count >= thresholds["high_report_threshold"])
+    elif filter_mode == "high_unlock":
+        query = query.where(unlock_count >= thresholds["high_unlock_threshold"])
+    else:
+        query = query.where(score_expr > 0)
+
+    rows = (
+        await session.execute(
+            query.order_by(score_expr.desc(), report_count.desc(), unlock_count.desc(), NetdiskResourceModel.updated_at.desc())
+            .limit(limit)
+        )
+    ).all()
+    return [_resource_quality_row_to_dict(row) for row in rows]
+
+
+async def _build_resource_quality_alerts(session: AsyncSession) -> list[dict]:
+    thresholds = await _get_resource_quality_thresholds(session)
+    rankings = await _build_resource_quality_rankings(session, limit=30, thresholds=thresholds)
+    alerts = []
+    seen = set()
+    for item in rankings:
+        if item["reports"] >= thresholds["high_report_threshold"]:
+            seen.add(item["resource_id"])
+            alerts.append(
+                {
+                    "type": "high_report",
+                    "level": "danger",
+                    "resource_id": item["resource_id"],
+                    "title": item["title"],
+                    "message": f"投诉 {item['reports']} 次，达到高投诉阈值",
+                }
+            )
+        if (
+            item["recent_reports_24h"] >= thresholds["burst_report_threshold"]
+            and item["recent_unlocks_24h"] >= thresholds["burst_unlock_threshold"]
+        ):
+            key = f"burst:{item['resource_id']}"
+            if key not in seen:
+                seen.add(key)
+                alerts.append(
+                    {
+                        "type": "unlock_report_burst",
+                        "level": "warning",
+                        "resource_id": item["resource_id"],
+                        "title": item["title"],
+                        "message": f"24小时内解锁 {item['recent_unlocks_24h']} 次且投诉 {item['recent_reports_24h']} 次",
+                    }
+                )
+    return alerts[:6]
+
+
+async def _build_resource_quality_stat(session: AsyncSession, resource: NetdiskResourceModel) -> dict:
+    reports = (
+        await session.execute(
+            select(func.count(), func.max(NetdiskRepair.created_at)).where(
+                NetdiskRepair.resource_id == resource.id,
+                NetdiskRepair.mode == "report",
+            )
+        )
+    ).one()
+    restores = (
+        await session.execute(
+            select(func.count(), func.max(NetdiskAuditLog.created_at)).where(
+                NetdiskAuditLog.target_type == "netdisk_resource",
+                NetdiskAuditLog.target_id == resource.id,
+                NetdiskAuditLog.action == "resource_restore",
+            )
+        )
+    ).one()
+    unlocks = (
+        await session.execute(
+            select(
+                func.count(),
+                func.count(func.distinct(PointsLedger.user_id)),
+                func.max(PointsLedger.created_at),
+            ).where(
+                PointsLedger.source == "netdisk",
+                PointsLedger.change_type == "resource_unlock",
+                PointsLedger.related_type == "netdisk_resource",
+                PointsLedger.related_id == resource.id,
+            )
+        )
+    ).one()
+    recent_start = datetime.utcnow() - timedelta(hours=24)
+    recent_reports = (
+        await session.execute(
+            select(func.count()).select_from(NetdiskRepair).where(
+                NetdiskRepair.resource_id == resource.id,
+                NetdiskRepair.mode == "report",
+                NetdiskRepair.created_at >= recent_start,
+            )
+        )
+    ).scalar() or 0
+    recent_unlocks = (
+        await session.execute(
+            select(func.count()).select_from(PointsLedger).where(
+                PointsLedger.source == "netdisk",
+                PointsLedger.change_type == "resource_unlock",
+                PointsLedger.related_type == "netdisk_resource",
+                PointsLedger.related_id == resource.id,
+                PointsLedger.created_at >= recent_start,
+            )
+        )
+    ).scalar() or 0
+    report_count = int(reports[0] or 0)
+    restore_count = int(restores[0] or 0)
+    unlock_count = int(unlocks[0] or 0)
+    return {
+        "reports": report_count,
+        "restores": restore_count,
+        "unlocks": unlock_count,
+        "unlock_users": int(unlocks[1] or 0),
+        "recent_reports_24h": int(recent_reports),
+        "recent_unlocks_24h": int(recent_unlocks),
+        "score": report_count * 3 + restore_count * 2 + unlock_count,
+        "last_report_at": reports[1].isoformat() if reports[1] else None,
+        "last_restore_at": restores[1].isoformat() if restores[1] else None,
+        "last_unlock_at": unlocks[2].isoformat() if unlocks[2] else None,
+    }
+
+
+async def _get_resource_quality_thresholds(session: AsyncSession) -> dict:
+    config = await ConfigService.get(session, "netdisk_audit_config")
+    return {
+        "high_report_threshold": int(config.get("quality_high_report_threshold") or config.get("report_hide_threshold") or 3),
+        "high_unlock_threshold": int(config.get("quality_high_unlock_threshold") or 5),
+        "burst_report_threshold": int(config.get("quality_burst_report_threshold") or 1),
+        "burst_unlock_threshold": int(config.get("quality_burst_unlock_threshold") or 3),
+    }
+
+
+def _resource_quality_subqueries():
+    recent_start = datetime.utcnow() - timedelta(hours=24)
+    reports_sq = (
+        select(
+            NetdiskRepair.resource_id.label("resource_id"),
+            func.count(NetdiskRepair.id).label("reports"),
+        )
+        .where(NetdiskRepair.mode == "report")
+        .group_by(NetdiskRepair.resource_id)
+        .subquery()
+    )
+    restores_sq = (
+        select(
+            NetdiskAuditLog.target_id.label("resource_id"),
+            func.count(NetdiskAuditLog.id).label("restores"),
+        )
+        .where(NetdiskAuditLog.target_type == "netdisk_resource", NetdiskAuditLog.action == "resource_restore")
+        .group_by(NetdiskAuditLog.target_id)
+        .subquery()
+    )
+    unlocks_sq = (
+        select(
+            PointsLedger.related_id.label("resource_id"),
+            func.count(PointsLedger.id).label("unlocks"),
+            func.count(func.distinct(PointsLedger.user_id)).label("unlock_users"),
+        )
+        .where(
+            PointsLedger.source == "netdisk",
+            PointsLedger.change_type == "resource_unlock",
+            PointsLedger.related_type == "netdisk_resource",
+        )
+        .group_by(PointsLedger.related_id)
+        .subquery()
+    )
+    recent_reports_sq = (
+        select(
+            NetdiskRepair.resource_id.label("resource_id"),
+            func.count(NetdiskRepair.id).label("recent_reports"),
+        )
+        .where(NetdiskRepair.mode == "report", NetdiskRepair.created_at >= recent_start)
+        .group_by(NetdiskRepair.resource_id)
+        .subquery()
+    )
+    recent_unlocks_sq = (
+        select(
+            PointsLedger.related_id.label("resource_id"),
+            func.count(PointsLedger.id).label("recent_unlocks"),
+        )
+        .where(
+            PointsLedger.source == "netdisk",
+            PointsLedger.change_type == "resource_unlock",
+            PointsLedger.related_type == "netdisk_resource",
+            PointsLedger.created_at >= recent_start,
+        )
+        .group_by(PointsLedger.related_id)
+        .subquery()
+    )
+    return reports_sq, restores_sq, unlocks_sq, recent_reports_sq, recent_unlocks_sq
+
+
+def _resource_quality_row_to_dict(row) -> dict:
+    item = row[0]
+    return {
+        **_resource_quality_resource_to_dict(item),
+        "resource_id": item.id,
+        "reports": int(row.reports or 0),
+        "restores": int(row.restores or 0),
+        "unlocks": int(row.unlocks or 0),
+        "unlock_users": int(row.unlock_users or 0),
+        "recent_reports_24h": int(row.recent_reports_24h or 0),
+        "recent_unlocks_24h": int(row.recent_unlocks_24h or 0),
+        "score": int(row.score or 0),
+    }
+
+
+def _resource_quality_resource_to_dict(item: NetdiskResourceModel) -> dict:
+    return {
+        "id": item.id,
+        "title": item.title,
+        "category": item.category,
+        "pan": item.pan,
+        "level": item.level,
+        "cost_points": int(item.cost_points or 0),
+        "is_active": bool(item.is_active),
+        "downloads": int(item.downloads or 0),
+        "favorites": int(item.favorites or 0),
+        "description": item.description,
+        "created_at": item.created_at.isoformat() if item.created_at else None,
+        "updated_at": item.updated_at.isoformat() if item.updated_at else None,
+        "verified_at": item.verified_at.isoformat() if item.verified_at else None,
+    }
 
 
 def _parse_date_range(start_date: str | None, end_date: str | None) -> tuple[datetime | None, datetime | None]:
@@ -1221,6 +1511,38 @@ def _netdisk_audit_log_to_dict(item: NetdiskAuditLog) -> dict:
         "target_title": item.target_title,
         "note": item.note,
         "result": item.result,
+        "created_at": item.created_at.isoformat() if item.created_at else None,
+    }
+
+
+def _netdisk_repair_to_dict(item: NetdiskRepair) -> dict:
+    return {
+        "id": str(item.id),
+        "user_id": str(item.user_id),
+        "resource_id": item.resource_id,
+        "resource_title": item.resource_title,
+        "mode": item.mode,
+        "pan": item.pan,
+        "status": item.status,
+        "reward_points": int(item.reward_points or 0),
+        "note": item.note,
+        "audit_note": item.audit_note,
+        "created_at": item.created_at.isoformat() if item.created_at else None,
+        "updated_at": item.updated_at.isoformat() if item.updated_at else None,
+    }
+
+
+def _netdisk_unlock_ledger_to_dict(item: PointsLedger) -> dict:
+    return {
+        "id": str(item.id),
+        "user_id": str(item.user_id),
+        "change_type": item.change_type,
+        "source": item.source,
+        "availability": item.availability,
+        "points_delta": int(item.points_delta or 0),
+        "related_type": item.related_type,
+        "related_id": item.related_id,
+        "remark": item.remark,
         "created_at": item.created_at.isoformat() if item.created_at else None,
     }
 
