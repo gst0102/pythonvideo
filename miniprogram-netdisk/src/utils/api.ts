@@ -82,6 +82,15 @@ export interface LoginResponse {
   };
 }
 
+export interface UserProfileResponse {
+  id: string;
+  openid: string;
+  nickname: string;
+  avatar: string;
+  invite_code: string;
+  account: UserAccount;
+}
+
 export interface FavoriteListResponse {
   favorites: Array<{
     resource: NetdiskResource;
@@ -106,6 +115,34 @@ export interface RepairResponse {
     audit_note: string;
     note: string;
   };
+}
+
+export interface UploadListResponse {
+  uploads: Array<{
+    id: string;
+    title: string;
+    category: string;
+    pan: string;
+    status: string;
+    reward_points: number;
+    audit_note: string;
+    created_at: string;
+  }>;
+}
+
+export interface RepairListResponse {
+  repairs: Array<{
+    id: string;
+    resource_id: string;
+    resource_title: string;
+    mode: "repair" | "report" | string;
+    pan: string;
+    status: string;
+    reward_points: number;
+    audit_note: string;
+    note: string;
+    created_at: string;
+  }>;
 }
 
 const getToken = () => {
@@ -199,6 +236,18 @@ export const unlockNetdiskResource = (id: string) => {
 
 export const getNetdiskFavorites = () => {
   return request<FavoriteListResponse>("/netdisk/favorites");
+};
+
+export const getUserProfile = () => {
+  return request<UserProfileResponse>("/user/profile");
+};
+
+export const getMyNetdiskUploads = () => {
+  return request<UploadListResponse>("/netdisk/uploads/mine");
+};
+
+export const getMyNetdiskRepairs = () => {
+  return request<RepairListResponse>("/netdisk/repairs/mine");
 };
 
 export const favoriteNetdiskResource = (id: string) => {

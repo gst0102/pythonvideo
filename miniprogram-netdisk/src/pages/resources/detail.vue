@@ -28,6 +28,8 @@ const access = ref<NetdiskResourceAccess>({
 });
 const consumablePoints = ref(0);
 const favorited = ref(false);
+const reportPanelVisible = ref(false);
+const reportNote = ref("");
 const unlocked = computed(() => access.value.unlocked);
 
 onLoad(async (query) => {
@@ -103,23 +105,27 @@ const toggleFavorite = async () => {
   }
 };
 
-const reportInvalid = () => {
+const openReportPanel = () => {
   if (!resource.value) return;
-  uni.showModal({
-    title: "确认投诉失效？",
-    content: "提交后运营会核验链接状态，确认失效后资源会隐藏处理。",
-    confirmText: "提交投诉",
-    success: async (res) => {
-      if (!res.confirm || !resource.value) return;
-      try {
-        await ensureWechatLogin();
-        await reportNetdiskResource(resource.value, "用户反馈：资源链接失效或内容不符。");
-        uni.showToast({ title: "投诉已提交", icon: "none" });
-      } catch (error: any) {
-        uni.showToast({ title: error?.message || "投诉失败", icon: "none" });
-      }
-    }
-  });
+  reportNote.value = "";
+  reportPanelVisible.value = true;
+};
+
+const submitReport = async () => {
+  if (!resource.value) return;
+  const note = reportNote.value.trim();
+  if (!note) {
+    uni.showToast({ title: "请填写投诉原因", icon: "none" });
+    return;
+  }
+  try {
+    await ensureWechatLogin();
+    await reportNetdiskResource(resource.value, note);
+    reportPanelVisible.value = false;
+    uni.showToast({ title: "投诉已提交", icon: "none" });
+  } catch (error: any) {
+    uni.showToast({ title: error?.message || "投诉失败", icon: "none" });
+  }
 };
 
 const levelText = (level?: string) => ({ normal: "普通", featured: "精选", official: "官方" }[level || ""] || level || "-");
@@ -172,7 +178,19 @@ const levelText = (level?: string) => ({ normal: "普通", featured: "精选", o
       <view class="bottom-actions">
         <view class="btn" @click="confirmAccess">{{ unlocked ? "已获取" : `获取资源 ${resource.cost_points}分` }}</view>
         <view class="btn-plain" @click="toggleFavorite">{{ favorited ? "已收藏" : "收藏" }}</view>
-        <view class="btn-plain danger" @click="reportInvalid">投诉失效</view>
+        <view class="btn-plain danger" @click="openReportPanel">投诉失效</view>
+      </view>
+
+      <view v-if="reportPanelVisible" class="report-mask">
+        <view class="report-panel">
+          <view class="section-title">投诉失效</view>
+          <view class="muted report-tip">请说明链接失效、提取码错误或内容不符的情况。</view>
+          <textarea v-model="reportNote" class="textarea report-textarea" maxlength="200" placeholder="例如：链接打不开，提取码不对，或内容和标题不符" />
+          <view class="report-actions">
+            <view class="btn-plain" @click="reportPanelVisible = false">取消</view>
+            <view class="btn" @click="submitReport">提交</view>
+          </view>
+        </view>
       </view>
     </template>
   </view>
@@ -267,5 +285,38 @@ const levelText = (level?: string) => ({ normal: "普通", featured: "精选", o
 .retry {
   width: 220rpx;
   margin: 28rpx auto 0;
+}
+
+.report-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  align-items: flex-end;
+  background: rgba(0, 0, 0, 0.38);
+}
+
+.report-panel {
+  width: 100%;
+  border-radius: 24rpx 24rpx 0 0;
+  background: #ffffff;
+  padding: 30rpx 28rpx 42rpx;
+}
+
+.report-tip {
+  margin-top: 10rpx;
+  font-size: 25rpx;
+  line-height: 1.5;
+}
+
+.report-textarea {
+  margin-top: 22rpx;
+}
+
+.report-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16rpx;
+  margin-top: 22rpx;
 }
 </style>

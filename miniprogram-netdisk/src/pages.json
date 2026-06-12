@@ -51,6 +51,12 @@
       }
     },
     {
+      "path": "pages/reports/mine",
+      "style": {
+        "navigationBarTitleText": "我的投诉记录"
+      }
+    },
+    {
       "path": "pages/mine/index",
       "style": {
         "navigationBarTitleText": "我的"
