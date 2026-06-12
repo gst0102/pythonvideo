@@ -693,6 +693,13 @@ async def admin_netdisk_ops_dashboard(
     point_sources = await _build_point_source_distribution(session, point_source_start)
     resource_quality_rankings = await _build_resource_quality_rankings(session, range_mode=quality_range)
     quality_alerts = await _build_resource_quality_alerts(session)
+    quality_review_pool_count = (
+        await session.execute(
+            select(func.count())
+            .select_from(NetdiskQualityAlert)
+            .where(NetdiskQualityAlert.status.in_(["open", "read"]))
+        )
+    ).scalar() or 0
     quality_runtime = await ConfigService.get(session, "netdisk_quality_stats_runtime")
 
     return response(
@@ -717,7 +724,7 @@ async def admin_netdisk_ops_dashboard(
                 "hidden_resources": int(hidden_resources),
                 "open_risk_records": int(risk_totals[0] or 0),
                 "quality_alerts": len(quality_alerts),
-                "quality_review_pool": len(quality_alerts),
+                "quality_review_pool": int(quality_review_pool_count),
             },
             "today_activity": {
                 "uploads": int(today_uploads),
@@ -882,12 +889,15 @@ async def admin_list_netdisk_resource_quality(
 @router.get("/netdisk/quality-alerts", summary="netdisk quality alert list")
 async def admin_list_netdisk_quality_alerts(
     status: Optional[str] = Query(None),
+    review_pool: bool = Query(False),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
     session: AsyncSession = Depends(get_session),
 ):
     query = select(NetdiskQualityAlert)
-    if status:
+    if review_pool:
+        query = query.where(NetdiskQualityAlert.status.in_(["open", "read"]))
+    elif status:
         query = query.where(NetdiskQualityAlert.status == status)
     total = (await session.execute(select(func.count()).select_from(query.subquery()))).scalar() or 0
     items = (
@@ -908,10 +918,60 @@ async def admin_list_netdisk_quality_alerts(
     )
 
 
+@router.get("/netdisk/quality-review-pool", summary="netdisk quality review pool")
+async def admin_list_netdisk_quality_review_pool(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    session: AsyncSession = Depends(get_session),
+):
+    return await admin_list_netdisk_quality_alerts(
+        status=None,
+        review_pool=True,
+        page=page,
+        page_size=page_size,
+        session=session,
+    )
+
+
 @router.get("/netdisk/resource-quality/stats-runtime", summary="netdisk quality stats runtime")
 async def admin_get_netdisk_resource_quality_stats_runtime(session: AsyncSession = Depends(get_session)):
     runtime = await ConfigService.get(session, "netdisk_quality_stats_runtime")
     return response(data=runtime)
+
+
+@router.post("/netdisk/resource-quality/stats-runtime/dev-simulate-failure", summary="simulate netdisk quality stats failure")
+async def admin_simulate_netdisk_resource_quality_stats_failure(session: AsyncSession = Depends(get_session)):
+    if os.getenv("ENABLE_DEV_LOGIN", "false").lower() != "true":
+        return response([], 403, "dev simulate disabled")
+    now = datetime.utcnow().isoformat()
+    config = await ConfigService.set(
+        session,
+        "netdisk_quality_stats_runtime",
+        {
+            "status": "failed",
+            "last_started_at": now,
+            "last_finished_at": now,
+            "last_rows": 0,
+            "days": 7,
+            "last_error": "开发自测：模拟质量统计任务失败",
+            "duration_ms": 0,
+            "schedule": {
+                "enabled": True,
+                "hour": int(os.getenv("NETDISK_QUALITY_STATS_CRON_HOUR", "3")),
+                "minute": int(os.getenv("NETDISK_QUALITY_STATS_CRON_MINUTE", "20")),
+            },
+        },
+    )
+    return response(data=config.config_data, msg="netdisk quality stats runtime simulated failed")
+
+
+@router.post("/netdisk/resource-quality/stats-runtime/dev-recover", summary="recover netdisk quality stats runtime")
+async def admin_recover_netdisk_resource_quality_stats_runtime(session: AsyncSession = Depends(get_session)):
+    if os.getenv("ENABLE_DEV_LOGIN", "false").lower() != "true":
+        return response([], 403, "dev recover disabled")
+    rows = await refresh_netdisk_quality_daily_stats(session)
+    runtime = await ConfigService.get(session, "netdisk_quality_stats_runtime")
+    return response(data={**runtime, "rows": rows}, msg="netdisk quality stats runtime recovered")
 
 
 @router.get("/netdisk/resource-quality/{resource_id}", summary="netdisk resource quality detail")
@@ -1434,7 +1494,10 @@ async def _build_resource_quality_alerts(session: AsyncSession) -> list[dict]:
                 alert_type="high_report",
                 level="danger",
                 message=f"投诉 {item['reports']} 次，达到高投诉阈值",
+                auto_review_pool=thresholds["auto_review_pool"],
             )
+            if alert:
+                await _apply_quality_auto_action(session, item, alert, "high_report", thresholds)
             if alert and alert.status in {"open", "read"}:
                 alerts.append(_quality_alert_to_dict(alert, level="danger"))
         if (
@@ -1447,7 +1510,10 @@ async def _build_resource_quality_alerts(session: AsyncSession) -> list[dict]:
                 alert_type="unlock_report_burst",
                 level="warning",
                 message=f"24小时内解锁 {item['recent_unlocks_24h']} 次且投诉 {item['recent_reports_24h']} 次",
+                auto_review_pool=thresholds["auto_review_pool"],
             )
+            if alert:
+                await _apply_quality_auto_action(session, item, alert, "unlock_report_burst", thresholds)
             if alert and alert.status in {"open", "read"}:
                 alerts.append(_quality_alert_to_dict(alert, level="warning"))
     return alerts[:6]
@@ -1459,6 +1525,7 @@ async def _upsert_quality_alert(
     alert_type: str,
     level: str,
     message: str,
+    auto_review_pool: bool = True,
 ) -> NetdiskQualityAlert | None:
     result = await session.execute(
         select(NetdiskQualityAlert).where(
@@ -1473,7 +1540,7 @@ async def _upsert_quality_alert(
         alert.message = message
         alert.last_triggered_at = now
         alert.updated_at = now
-        if alert.status == "resolved":
+        if auto_review_pool and alert.status == "resolved":
             alert.status = "open"
             alert.handled_at = None
         await session.flush()
@@ -1481,14 +1548,47 @@ async def _upsert_quality_alert(
     alert = NetdiskQualityAlert(
         resource_id=item["resource_id"],
         alert_type=alert_type,
-        status="open",
+        status="open" if auto_review_pool else "ignored",
         title=item["title"],
         message=message,
         last_triggered_at=now,
+        note="" if auto_review_pool else "规则配置关闭自动进入待复核池",
+        handled_at=None if auto_review_pool else now,
     )
     session.add(alert)
     await session.flush()
     return alert
+
+
+async def _apply_quality_auto_action(
+    session: AsyncSession,
+    item: dict,
+    alert: NetdiskQualityAlert,
+    alert_type: str,
+    thresholds: dict,
+) -> None:
+    should_hide = (
+        (alert_type == "high_report" and thresholds["auto_hide_high_report"])
+        or (alert_type == "unlock_report_burst" and thresholds["auto_hide_burst"])
+    )
+    if not should_hide:
+        return
+    resource = await session.get(NetdiskResourceModel, item["resource_id"])
+    if not resource or not resource.is_active:
+        return
+    resource.is_active = False
+    resource.updated_at = datetime.utcnow()
+    note = f"质量规则自动隐藏：{alert.message}"
+    alert.note = _append_note(alert.note, note)
+    await _record_netdisk_audit_log(
+        session,
+        "resource_quality_auto_hide",
+        "netdisk_resource",
+        resource.id,
+        resource.title,
+        note,
+    )
+    await session.flush()
 
 
 async def _list_resource_quality_alerts(session: AsyncSession, resource_id: str) -> list[dict]:
@@ -1605,6 +1705,9 @@ async def _get_resource_quality_thresholds(session: AsyncSession) -> dict:
         "high_unlock_threshold": int(config.get("quality_high_unlock_threshold") or 5),
         "burst_report_threshold": int(config.get("quality_burst_report_threshold") or 1),
         "burst_unlock_threshold": int(config.get("quality_burst_unlock_threshold") or 3),
+        "auto_review_pool": bool(config.get("quality_auto_review_pool", True)),
+        "auto_hide_high_report": bool(config.get("quality_auto_hide_high_report", False)),
+        "auto_hide_burst": bool(config.get("quality_auto_hide_burst", False)),
     }
 
 

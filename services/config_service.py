@@ -140,6 +140,9 @@ DEFAULT_CONFIGS: Dict[str, Dict[str, Any]] = {
         "quality_high_unlock_threshold": 5,
         "quality_burst_report_threshold": 1,
         "quality_burst_unlock_threshold": 3,
+        "quality_auto_review_pool": True,
+        "quality_auto_hide_high_report": False,
+        "quality_auto_hide_burst": False,
         "invalid_penalty_multiplier": 1,
         "auto_hide_on_report": True,
     },
@@ -152,6 +155,9 @@ class ConfigService:
         result = await session.execute(select(SystemConfig).where(SystemConfig.type == config_type))
         config = result.scalar_one_or_none()
         if config and config.config_data:
+            defaults = DEFAULT_CONFIGS.get(config_type)
+            if isinstance(defaults, dict):
+                return {**defaults, **config.config_data}
             return config.config_data
         return DEFAULT_CONFIGS.get(config_type, {})
 
