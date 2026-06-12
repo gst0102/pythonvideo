@@ -12,6 +12,7 @@ from models.commission import CommissionRecord
 from models.order import Order
 from models.user import User
 from services.config_service import ConfigService
+from services.invite_reward_service import InviteRewardService
 from services.points_account_service import PointsAccountService
 
 logger = logging.getLogger(__name__)
@@ -47,9 +48,18 @@ class PaymentService:
         order.updated_at = datetime.utcnow()
         await session.flush()
 
-        await _activate_vip(session, order.user_id, order.period, order.duration_days)
-        await _grant_vip_gift_points(session, order)
-        await _calculate_commission(session, order)
+        if _is_points_recharge_order(order):
+            await _grant_recharge_points(session, order)
+        else:
+            await _activate_vip(session, order.user_id, order.period, order.duration_days)
+            await _grant_vip_gift_points(session, order)
+            await _calculate_commission(session, order)
+
+        await InviteRewardService.grant_first_recharge_reward(
+            session,
+            invitee_id=order.user_id,
+            order_id=str(order.id),
+        )
         return True
 
 
@@ -125,6 +135,39 @@ async def _grant_vip_gift_points(session: AsyncSession, order: Order) -> None:
         related_id=str(order.id),
         remark=f"vip gift points: {order.period}",
     )
+
+
+async def _grant_recharge_points(session: AsyncSession, order: Order) -> None:
+    recharge_points = _points_from_recharge_period(order.period)
+    if recharge_points <= 0:
+        return
+
+    await PointsAccountService.add_points(
+        session=session,
+        user_id=order.user_id,
+        points=recharge_points,
+        source="recharge",
+        change_type="points_recharge",
+        availability="consumable",
+        idempotency_key=f"points_recharge:{order.id}",
+        related_type="order",
+        related_id=str(order.id),
+        remark=f"充值积分到账：{recharge_points}分",
+    )
+
+
+def _is_points_recharge_order(order: Order) -> bool:
+    return str(order.period or "").startswith("points_")
+
+
+def _points_from_recharge_period(period: str) -> int:
+    value = str(period or "").strip().lower()
+    if not value.startswith("points_"):
+        return 0
+    try:
+        return max(int(value.replace("points_", "", 1)), 0)
+    except ValueError:
+        return 0
 
 
 async def _get_vip_package(session: AsyncSession, period: str) -> dict:

@@ -82,6 +82,10 @@ docker-compose.override.yml
 
 .pytest_cache/
 
+# Mini program generated files
+miniprogram-netdisk/node_modules/
+miniprogram-netdisk/dist/
+
 # Temporary files
 *.tmp
 *.temp

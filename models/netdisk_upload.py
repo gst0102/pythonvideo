@@ -2,6 +2,7 @@
 
 import uuid
 from datetime import datetime
+from typing import Optional
 
 from sqlalchemy import BigInteger, Column, ForeignKey, String, Text
 from sqlalchemy.dialects.postgresql import UUID
@@ -23,6 +24,15 @@ class NetdiskUpload(SQLModel, table=True):
             index=True,
         )
     )
+    request_id: Optional[uuid.UUID] = Field(
+        default=None,
+        sa_column=Column(
+            UUID(as_uuid=True),
+            ForeignKey("netdisk_requests.id", ondelete="SET NULL"),
+            nullable=True,
+            index=True,
+        ),
+    )
     title: str = Field(sa_column=Column(String(120), nullable=False, index=True))
     category: str = Field(sa_column=Column(String(64), nullable=False, index=True))
     pan: str = Field(sa_column=Column(String(32), nullable=False, index=True))
@@ -32,6 +42,9 @@ class NetdiskUpload(SQLModel, table=True):
     description: str = Field(default="", sa_column=Column(Text, nullable=False, server_default=""))
     status: str = Field(default="pending", sa_column=Column(String(32), nullable=False, server_default="pending", index=True))
     reward_points: int = Field(default=5, sa_column=Column(BigInteger, nullable=False, server_default="5"))
+    reward_released_points: int = Field(default=0, sa_column=Column(BigInteger, nullable=False, server_default="0"))
+    valid_days_rewarded: int = Field(default=0, sa_column=Column(BigInteger, nullable=False, server_default="0"))
+    accepted_at: Optional[datetime] = Field(default=None, sa_column=Column(DateTime(timezone=True), nullable=True))
     audit_note: str = Field(default="系统正在校验链接有效性和内容匹配度。", sa_column=Column(Text, nullable=False))
     created_at: datetime = Field(
         default_factory=datetime.utcnow,

@@ -320,6 +320,171 @@ class PointsAccountService:
         return ledger, account, True
 
     @staticmethod
+    async def freeze_consumable_points(
+        session: AsyncSession,
+        user_id: UUID,
+        points: int,
+        idempotency_key: str,
+        related_type: str,
+        related_id: str,
+        remark: str | None = None,
+        *,
+        source: str = "netdisk_request",
+        change_type: str = "request_bounty_freeze",
+    ) -> Tuple[PointsLedger, UserAccount, bool]:
+        existing = await PointsAccountService.get_ledger_by_idempotency_key(session, idempotency_key)
+        account, _ = await PointsAccountService.ensure_user_account(session, user_id)
+        if existing:
+            return existing, account, False
+
+        delta = int(points)
+        if delta <= 0:
+            raise ValueError("points must be positive")
+        if int(account.consumable_points) < delta:
+            raise ValueError("insufficient consumable points")
+
+        account.consumable_points -= delta
+        account.frozen_points += delta
+        account.updated_at = datetime.utcnow()
+
+        ledger = PointsLedger(
+            user_id=user_id,
+            account_id=account.id,
+            change_type=change_type,
+            source=source,
+            availability="consumable",
+            points_delta=-delta,
+            balance_withdrawable_after=int(account.withdrawable_points),
+            balance_frozen_after=int(account.frozen_points),
+            balance_consumable_after=int(account.consumable_points),
+            related_type=related_type,
+            related_id=related_id,
+            idempotency_key=idempotency_key,
+            remark=remark,
+        )
+        session.add(ledger)
+        await session.flush()
+        return ledger, account, True
+
+    @staticmethod
+    async def return_frozen_to_consumable(
+        session: AsyncSession,
+        user_id: UUID,
+        points: int,
+        idempotency_key: str,
+        related_type: str,
+        related_id: str,
+        remark: str | None = None,
+        *,
+        source: str = "netdisk_request",
+        change_type: str = "request_bounty_return",
+    ) -> Tuple[PointsLedger, UserAccount, bool]:
+        existing = await PointsAccountService.get_ledger_by_idempotency_key(session, idempotency_key)
+        account, _ = await PointsAccountService.ensure_user_account(session, user_id)
+        if existing:
+            return existing, account, False
+
+        delta = int(points)
+        if delta <= 0:
+            raise ValueError("points must be positive")
+        if int(account.frozen_points) < delta:
+            raise ValueError("insufficient frozen points")
+
+        account.frozen_points -= delta
+        account.consumable_points += delta
+        account.updated_at = datetime.utcnow()
+
+        ledger = PointsLedger(
+            user_id=user_id,
+            account_id=account.id,
+            change_type=change_type,
+            source=source,
+            availability="consumable",
+            points_delta=delta,
+            balance_withdrawable_after=int(account.withdrawable_points),
+            balance_frozen_after=int(account.frozen_points),
+            balance_consumable_after=int(account.consumable_points),
+            related_type=related_type,
+            related_id=related_id,
+            idempotency_key=idempotency_key,
+            remark=remark,
+        )
+        session.add(ledger)
+        await session.flush()
+        return ledger, account, True
+
+    @staticmethod
+    async def award_frozen_bounty_to_user(
+        session: AsyncSession,
+        payer_user_id: UUID,
+        receiver_user_id: UUID,
+        points: int,
+        idempotency_key: str,
+        related_type: str,
+        related_id: str,
+        remark: str | None = None,
+    ) -> Tuple[PointsLedger, PointsLedger, bool]:
+        existing = await PointsAccountService.get_ledger_by_idempotency_key(
+            session,
+            f"{idempotency_key}:receiver",
+        )
+        if existing:
+            payer_account, _ = await PointsAccountService.ensure_user_account(session, payer_user_id)
+            return existing, existing, False
+
+        delta = int(points)
+        if delta <= 0:
+            raise ValueError("points must be positive")
+
+        payer_account, _ = await PointsAccountService.ensure_user_account(session, payer_user_id)
+        receiver_account, _ = await PointsAccountService.ensure_user_account(session, receiver_user_id)
+        if int(payer_account.frozen_points) < delta:
+            raise ValueError("insufficient frozen points")
+
+        payer_account.total_points -= delta
+        payer_account.frozen_points -= delta
+        payer_account.updated_at = datetime.utcnow()
+
+        receiver_account.total_points += delta
+        receiver_account.consumable_points += delta
+        receiver_account.updated_at = datetime.utcnow()
+
+        payer_ledger = PointsLedger(
+            user_id=payer_user_id,
+            account_id=payer_account.id,
+            change_type="request_bounty_award",
+            source="netdisk_request",
+            availability="frozen",
+            points_delta=-delta,
+            balance_withdrawable_after=int(payer_account.withdrawable_points),
+            balance_frozen_after=int(payer_account.frozen_points),
+            balance_consumable_after=int(payer_account.consumable_points),
+            related_type=related_type,
+            related_id=related_id,
+            idempotency_key=f"{idempotency_key}:payer",
+            remark=remark or "悬赏采纳发放",
+        )
+        receiver_ledger = PointsLedger(
+            user_id=receiver_user_id,
+            account_id=receiver_account.id,
+            change_type="request_bounty_award",
+            source="netdisk_request",
+            availability="consumable",
+            points_delta=delta,
+            balance_withdrawable_after=int(receiver_account.withdrawable_points),
+            balance_frozen_after=int(receiver_account.frozen_points),
+            balance_consumable_after=int(receiver_account.consumable_points),
+            related_type=related_type,
+            related_id=related_id,
+            idempotency_key=f"{idempotency_key}:receiver",
+            remark=remark or "悬赏采纳到账",
+        )
+        session.add(payer_ledger)
+        session.add(receiver_ledger)
+        await session.flush()
+        return payer_ledger, receiver_ledger, True
+
+    @staticmethod
     async def deduct_frozen_points(
         session: AsyncSession,
         user_id: UUID,
@@ -448,6 +613,88 @@ class PointsAccountService:
             source=source,
             availability="consumable",
             points_delta=-delta,
+            balance_withdrawable_after=int(account.withdrawable_points),
+            balance_frozen_after=int(account.frozen_points),
+            balance_consumable_after=int(account.consumable_points),
+            related_type=related_type,
+            related_id=related_id,
+            idempotency_key=idempotency_key,
+            remark=remark,
+        )
+        session.add(ledger)
+        await session.flush()
+        return ledger, account, True
+
+    @staticmethod
+    async def consume_consumable_points_allow_negative(
+        session: AsyncSession,
+        user_id: UUID,
+        points: int,
+        idempotency_key: str,
+        related_type: str,
+        related_id: str,
+        remark: str | None = None,
+        *,
+        source: str = "netdisk",
+        change_type: str = "invalid_penalty",
+    ) -> Tuple[PointsLedger, UserAccount, bool]:
+        existing = await PointsAccountService.get_ledger_by_idempotency_key(session, idempotency_key)
+        account, _ = await PointsAccountService.ensure_user_account(session, user_id)
+        if existing:
+            return existing, account, False
+
+        delta = int(points)
+        if delta <= 0:
+            raise ValueError("points must be positive")
+
+        account.consumable_points -= delta
+        account.consumed_points += delta
+        account.updated_at = datetime.utcnow()
+
+        ledger = PointsLedger(
+            user_id=user_id,
+            account_id=account.id,
+            change_type=change_type,
+            source=source,
+            availability="consumable",
+            points_delta=-delta,
+            balance_withdrawable_after=int(account.withdrawable_points),
+            balance_frozen_after=int(account.frozen_points),
+            balance_consumable_after=int(account.consumable_points),
+            related_type=related_type,
+            related_id=related_id,
+            idempotency_key=idempotency_key,
+            remark=remark,
+        )
+        session.add(ledger)
+        await session.flush()
+        return ledger, account, True
+
+    @staticmethod
+    async def record_neutral_event(
+        session: AsyncSession,
+        user_id: UUID,
+        idempotency_key: str,
+        related_type: str,
+        related_id: str,
+        remark: str | None = None,
+        *,
+        source: str = "netdisk",
+        change_type: str = "platform_recovery",
+        availability: str = "platform",
+    ) -> Tuple[PointsLedger, UserAccount, bool]:
+        existing = await PointsAccountService.get_ledger_by_idempotency_key(session, idempotency_key)
+        account, _ = await PointsAccountService.ensure_user_account(session, user_id)
+        if existing:
+            return existing, account, False
+
+        ledger = PointsLedger(
+            user_id=user_id,
+            account_id=account.id,
+            change_type=change_type,
+            source=source,
+            availability=availability,
+            points_delta=0,
             balance_withdrawable_after=int(account.withdrawable_points),
             balance_frozen_after=int(account.frozen_points),
             balance_consumable_after=int(account.consumable_points),

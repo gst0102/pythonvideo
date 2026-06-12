@@ -82,6 +82,7 @@ async def lifespan(app: FastAPI):
     try:
         from apscheduler.schedulers.asyncio import AsyncIOScheduler
         from services.netdisk_quality_stat_service import QUALITY_STATS_ENABLED, refresh_netdisk_quality_daily_stats
+        from services.netdisk_resource_service import NetdiskResourceService
 
         if QUALITY_STATS_ENABLED:
             quality_scheduler = AsyncIOScheduler(timezone=os.getenv("TZ", "Asia/Shanghai"))
@@ -99,6 +100,25 @@ async def lifespan(app: FastAPI):
                 hour=int(os.getenv("NETDISK_QUALITY_STATS_CRON_HOUR", "3")),
                 minute=int(os.getenv("NETDISK_QUALITY_STATS_CRON_MINUTE", "20")),
                 id="netdisk_quality_daily_stats",
+                replace_existing=True,
+            )
+
+            async def release_valid_7d_rewards_job():
+                from models.base import get_session_ctx
+
+                async with get_session_ctx() as session:
+                    result = await NetdiskResourceService.release_valid_7d_upload_rewards(session)
+                    print(
+                        "✅ 网盘上传7天有效奖励已释放："
+                        f"{result.get('released_count', 0)} 条，{result.get('released_points', 0)} 分"
+                    )
+
+            quality_scheduler.add_job(
+                release_valid_7d_rewards_job,
+                "cron",
+                hour=int(os.getenv("NETDISK_VALID_REWARD_CRON_HOUR", "3")),
+                minute=int(os.getenv("NETDISK_VALID_REWARD_CRON_MINUTE", "35")),
+                id="netdisk_valid_7d_upload_rewards",
                 replace_existing=True,
             )
             quality_scheduler.start()

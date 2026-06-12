@@ -19,8 +19,10 @@ from schemas.netdisk import (
     NetdiskRepairListResponse,
     NetdiskRepairResponse,
     NetdiskRequestCreate,
+    NetdiskRequestExpireResponse,
     NetdiskRequestListResponse,
     NetdiskRequestResponse,
+    NetdiskRequestSubmissionsResponse,
     NetdiskResourceAccessResponse,
     NetdiskResourceDetailResponse,
     NetdiskResourceListResponse,
@@ -111,6 +113,97 @@ async def create_netdisk_request(
     return response(data=NetdiskRequestResponse(**result).model_dump(mode="json"), msg="request created")
 
 
+@router.get("/requests/{request_id}/submissions", summary="list netdisk request submissions")
+async def list_netdisk_request_submissions(
+    request_id: str,
+    openid: str = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    user = await _get_user_by_openid(session, openid)
+    if not user:
+        return response([], 404, "user not found")
+
+    try:
+        result = await NetdiskResourceService.list_request_submissions(session, user, request_id)
+    except ValueError as exc:
+        return response([], 400, str(exc))
+
+    return response(data=NetdiskRequestSubmissionsResponse(**result).model_dump(mode="json"))
+
+
+@router.post("/requests/{request_id}/submissions", summary="submit resource to netdisk request")
+async def submit_netdisk_request_resource(
+    request_id: str,
+    payload: NetdiskUploadCreate,
+    openid: str = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    user = await _get_user_by_openid(session, openid)
+    if not user:
+        return response([], 404, "user not found")
+
+    try:
+        result = await NetdiskResourceService.create_upload(
+            session=session,
+            user=user,
+            title=payload.title,
+            category=payload.category,
+            pan=payload.pan,
+            link=payload.link,
+            extract_code=payload.extract_code,
+            unzip_code=payload.unzip_code,
+            description=payload.description,
+            request_id=request_id,
+        )
+    except ValueError as exc:
+        return response([], 400, str(exc))
+
+    return response(data=NetdiskUploadResponse(**result).model_dump(mode="json"), msg="submission created")
+
+
+@router.post("/requests/{request_id}/submissions/{upload_id}/accept", summary="accept netdisk request submission")
+async def accept_netdisk_request_submission(
+    request_id: str,
+    upload_id: str,
+    openid: str = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    user = await _get_user_by_openid(session, openid)
+    if not user:
+        return response([], 404, "user not found")
+
+    try:
+        result = await NetdiskResourceService.accept_request_submission(session, user, request_id, upload_id)
+    except ValueError as exc:
+        return response([], 400, str(exc))
+
+    return response(data=NetdiskRequestResponse(**result).model_dump(mode="json"), msg="submission accepted")
+
+
+@router.post("/requests/{request_id}/cancel", summary="cancel netdisk request and return bounty")
+async def cancel_netdisk_request(
+    request_id: str,
+    openid: str = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    user = await _get_user_by_openid(session, openid)
+    if not user:
+        return response([], 404, "user not found")
+
+    try:
+        result = await NetdiskResourceService.cancel_request(session, user, request_id)
+    except ValueError as exc:
+        return response([], 400, str(exc))
+
+    return response(data=NetdiskRequestResponse(**result).model_dump(mode="json"), msg="request canceled")
+
+
+@router.post("/requests/expire", summary="expire netdisk requests and return bounty")
+async def expire_netdisk_requests(session: AsyncSession = Depends(get_session)):
+    result = await NetdiskResourceService.expire_requests(session)
+    return response(data=NetdiskRequestExpireResponse(**result).model_dump(mode="json"))
+
+
 @router.get("/uploads/mine", summary="list current user's netdisk uploads")
 async def list_my_netdisk_uploads(
     openid: str = Depends(get_current_user),
@@ -145,6 +238,7 @@ async def create_netdisk_upload(
             extract_code=payload.extract_code,
             unzip_code=payload.unzip_code,
             description=payload.description,
+            request_id=payload.request_id,
         )
     except ValueError as exc:
         return response([], 400, str(exc))

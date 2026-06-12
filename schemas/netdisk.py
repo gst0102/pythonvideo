@@ -19,6 +19,14 @@ class NetdiskResourceSummary(BaseModel):
     favorites: int
     description: str
     is_active: bool = True
+    quality_score: int = 0
+    uploader_credit_level: str = "normal"
+    uploader_credit_score: int = 100
+    uploader_nickname: str = "官方整理"
+    uploader_avatar: str = ""
+    valid_days: int = 0
+    report_count: int = 0
+    invalid_count: int = 0
 
 
 class NetdiskResourceListResponse(BaseModel):
@@ -58,11 +66,20 @@ class NetdiskInviteRewardSummary(BaseModel):
     inviter_consumable_points: int
 
 
+class NetdiskCreatorRewardSummary(BaseModel):
+    created: bool = False
+    ledger_id: str = ""
+    points_delta: int = 0
+    creator_consumable_points: int = 0
+
+
 class NetdiskResourceUnlockResponse(BaseModel):
     resource: NetdiskResourceSummary
     unlock: NetdiskUnlockData
     account: CheckinAccountSummary
     invite_reward: NetdiskInviteRewardSummary | None = None
+    creator_reward: NetdiskCreatorRewardSummary | None = None
+    platform_recovered_points: int = 0
 
 
 class NetdiskResourceAccessResponse(BaseModel):
@@ -108,10 +125,16 @@ class NetdiskRequestItem(BaseModel):
     bounty_points: int
     note: str = ""
     status: str
+    bounty_status: str = "frozen"
+    accepted_upload_id: str | None = None
     submissions_count: int
     deadline_text: str
+    expires_at: datetime | None = None
+    accepted_at: datetime | None = None
+    closed_at: datetime | None = None
     created_at: datetime
     mine: bool = False
+    can_submit: bool = True
 
 
 class NetdiskRequestListResponse(BaseModel):
@@ -123,6 +146,7 @@ class NetdiskRequestResponse(BaseModel):
 
 
 class NetdiskUploadCreate(BaseModel):
+    request_id: str | None = None
     title: str
     category: str
     pan: str
@@ -134,11 +158,15 @@ class NetdiskUploadCreate(BaseModel):
 
 class NetdiskUploadItem(BaseModel):
     id: str
+    request_id: str | None = None
     title: str
     category: str
     pan: str
     status: str
+    accepted_at: datetime | None = None
     reward_points: int
+    reward_released_points: int = 0
+    valid_days_rewarded: int = 0
     audit_note: str
     created_at: datetime
 
@@ -149,6 +177,15 @@ class NetdiskUploadListResponse(BaseModel):
 
 class NetdiskUploadResponse(BaseModel):
     upload: NetdiskUploadItem
+
+
+class NetdiskRequestSubmissionsResponse(BaseModel):
+    submissions: list[NetdiskUploadItem]
+
+
+class NetdiskRequestExpireResponse(BaseModel):
+    expired_count: int
+    returned_points: int
 
 
 class NetdiskRepairCreate(BaseModel):

@@ -43,13 +43,12 @@ def upgrade() -> None:
     op.create_index("ix_netdisk_risk_records_status", "netdisk_risk_records", ["status"])
     op.create_index("ix_netdisk_risk_records_created_at", "netdisk_risk_records", ["created_at"])
 
-    op.execute(
+    op.get_bind().exec_driver_sql(
         """
-        INSERT INTO system_configs (type, config_data, created_at, updated_at)
+        INSERT INTO system_configs (type, config_data, updated_at)
         VALUES (
             'netdisk_audit_config',
             '{"upload_reward_points":5,"repair_reward_points":5,"report_hide_threshold":3,"invalid_penalty_multiplier":1,"auto_hide_on_report":true}'::jsonb,
-            now(),
             now()
         )
         ON CONFLICT (type) DO NOTHING;

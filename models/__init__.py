@@ -32,6 +32,7 @@ from models.user_subscription import UserSubscription
 from models.ad_reward import AdRewardRecord
 from models.ad_event import AdEventRecord
 from models.user_account import UserAccount
+from models.user_quality_profile import UserQualityProfile
 from models.points_ledger import PointsLedger
 from models.checkin_record import CheckinRecord
 from models.game_round import GameRound
@@ -63,6 +64,7 @@ __all__ = [
     "AdRewardRecord",
     "AdEventRecord",
     "UserAccount",
+    "UserQualityProfile",
     "PointsLedger",
     "CheckinRecord",
     "GameRound",

@@ -33,6 +33,11 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/vip", tags=["VIP"])
 
 PERIOD_DAYS = {"month": 30, "quarter": 90, "year": 365}
+POINT_RECHARGE_PACKAGES = [
+    {"id": "points_100", "title": "100积分", "points": 100, "price": 10.0, "desc": "适合轻度解锁资源"},
+    {"id": "points_300", "title": "300积分", "points": 300, "price": 30.0, "desc": "适合持续找资源"},
+    {"id": "points_680", "title": "680积分", "points": 680, "price": 68.0, "desc": "适合高频资源需求"},
+]
 
 
 @router.get("/packages", summary="get vip packages")
@@ -64,15 +69,102 @@ async def get_status(
     )
 
 
+@router.get("/points-packages", summary="get points recharge packages")
+async def get_points_packages():
+    return response(data={"packages": POINT_RECHARGE_PACKAGES})
+
+
+@router.post("/points-order", summary="create points virtual payment order")
+async def create_points_order(
+    req: CreateOrderRequest,
+    claims: dict = Depends(get_current_claims),
+    session: AsyncSession = Depends(get_session),
+):
+    user = await _get_user_by_claims(session, claims)
+    if not user:
+        return response([], 404, "user not found")
+
+    package = next((item for item in POINT_RECHARGE_PACKAGES if item.get("id") == req.package_id), None)
+    if not package:
+        return response([], 400, "package not found")
+
+    config = await ConfigService.get_vip_packages(session)
+    virtual_config, config_error = _resolve_virtual_pay_config(config)
+    if config_error:
+        return config_error
+
+    price = float(package["price"])
+    points = int(package["points"])
+    out_trade_no = _generate_out_trade_no()
+    order = Order(
+        user_id=user.id,
+        amount=price,
+        period=str(package["id"]),
+        duration_days=0,
+        description=f"充值积分 {points}分",
+        out_trade_no=out_trade_no,
+        status="pending",
+    )
+    session.add(order)
+    await session.flush()
+
+    pay_params = _build_virtual_pay_params(
+        virtual_config,
+        claims=claims,
+        order=order,
+        package_id=str(package["id"]),
+        product_id=str(package.get("product_id") or package["id"]),
+        price=price,
+    )
+    return response(
+        data={
+            "order_id": str(order.id),
+            "out_trade_no": out_trade_no,
+            "status": order.status,
+            "points": points,
+            "pay_params": pay_params,
+        },
+        msg="order created",
+    )
+
+
+@router.get("/orders/{out_trade_no}", summary="get virtual payment order status")
+async def get_order_status(
+    out_trade_no: str,
+    claims: dict = Depends(get_current_claims),
+    session: AsyncSession = Depends(get_session),
+):
+    user = await _get_user_by_claims(session, claims)
+    if not user:
+        return response([], 404, "user not found")
+
+    result = await session.execute(
+        select(Order).where(Order.out_trade_no == out_trade_no, Order.user_id == user.id)
+    )
+    order = result.scalar_one_or_none()
+    if not order:
+        return response([], 404, "order not found")
+
+    return response(
+        data={
+            "order_id": str(order.id),
+            "out_trade_no": order.out_trade_no,
+            "status": order.status,
+            "amount": float(order.amount),
+            "description": order.description,
+            "period": order.period,
+            "paid_at": order.paid_at.isoformat() if order.paid_at else None,
+        }
+    )
+
+
 @router.post("/order", summary="create vip virtual payment order")
 async def create_order(
     req: CreateOrderRequest,
     claims: dict = Depends(get_current_claims),
     session: AsyncSession = Depends(get_session),
 ):
-    openid = claims["openid"]
-    result = await session.execute(select(User).where(User.openid == openid))
-    user = result.scalar_one_or_none()
+    user = await _get_user_by_claims(session, claims)
     if not user:
         return response([], 404, "user not found")
 
@@ -82,16 +174,9 @@ async def create_order(
     if not package:
         return response([], 400, "package not found")
 
-    env_virtual_config = get_virtual_pay_config()
-    virtual_config = _build_runtime_virtual_config(config, env_virtual_config)
-    notify_token = _get_virtual_pay_notify_token()
-
-    if not virtual_config.app_id or not virtual_config.offer_id:
-        return response([], 500, "virtual pay AppID or OfferId is not configured")
-    if not virtual_config.app_key:
-        return response([], 500, "virtual pay AppKey is not configured")
-    if not notify_token:
-        return response([], 500, "VIRTUAL_PAY_NOTIFY_TOKEN is not configured")
+    virtual_config, config_error = _resolve_virtual_pay_config(config)
+    if config_error:
+        return config_error
 
     price = float(package["price"])
     period = str(package["id"])
@@ -111,34 +196,15 @@ async def create_order(
     session.add(order)
     await session.flush()
 
-    attach = json.dumps(
-        {"order_id": str(order.id), "user_id": str(user.id), "package_id": period},
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
-    goods_price = int(Decimal(str(price)) * 100)
     product_id = package.get("product_id") or package.get("productId") or period
-    sign_data = build_sign_data(
+    pay_params = _build_virtual_pay_params(
         virtual_config,
-        out_trade_no=out_trade_no,
-        attach=attach,
-        buy_quantity=1,
-        product_id=product_id,
-        goods_price=goods_price,
+        claims=claims,
+        order=order,
+        package_id=period,
+        product_id=str(product_id),
+        price=price,
     )
-    sign_data_json = dumps_sign_data(sign_data)
-    pay_params = {
-        "mode": virtual_config.mode,
-        "signData": sign_data_json,
-        "paySig": create_pay_sig(sign_data_json, virtual_config.app_key),
-        "signature": create_user_signature(
-            sign_data_json,
-            str(claims.get("session_key") or ""),
-            virtual_config.app_key,
-        ),
-        "out_trade_no": out_trade_no,
-        "attach": attach,
-    }
     return response(
         data={"order_id": str(order.id), "out_trade_no": out_trade_no, "pay_params": pay_params},
         msg="order created",
@@ -189,6 +255,64 @@ async def virtual_pay_notify(
 
 def _generate_out_trade_no() -> str:
     return f"{int(time.time())}{''.join(random.choices(string.digits, k=8))}"
+
+
+async def _get_user_by_claims(session: AsyncSession, claims: dict) -> User | None:
+    openid = claims["openid"]
+    result = await session.execute(select(User).where(User.openid == openid))
+    return result.scalar_one_or_none()
+
+
+def _resolve_virtual_pay_config(config: dict):
+    env_virtual_config = get_virtual_pay_config()
+    virtual_config = _build_runtime_virtual_config(config, env_virtual_config)
+    notify_token = _get_virtual_pay_notify_token()
+
+    if not virtual_config.app_id or not virtual_config.offer_id:
+        return None, response([], 503, "充值支付暂未开通，请稍后再试")
+    if not virtual_config.app_key:
+        return None, response([], 503, "充值支付暂未开通，请稍后再试")
+    if not notify_token:
+        return None, response([], 503, "充值支付暂未开通，请稍后再试")
+    return virtual_config, None
+
+
+def _build_virtual_pay_params(
+    virtual_config: VirtualPayConfig,
+    *,
+    claims: dict,
+    order: Order,
+    package_id: str,
+    product_id: str,
+    price: float,
+) -> dict:
+    attach = json.dumps(
+        {"order_id": str(order.id), "user_id": str(order.user_id), "package_id": package_id},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    goods_price = int(Decimal(str(price)) * 100)
+    sign_data = build_sign_data(
+        virtual_config,
+        out_trade_no=order.out_trade_no,
+        attach=attach,
+        buy_quantity=1,
+        product_id=product_id,
+        goods_price=goods_price,
+    )
+    sign_data_json = dumps_sign_data(sign_data)
+    return {
+        "mode": virtual_config.mode,
+        "signData": sign_data_json,
+        "paySig": create_pay_sig(sign_data_json, virtual_config.app_key),
+        "signature": create_user_signature(
+            sign_data_json,
+            str(claims.get("session_key") or ""),
+            virtual_config.app_key,
+        ),
+        "out_trade_no": order.out_trade_no,
+        "attach": attach,
+    }
 
 
 def _verify_notify_signature(sig: str, timestamp: str, nonce: str, body: str) -> bool:

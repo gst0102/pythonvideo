@@ -59,6 +59,11 @@ class UserProfile(BaseModel):
     team_count: int
     created_at: Optional[datetime] = None
     account: CheckinAccountSummary = Field(default_factory=CheckinAccountSummary)
+    credit_score: int = 100
+    contribution_score: int = 0
+    credit_level: str = "normal"
+    risk_level: str = "normal"
+    credit_restore_tip: str = "保持上传资源有效、及时补链、资源满7天有效可恢复信用。"
 
 
 class UserLoginResponse(BaseModel):

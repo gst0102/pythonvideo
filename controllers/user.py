@@ -19,6 +19,7 @@ from models.ad_reward import AdRewardRecord
 from models.base import get_session
 from models.user import User
 from models.user_account import UserAccount
+from models.user_quality_profile import UserQualityProfile
 from schemas.checkin import CheckinAccountSummary
 from schemas.user import (
     AdRewardGrantRequest,
@@ -59,7 +60,20 @@ async def login(req: UserLoginRequest, session: AsyncSession = Depends(get_sessi
     )
 
     account, _ = await PointsAccountService.ensure_user_account(session, user.id)
-    profile = _build_profile(user, account)
+    if is_new:
+        _, account, _ = await PointsAccountService.add_points(
+            session=session,
+            user_id=user.id,
+            points=100,
+            source="signup",
+            change_type="signup_seed_points",
+            availability="consumable",
+            idempotency_key=f"signup_seed_points:{user.id}",
+            related_type="user",
+            related_id=str(user.id),
+            remark="新用户注册赠送100积分",
+        )
+    profile = await _build_profile(session, user, account)
     return response(
         data=UserLoginResponse(
             token=token,
@@ -103,7 +117,7 @@ async def dev_login(req: DevLoginRequest, session: AsyncSession = Depends(get_se
         data=UserLoginResponse(
             token=token,
             is_new_user=is_new,
-            user=_build_profile(user, account),
+            user=await _build_profile(session, user, account),
         ).model_dump(mode="json"),
         msg="本地开发登录成功",
     )
@@ -120,7 +134,7 @@ async def get_profile(
         return response([], 404, "user not found")
 
     account, _ = await PointsAccountService.ensure_user_account(session, user.id)
-    return response(data=_build_profile(user, account).model_dump(mode="json"))
+    return response(data=(await _build_profile(session, user, account)).model_dump(mode="json"))
 
 
 @router.put("/profile", summary="更新用户信息")
@@ -141,7 +155,7 @@ async def update_profile(
 
     await session.flush()
     account, _ = await PointsAccountService.ensure_user_account(session, user.id)
-    return response(data=_build_profile(user, account).model_dump(mode="json"), msg="更新成功")
+    return response(data=(await _build_profile(session, user, account)).model_dump(mode="json"), msg="更新成功")
 
 
 @router.post("/ad-reward", summary="发放小游戏激励广告奖励")
@@ -239,7 +253,8 @@ async def upload_image(file: UploadFile):
     return await _handle_upload(file)
 
 
-def _build_profile(user: User, account: UserAccount) -> UserProfile:
+async def _build_profile(session: AsyncSession, user: User, account: UserAccount) -> UserProfile:
+    quality_profile = await _get_or_create_quality_profile(session, user)
     return UserProfile(
         id=str(user.id),
         openid=user.openid,
@@ -261,7 +276,42 @@ def _build_profile(user: User, account: UserAccount) -> UserProfile:
             frozen_points=int(account.frozen_points),
             consumable_points=int(account.consumable_points),
         ),
+        credit_score=int(quality_profile.credit_score),
+        contribution_score=int(quality_profile.contribution_score),
+        credit_level=_credit_level(int(quality_profile.credit_score)),
+        risk_level=quality_profile.risk_level,
+        credit_restore_tip=_credit_restore_tip(quality_profile),
     )
+
+
+async def _get_or_create_quality_profile(session: AsyncSession, user: User) -> UserQualityProfile:
+    result = await session.execute(select(UserQualityProfile).where(UserQualityProfile.user_id == user.id))
+    profile = result.scalar_one_or_none()
+    if profile:
+        return profile
+    profile = UserQualityProfile(user_id=user.id)
+    session.add(profile)
+    await session.flush()
+    return profile
+
+
+def _credit_level(score: int) -> str:
+    if score >= 105:
+        return "excellent"
+    if score >= 90:
+        return "good"
+    if score >= 70:
+        return "normal"
+    return "watch"
+
+
+def _credit_restore_tip(profile: UserQualityProfile) -> str:
+    score = int(profile.credit_score)
+    if score >= 100:
+        return "保持资源有效、及时补链，信用会继续稳定提升。"
+    if profile.risk_level == "high":
+        return "先处理失效资源和负积分；后续上传有效资源、补链通过、资源满7天有效可逐步恢复。"
+    return "上传审核通过、补链成功、资源持续有效满7天，都可以逐步恢复信用。"
 
 
 async def _handle_upload(file: UploadFile):

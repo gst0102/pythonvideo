@@ -8,6 +8,7 @@ from typing import Literal
 from uuid import UUID
 
 from sqlalchemy import and_, func, or_
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
@@ -20,6 +21,7 @@ from models.netdisk_upload import NetdiskUpload
 from models.netdisk_user_notification import NetdiskUserNotification
 from models.points_ledger import PointsLedger
 from models.user import User
+from models.user_quality_profile import UserQualityProfile
 from models.user_account import UserAccount
 from services.invite_reward_service import InviteRewardService
 from services.config_service import ConfigService
@@ -155,6 +157,7 @@ class NetdiskResourceService:
             .limit(current_page_size)
         )
         page_items = result.scalars().all()
+        await _attach_resource_quality_labels(session, page_items)
         return {
             "resources": [_build_resource_payload(resource) for resource in page_items],
             "total": total,
@@ -167,6 +170,7 @@ class NetdiskResourceService:
     async def get_resource_detail(session: AsyncSession, resource_id: str) -> dict:
         await _ensure_seed_resources(session)
         resource = await _get_resource_or_raise(session, resource_id)
+        await _attach_resource_quality_labels(session, [resource])
         return _build_resource_payload(resource)
 
     @staticmethod
@@ -177,6 +181,7 @@ class NetdiskResourceService:
     ) -> dict:
         await _ensure_seed_resources(session)
         resource = await _get_resource_or_raise(session, resource_id)
+        await _attach_resource_quality_labels(session, [resource])
 
         account, _ = await PointsAccountService.ensure_user_account(session, user.id)
         ledger = await _get_unlock_ledger(session, user.id, resource.id)
@@ -192,6 +197,7 @@ class NetdiskResourceService:
     ) -> tuple[dict, bool]:
         await _ensure_seed_resources(session)
         resource = await _get_resource_or_raise(session, resource_id)
+        await _attach_resource_quality_labels(session, [resource])
 
         ledger, account, unlocked_now = await PointsAccountService.consume_consumable_points(
             session=session,
@@ -206,16 +212,25 @@ class NetdiskResourceService:
         )
 
         invite_reward = None
+        creator_reward = None
+        platform_recovered_points = 0
         if unlocked_now:
+            resource.downloads = int(resource.downloads) + 1
             reward_ledger, reward_account, reward_created = await InviteRewardService.grant_first_resource_reward(
                 session=session,
                 invitee_id=user.id,
                 resource_id=resource.id,
             )
             invite_reward = _build_invite_reward_payload(reward_ledger, reward_account, reward_created)
+            creator_reward, platform_recovered_points = await _grant_creator_share_for_unlock(
+                session=session,
+                resource=resource,
+                unlock_user=user,
+            )
+            resource.quality_score = await _calculate_resource_quality_score_with_profile(session, resource)
 
         await session.flush()
-        return _build_unlock_payload(resource, ledger, account, invite_reward), unlocked_now
+        return _build_unlock_payload(resource, ledger, account, invite_reward, creator_reward, platform_recovered_points), unlocked_now
 
     @staticmethod
     async def list_favorites(
@@ -229,6 +244,7 @@ class NetdiskResourceService:
         )
         favorites = result.scalars().all()
         resource_map = await _get_resource_map(session, [favorite.resource_id for favorite in favorites])
+        await _attach_resource_quality_labels(session, list(resource_map.values()))
         return {
             "favorites": [
                 _build_favorite_payload(favorite, resource_map[favorite.resource_id])
@@ -305,27 +321,137 @@ class NetdiskResourceService:
         clean_pans = [item.strip() for item in pans if item and item.strip()]
         clean_category = (category or "").strip()
         clean_note = (note or "").strip()
+        bounty = max(5, min(50, int(bounty_points or 5)))
         if not clean_title:
-            raise ValueError("title is required")
+            raise ValueError("请填写需求标题")
         if not clean_pans:
-            raise ValueError("pans is required")
+            raise ValueError("请选择期望网盘")
         if not clean_category:
-            raise ValueError("category is required")
+            raise ValueError("请选择内容分类")
+        await _ensure_user_not_negative(session, user, "当前积分为负，暂不能发布悬赏")
+        account, _ = await PointsAccountService.ensure_user_account(session, user.id)
+        if int(account.consumable_points) < bounty:
+            raise ValueError("可用积分不足，无法发布悬赏")
 
         item = NetdiskRequest(
             user_id=user.id,
             title=clean_title[:120],
             pans=" / ".join(clean_pans[:4]),
             category=clean_category[:64],
-            bounty_points=max(5, min(50, int(bounty_points or 5))),
+            bounty_points=bounty,
             note=clean_note[:500],
             status="open",
+            bounty_status="frozen",
             deadline_text="3天后",
+            expires_at=datetime.utcnow() + timedelta(days=3),
         )
         session.add(item)
         await session.flush()
+        await PointsAccountService.freeze_consumable_points(
+            session=session,
+            user_id=user.id,
+            points=bounty,
+            idempotency_key=f"request_bounty_freeze:{item.id}",
+            related_type="netdisk_request",
+            related_id=str(item.id),
+            remark=f"发布求资源悬赏冻结：{item.title}",
+        )
         await session.refresh(item)
         return {"request": _build_request_payload(item, user.id)}
+
+    @staticmethod
+    async def list_request_submissions(session: AsyncSession, user: User, request_id: str) -> dict:
+        request = await _get_request_by_id(session, request_id)
+        if not request:
+            raise ValueError("悬赏不存在")
+        if request.user_id == user.id:
+            stmt = select(NetdiskUpload).where(NetdiskUpload.request_id == request.id)
+        else:
+            stmt = select(NetdiskUpload).where(NetdiskUpload.request_id == request.id, NetdiskUpload.user_id == user.id)
+        result = await session.execute(stmt.order_by(NetdiskUpload.created_at.desc()).limit(100))
+        return {"submissions": [_build_upload_payload(item) for item in result.scalars().all()]}
+
+    @staticmethod
+    async def accept_request_submission(
+        session: AsyncSession,
+        user: User,
+        request_id: str,
+        upload_id: str,
+    ) -> dict:
+        request = await _get_request_by_id(session, request_id, for_update=True)
+        if not request:
+            raise ValueError("悬赏不存在")
+        if request.user_id != user.id:
+            raise ValueError("只能采纳自己发布的悬赏")
+        if request.status != "open" or request.bounty_status != "frozen":
+            raise ValueError("该悬赏已处理，不能重复采纳")
+
+        upload = await _get_upload_by_id(session, upload_id)
+        if not upload or upload.request_id != request.id:
+            raise ValueError("投稿不存在")
+        if upload.user_id == user.id:
+            raise ValueError("不能采纳自己的投稿")
+
+        now = datetime.utcnow()
+        request.status = "accepted"
+        request.bounty_status = "paid"
+        request.accepted_upload_id = upload.id
+        request.accepted_at = now
+        request.closed_at = now
+        request.updated_at = now
+        upload.accepted_at = now
+        upload.status = "approved"
+        upload.audit_note = "悬赏发布者已采纳，悬赏积分已到账。"
+        upload.updated_at = now
+
+        await PointsAccountService.award_frozen_bounty_to_user(
+            session=session,
+            payer_user_id=request.user_id,
+            receiver_user_id=upload.user_id,
+            points=int(request.bounty_points),
+            idempotency_key=f"request_bounty_award:{request.id}",
+            related_type="netdisk_request",
+            related_id=str(request.id),
+            remark=f"求资源悬赏采纳：{request.title}",
+        )
+        await session.flush()
+        await session.refresh(request)
+        return {"request": _build_request_payload(request, user.id)}
+
+    @staticmethod
+    async def cancel_request(session: AsyncSession, user: User, request_id: str) -> dict:
+        request = await _get_request_by_id(session, request_id, for_update=True)
+        if not request:
+            raise ValueError("悬赏不存在")
+        if request.user_id != user.id:
+            raise ValueError("只能取消自己发布的悬赏")
+        if request.status != "open" or request.bounty_status != "frozen":
+            raise ValueError("该悬赏已处理，不能取消")
+
+        await _return_request_bounty(session, request, status="canceled", remark_prefix="取消求资源悬赏退回")
+        await session.refresh(request)
+        return {"request": _build_request_payload(request, user.id)}
+
+    @staticmethod
+    async def expire_requests(session: AsyncSession) -> dict:
+        now = datetime.utcnow()
+        result = await session.execute(
+            select(NetdiskRequest)
+            .where(
+                NetdiskRequest.status == "open",
+                NetdiskRequest.bounty_status == "frozen",
+                NetdiskRequest.expires_at <= now,
+            )
+            .order_by(NetdiskRequest.expires_at.asc())
+            .limit(100)
+        )
+        expired_count = 0
+        returned_points = 0
+        for item in result.scalars().all():
+            await _return_request_bounty(session, item, status="expired", remark_prefix="求资源悬赏过期退回")
+            expired_count += 1
+            returned_points += int(item.bounty_points)
+        return {"expired_count": expired_count, "returned_points": returned_points}
 
     @staticmethod
     async def list_my_uploads(session: AsyncSession, user: User) -> dict:
@@ -348,6 +474,7 @@ class NetdiskResourceService:
         extract_code: str,
         unzip_code: str,
         description: str,
+        request_id: str | None = None,
     ) -> dict:
         clean_title = (title or "").strip()
         clean_category = (category or "").strip()
@@ -364,10 +491,31 @@ class NetdiskResourceService:
             raise ValueError("link is required")
         if not clean_description:
             raise ValueError("description is required")
+        await _ensure_user_can_upload(session, user)
+
+        request = None
+        if request_id:
+            request = await _get_request_by_id(session, request_id, for_update=True)
+            if not request:
+                raise ValueError("悬赏不存在")
+            if request.status != "open" or request.bounty_status != "frozen":
+                raise ValueError("该悬赏已结束，不能投稿")
+            if request.user_id == user.id:
+                raise ValueError("不能给自己发布的悬赏投稿")
+            existing_result = await session.execute(
+                select(NetdiskUpload).where(
+                    NetdiskUpload.request_id == request.id,
+                    NetdiskUpload.user_id == user.id,
+                    NetdiskUpload.status != "rejected",
+                )
+            )
+            if existing_result.scalar_one_or_none():
+                raise ValueError("你已提交过该悬赏")
 
         config = await _get_netdisk_audit_config(session)
         item = NetdiskUpload(
             user_id=user.id,
+            request_id=request.id if request else None,
             title=clean_title[:120],
             category=clean_category[:64],
             pan=clean_pan[:32],
@@ -377,11 +525,20 @@ class NetdiskResourceService:
             description=clean_description[:800],
             status="pending",
             reward_points=int(config["upload_reward_points"]),
-            audit_note="已记录待验证奖励，验证通过后释放为可用积分。",
+            reward_released_points=0,
+            valid_days_rewarded=0,
+            audit_note=(
+                f"上传有效资源最高得{int(config['upload_reward_points'])}分；"
+                f"审核通过先得{int(config['upload_approved_points'])}分，链接有效满7天再得{int(config['upload_valid_7d_points'])}分。"
+            ),
         )
+        if request:
+            item.reward_points = 0
+            item.audit_note = "已提交给悬赏发布者，等待采纳。"
+            request.submissions_count = int(request.submissions_count) + 1
+            request.updated_at = datetime.utcnow()
         session.add(item)
         await session.flush()
-        await _grant_upload_frozen_reward(session, user, item)
         await session.refresh(item)
         return {"upload": _build_upload_payload(item)}
 
@@ -432,7 +589,7 @@ class NetdiskResourceService:
             raise ValueError("note is required")
 
         config = await _get_netdisk_audit_config(session)
-        reward_points = int(config["repair_reward_points"]) if clean_mode == "repair" else 0
+        reward_points = _repair_reward_for_resource(resource, config) if clean_mode == "repair" else 0
         item = NetdiskRepair(
             user_id=user.id,
             resource_id=resource.id,
@@ -455,6 +612,8 @@ class NetdiskResourceService:
         await session.flush()
         await _grant_repair_frozen_reward(session, user, item)
         if clean_mode == "report" and config["auto_hide_on_report"]:
+            resource.report_count = int(getattr(resource, "report_count", 0) or 0) + 1
+            resource.quality_score = _calculate_resource_quality_score(resource)
             await _hide_resource_after_report_threshold(session, resource.id, int(config["report_hide_threshold"]))
         await session.refresh(item)
         return {"repair": _build_repair_payload(item, user.id)}
@@ -533,15 +692,29 @@ class NetdiskResourceService:
         item.status = "approved"
         item.audit_note = note.strip() or f"系统验证通过，资源等级为{_resource_level_label(level)}，解锁消耗 {cost} 积分。"
         item.updated_at = datetime.utcnow()
-        await _release_upload_reward(session, item)
+        await _release_upload_approved_reward(session, item)
         resource = await _ensure_resource_from_upload(session, item, level, cost)
+        await _adjust_quality_profile(
+            session,
+            item.user_id,
+            credit_delta=1,
+            contribution_delta=5,
+            idempotency_key=f"netdisk_upload_quality_approved:{item.id}",
+            related_type="netdisk_upload",
+            related_id=str(item.id),
+            remark=f"上传资源审核通过：{item.title}",
+        )
+        resource.quality_score = await _calculate_resource_quality_score_with_profile(session, resource)
         if previous_status != "approved":
             await _create_user_notification(
                 session=session,
                 user_id=item.user_id,
                 notice_type="netdisk_upload_approved",
                 title="上传审核通过",
-                content=f"你上传的资源「{item.title}」已通过审核，等级为{_resource_level_label(level)}，解锁消耗 {cost} 积分；待验证奖励已释放为可用积分。",
+                content=(
+                    f"你上传的资源「{item.title}」已通过审核，等级为{_resource_level_label(level)}，解锁消耗 {cost} 积分；"
+                    f"审核通过奖励已发放，链接有效满7天后可继续获得奖励。"
+                ),
                 related_type="netdisk_upload",
                 related_id=str(item.id),
             )
@@ -609,6 +782,22 @@ class NetdiskResourceService:
         item.updated_at = datetime.utcnow()
         if item.mode == "repair":
             await _release_repair_reward(session, item)
+            resource = await session.get(NetdiskResourceModel, item.resource_id)
+            if resource:
+                resource.is_active = True
+                resource.verified_at = datetime.utcnow()
+                resource.updated_at = datetime.utcnow()
+                resource.quality_score = await _calculate_resource_quality_score_with_profile(session, resource)
+            await _adjust_quality_profile(
+                session,
+                item.user_id,
+                credit_delta=1,
+                contribution_delta=5,
+                idempotency_key=f"netdisk_repair_quality_approved:{item.id}",
+                related_type="netdisk_repair",
+                related_id=str(item.id),
+                remark=f"补链审核通过：{item.resource_title}",
+            )
         if previous_status != "approved":
             await _create_user_notification(
                 session=session,
@@ -719,7 +908,11 @@ class NetdiskResourceService:
 
         clean_note = note.strip() or "资源确认失效，进入待追缴流程。"
         resource.is_active = False
+        resource.invalid_count = int(getattr(resource, "invalid_count", 0) or 0) + 1
+        resource.last_invalid_at = datetime.utcnow()
         resource.updated_at = datetime.utcnow()
+        invalid_policy = _invalid_policy_for_resource(resource)
+        resource.quality_score = await _calculate_resource_quality_score_with_profile(session, resource)
 
         approved_repairs = (
             await session.execute(
@@ -737,59 +930,104 @@ class NetdiskResourceService:
             source_upload.status = "invalid_confirmed"
             source_upload.audit_note = _append_note(source_upload.audit_note, clean_note)
             source_upload.updated_at = datetime.utcnow()
-            upload_penalty_points = int(source_upload.reward_points or 0) * int(config["invalid_penalty_multiplier"])
-            created = await _create_risk_record(
-                session=session,
-                user_id=source_upload.user_id,
+            upload_penalty_points = int(invalid_policy["penalty_points"])
+            await _adjust_quality_profile(
+                session,
+                source_upload.user_id,
+                credit_delta=int(invalid_policy["credit_delta"]),
+                contribution_delta=-5,
+                short_invalid_delta=1 if invalid_policy["bucket"] == "within_7d" else 0,
+                idempotency_key=f"netdisk_upload_quality_invalid:{resource_id}:{source_upload.id}",
                 related_type="netdisk_upload",
                 related_id=str(source_upload.id),
-                reason="resource_invalid_pending_penalty",
-                points_due=upload_penalty_points,
-                points_collected=0,
-                idempotency_key=f"netdisk_resource_invalid_risk:{resource_id}:upload:{source_upload.id}",
-                note=f"{clean_note} 待追缴 {upload_penalty_points} 分；关联资源：{resource.title}",
+                remark=f"上传资源确认失效：{resource.title}",
             )
-            if created:
-                risk_records_created += 1
-                await _create_user_notification(
+            if upload_penalty_points > 0:
+                await _deduct_consumable_penalty(
                     session=session,
                     user_id=source_upload.user_id,
-                    notice_type="netdisk_risk_pending",
-                    title="上传资源确认失效",
-                    content=f"你上传的资源「{resource.title}」已被确认失效，后台已生成待追缴 {upload_penalty_points} 分记录。",
+                    points=upload_penalty_points,
+                    idempotency_key=f"netdisk_upload_invalid_penalty:{resource_id}:{source_upload.id}",
                     related_type="netdisk_upload",
                     related_id=str(source_upload.id),
+                    change_type="invalid_penalty",
+                    remark=f"{clean_note} 失效处罚 {upload_penalty_points} 分；关联资源：{resource.title}",
                 )
+            if upload_penalty_points > 0:
+                created = await _create_risk_record(
+                    session=session,
+                    user_id=source_upload.user_id,
+                    related_type="netdisk_upload",
+                    related_id=str(source_upload.id),
+                    reason="resource_invalid_pending_penalty",
+                    points_due=upload_penalty_points,
+                    points_collected=upload_penalty_points,
+                    idempotency_key=f"netdisk_resource_invalid_risk:{resource_id}:upload:{source_upload.id}",
+                    note=f"{clean_note} 已按负积分规则扣罚 {upload_penalty_points} 分；关联资源：{resource.title}",
+                )
+                if created:
+                    risk_records_created += 1
+                    await _create_user_notification(
+                        session=session,
+                        user_id=source_upload.user_id,
+                        notice_type="netdisk_risk_pending",
+                        title="上传资源确认失效",
+                        content=f"你上传的资源「{resource.title}」已被确认失效，系统已按规则扣罚 {upload_penalty_points} 分。",
+                        related_type="netdisk_upload",
+                        related_id=str(source_upload.id),
+                    )
         for repair in approved_repairs:
             reward_points = int(repair.reward_points or 0)
             if reward_points <= 0:
                 continue
-            penalty_points = reward_points * int(config["invalid_penalty_multiplier"])
+            penalty_points = max(0, min(reward_points, int(invalid_policy["penalty_points"])))
             repair.status = "invalid_confirmed"
             repair.audit_note = _append_note(repair.audit_note, clean_note)
             repair.updated_at = datetime.utcnow()
-            created = await _create_risk_record(
-                session=session,
-                user_id=repair.user_id,
+            await _adjust_quality_profile(
+                session,
+                repair.user_id,
+                credit_delta=int(invalid_policy["credit_delta"]),
+                contribution_delta=-3,
+                idempotency_key=f"netdisk_repair_quality_invalid:{resource_id}:{repair.id}",
                 related_type="netdisk_repair",
                 related_id=str(repair.id),
-                reason="resource_invalid_pending_penalty",
-                points_due=penalty_points,
-                points_collected=0,
-                idempotency_key=f"netdisk_resource_invalid_risk:{resource_id}:repair:{repair.id}",
-                note=f"{clean_note} 待追缴 {penalty_points} 分；关联资源：{resource.title}",
+                remark=f"补链资源确认失效：{resource.title}",
             )
-            if created:
-                risk_records_created += 1
-                await _create_user_notification(
+            if penalty_points > 0:
+                await _deduct_consumable_penalty(
                     session=session,
                     user_id=repair.user_id,
-                    notice_type="netdisk_risk_pending",
-                    title="补链资源确认失效",
-                    content=f"你补链的资源「{resource.title}」已被确认失效，后台已生成待追缴 {penalty_points} 分记录。",
+                    points=penalty_points,
+                    idempotency_key=f"netdisk_repair_invalid_penalty:{resource_id}:{repair.id}",
                     related_type="netdisk_repair",
                     related_id=str(repair.id),
+                    change_type="invalid_penalty",
+                    remark=f"{clean_note} 补链失效处罚 {penalty_points} 分；关联资源：{resource.title}",
                 )
+            if penalty_points > 0:
+                created = await _create_risk_record(
+                    session=session,
+                    user_id=repair.user_id,
+                    related_type="netdisk_repair",
+                    related_id=str(repair.id),
+                    reason="resource_invalid_pending_penalty",
+                    points_due=penalty_points,
+                    points_collected=penalty_points,
+                    idempotency_key=f"netdisk_resource_invalid_risk:{resource_id}:repair:{repair.id}",
+                    note=f"{clean_note} 已按负积分规则扣罚 {penalty_points} 分；关联资源：{resource.title}",
+                )
+                if created:
+                    risk_records_created += 1
+                    await _create_user_notification(
+                        session=session,
+                        user_id=repair.user_id,
+                        notice_type="netdisk_risk_pending",
+                        title="补链资源确认失效",
+                        content=f"你补链的资源「{resource.title}」已被确认失效，系统已按规则扣罚 {penalty_points} 分。",
+                        related_type="netdisk_repair",
+                        related_id=str(repair.id),
+                    )
 
         await session.flush()
         await session.refresh(resource)
@@ -854,6 +1092,83 @@ class NetdiskResourceService:
         ).scalars().all()
         return _build_admin_list_payload("risk_records", [_build_risk_payload(item) for item in items], total, page, page_size)
 
+    @staticmethod
+    async def release_valid_7d_upload_rewards(session: AsyncSession, limit: int = 200) -> dict:
+        config = await _get_netdisk_audit_config(session)
+        reward_points = int(config["upload_valid_7d_points"])
+        if reward_points <= 0:
+            return {"released_count": 0, "released_points": 0}
+
+        cutoff = datetime.utcnow() - timedelta(days=7)
+        result = await session.execute(
+            select(NetdiskUpload)
+            .where(
+                NetdiskUpload.status == "approved",
+                NetdiskUpload.valid_days_rewarded < 7,
+                NetdiskUpload.updated_at <= cutoff,
+            )
+            .order_by(NetdiskUpload.updated_at.asc())
+            .limit(max(1, min(int(limit or 200), 1000)))
+        )
+        uploads = result.scalars().all()
+
+        released_count = 0
+        released_points = 0
+        for upload in uploads:
+            resource = await _get_resource_by_upload(session, upload)
+            if not resource or not resource.is_active:
+                continue
+            if int(getattr(resource, "invalid_count", 0) or 0) > 0:
+                continue
+
+            remaining = max(0, int(upload.reward_points or 0) - int(upload.reward_released_points or 0))
+            points = min(reward_points, remaining)
+            if points <= 0:
+                upload.valid_days_rewarded = 7
+                resource.valid_days_rewarded = max(int(getattr(resource, "valid_days_rewarded", 0) or 0), 7)
+                continue
+
+            ledger, _, created = await PointsAccountService.add_points(
+                session=session,
+                user_id=upload.user_id,
+                points=points,
+                source="netdisk",
+                change_type="upload_reward_valid_7d",
+                availability="consumable",
+                idempotency_key=f"netdisk_upload_valid_7d:{upload.id}",
+                related_type="netdisk_upload",
+                related_id=str(upload.id),
+                remark=f"资源持续有效7天奖励：{upload.title}",
+            )
+            if not created:
+                upload.valid_days_rewarded = 7
+                resource.valid_days_rewarded = max(int(getattr(resource, "valid_days_rewarded", 0) or 0), 7)
+                continue
+
+            if ledger:
+                upload.reward_released_points = int(upload.reward_released_points or 0) + points
+                upload.valid_days_rewarded = 7
+                upload.audit_note = _append_note(upload.audit_note, "资源持续有效满7天，长期有效奖励已发放。")
+                upload.updated_at = datetime.utcnow()
+                resource.valid_days_rewarded = max(int(getattr(resource, "valid_days_rewarded", 0) or 0), 7)
+                resource.quality_score = await _calculate_resource_quality_score_with_profile(session, resource)
+                resource.updated_at = datetime.utcnow()
+                await _adjust_quality_profile(
+                    session,
+                    upload.user_id,
+                    credit_delta=1,
+                    contribution_delta=5,
+                    idempotency_key=f"netdisk_upload_quality_valid_7d:{upload.id}",
+                    related_type="netdisk_upload",
+                    related_id=str(upload.id),
+                    remark=f"资源持续有效7天：{upload.title}",
+                )
+                released_count += 1
+                released_points += points
+
+        await session.flush()
+        return {"released_count": released_count, "released_points": released_points}
+
 
 async def _get_unlock_ledger(session: AsyncSession, user_id, resource_id: str) -> PointsLedger | None:
     result = await session.execute(
@@ -902,9 +1217,11 @@ async def _ensure_resource_from_upload(
         resource.extract_code = item.extract_code
         resource.unzip_code = item.unzip_code
         resource.source_upload_id = str(item.id)
+        resource.uploader_user_id = item.user_id
         resource.is_active = True
         resource.verified_at = datetime.utcnow()
         resource.updated_at = datetime.utcnow()
+        resource.quality_score = await _calculate_resource_quality_score_with_profile(session, resource)
         await session.flush()
         return resource
 
@@ -922,10 +1239,13 @@ async def _ensure_resource_from_upload(
         extract_code=item.extract_code,
         unzip_code=item.unzip_code,
         source_upload_id=str(item.id),
+        uploader_user_id=item.user_id,
         is_active=True,
         verified_at=datetime.utcnow(),
     )
     session.add(resource)
+    await session.flush()
+    resource.quality_score = await _calculate_resource_quality_score_with_profile(session, resource)
     await session.flush()
     return resource
 
@@ -937,6 +1257,15 @@ async def _get_source_upload_for_resource(session: AsyncSession, resource: Netdi
         return await session.get(NetdiskUpload, UUID(resource.source_upload_id))
     except ValueError:
         return None
+
+
+async def _get_resource_by_upload(session: AsyncSession, upload: NetdiskUpload) -> NetdiskResourceModel | None:
+    result = await session.execute(select(NetdiskResourceModel).where(NetdiskResourceModel.source_upload_id == str(upload.id)))
+    resource = result.scalar_one_or_none()
+    if resource:
+        return resource
+    resource_id = f"upload-{str(upload.id).replace('-', '')[:24]}"
+    return await session.get(NetdiskResourceModel, resource_id)
 
 
 async def _create_user_notification(
@@ -1026,6 +1355,30 @@ async def _release_upload_reward(session: AsyncSession, item: NetdiskUpload) -> 
     )
 
 
+async def _release_upload_approved_reward(session: AsyncSession, item: NetdiskUpload) -> None:
+    config = await _get_netdisk_audit_config(session)
+    approved_points = min(int(config["upload_approved_points"]), int(item.reward_points or 0))
+    if approved_points <= 0:
+        return
+    if int(getattr(item, "reward_released_points", 0) or 0) >= approved_points:
+        return
+
+    ledger, _, created = await PointsAccountService.add_points(
+        session=session,
+        user_id=item.user_id,
+        points=approved_points,
+        source="netdisk",
+        change_type="upload_reward_approved_part1",
+        availability="consumable",
+        idempotency_key=f"netdisk_upload_approved_part1:{item.id}",
+        related_type="netdisk_upload",
+        related_id=str(item.id),
+        remark=f"网盘上传审核通过首段奖励：{item.title}",
+    )
+    if created or ledger:
+        item.reward_released_points = max(int(getattr(item, "reward_released_points", 0) or 0), approved_points)
+
+
 async def _release_repair_reward(session: AsyncSession, item: NetdiskRepair) -> None:
     reward_points = int(item.reward_points)
     if item.mode != "repair" or reward_points <= 0:
@@ -1043,6 +1396,231 @@ async def _release_repair_reward(session: AsyncSession, item: NetdiskRepair) -> 
         related_id=str(item.id),
         remark=f"网盘补链奖励释放：{item.resource_title}",
     )
+
+
+async def _grant_creator_share_for_unlock(
+    session: AsyncSession,
+    resource: NetdiskResourceModel,
+    unlock_user: User,
+) -> tuple[dict | None, int]:
+    cost_points = int(resource.cost_points or 0)
+    share_points = _creator_share_points(resource)
+    creator_id = getattr(resource, "uploader_user_id", None)
+    if not creator_id or creator_id == unlock_user.id or share_points <= 0:
+        platform_recovered = max(cost_points, 0)
+        await _record_platform_recovery(session, unlock_user.id, resource, platform_recovered)
+        return None, platform_recovered
+
+    remaining_share = await _creator_daily_share_remaining(session, creator_id, resource.id)
+    actual_share = max(0, min(share_points, remaining_share))
+    creator_reward = None
+    if actual_share > 0:
+        ledger, account, created = await PointsAccountService.add_points(
+            session=session,
+            user_id=creator_id,
+            points=actual_share,
+            source="netdisk",
+            change_type="resource_creator_share",
+            availability="consumable",
+            idempotency_key=f"netdisk_creator_share:{unlock_user.id}:{resource.id}",
+            related_type="netdisk_resource",
+            related_id=resource.id,
+            remark=f"资源被解锁分成：{resource.title}",
+        )
+        await _adjust_quality_profile(
+            session,
+            creator_id,
+            credit_delta=0,
+            contribution_delta=1,
+            idempotency_key=f"netdisk_creator_share_quality:{unlock_user.id}:{resource.id}",
+            related_type="netdisk_resource",
+            related_id=resource.id,
+            remark=f"资源被解锁增加贡献：{resource.title}",
+        )
+        creator_reward = {
+            "created": created,
+            "ledger_id": str(ledger.id),
+            "points_delta": int(ledger.points_delta),
+            "creator_consumable_points": int(account.consumable_points),
+        }
+
+    platform_recovered = max(cost_points - actual_share, 0)
+    await _record_platform_recovery(session, unlock_user.id, resource, platform_recovered)
+    return creator_reward, platform_recovered
+
+
+def _creator_share_points(resource: NetdiskResourceModel) -> int:
+    return {"normal": 1, "featured": 2, "official": 0}.get(resource.level, 0)
+
+
+async def _creator_daily_share_remaining(session: AsyncSession, creator_id, resource_id: str) -> int:
+    today_start = datetime.combine(datetime.utcnow().date(), time.min)
+    result = await session.execute(
+        select(func.coalesce(func.sum(PointsLedger.points_delta), 0)).where(
+            PointsLedger.user_id == creator_id,
+            PointsLedger.change_type == "resource_creator_share",
+            PointsLedger.related_type == "netdisk_resource",
+            PointsLedger.related_id == resource_id,
+            PointsLedger.created_at >= today_start,
+        )
+    )
+    used = int(result.scalar_one() or 0)
+    return max(0, 10 - used)
+
+
+async def _record_platform_recovery(session: AsyncSession, user_id, resource: NetdiskResourceModel, points: int) -> None:
+    recovered = int(points)
+    if recovered <= 0:
+        return
+    await PointsAccountService.record_neutral_event(
+        session=session,
+        user_id=user_id,
+        source="netdisk",
+        change_type="platform_recovery",
+        availability="platform",
+        idempotency_key=f"netdisk_platform_recovery:{user_id}:{resource.id}",
+        related_type="netdisk_resource",
+        related_id=resource.id,
+        remark=f"平台回收积分 {recovered}：{resource.title}",
+    )
+
+
+async def _get_or_create_quality_profile(session: AsyncSession, user_id) -> UserQualityProfile:
+    result = await session.execute(select(UserQualityProfile).where(UserQualityProfile.user_id == user_id))
+    profile = result.scalar_one_or_none()
+    if profile:
+        return profile
+    profile = UserQualityProfile(user_id=user_id)
+    session.add(profile)
+    await session.flush()
+    return profile
+
+
+async def _ensure_user_not_negative(session: AsyncSession, user: User, message: str) -> None:
+    account, _ = await PointsAccountService.ensure_user_account(session, user.id)
+    if int(account.consumable_points) < 0:
+        raise ValueError(message)
+
+
+async def _ensure_user_can_upload(session: AsyncSession, user: User) -> None:
+    await _ensure_user_not_negative(session, user, "negative points users cannot upload resources")
+    profile = await _get_or_create_quality_profile(session, user.id)
+    restricted_until = getattr(profile, "upload_restricted_until", None)
+    if restricted_until:
+        restricted_value = restricted_until.replace(tzinfo=None) if getattr(restricted_until, "tzinfo", None) else restricted_until
+        if restricted_value > datetime.utcnow():
+            raise ValueError("upload permission is temporarily restricted")
+    if profile.risk_level == "high":
+        raise ValueError("high risk users cannot upload resources")
+
+
+async def _adjust_quality_profile(
+    session: AsyncSession,
+    user_id,
+    *,
+    credit_delta: int = 0,
+    contribution_delta: int = 0,
+    short_invalid_delta: int = 0,
+    idempotency_key: str,
+    related_type: str,
+    related_id: str,
+    remark: str,
+) -> UserQualityProfile:
+    existing = await PointsAccountService.get_ledger_by_idempotency_key(session, idempotency_key)
+    profile = await _get_or_create_quality_profile(session, user_id)
+    if existing:
+        return profile
+
+    profile.credit_score = max(0, min(120, int(profile.credit_score) + int(credit_delta)))
+    profile.contribution_score = max(0, int(profile.contribution_score) + int(contribution_delta))
+    profile.short_invalid_count = max(0, int(profile.short_invalid_count) + int(short_invalid_delta))
+    profile.risk_level = _quality_risk_level(profile)
+    profile.updated_at = datetime.utcnow()
+    await PointsAccountService.record_neutral_event(
+        session=session,
+        user_id=user_id,
+        source="netdisk_quality",
+        change_type="credit_adjustment",
+        availability="quality",
+        idempotency_key=idempotency_key,
+        related_type=related_type,
+        related_id=related_id,
+        remark=f"{remark}；信用变化 {credit_delta}，贡献变化 {contribution_delta}",
+    )
+    return profile
+
+
+def _quality_risk_level(profile: UserQualityProfile) -> str:
+    if int(profile.credit_score) < 60 or int(profile.short_invalid_count) >= 3:
+        return "high"
+    if int(profile.credit_score) < 80:
+        return "watch"
+    return "normal"
+
+
+def _credit_level(profile: UserQualityProfile | None) -> str:
+    if not profile:
+        return "normal"
+    if int(profile.credit_score) >= 105:
+        return "excellent"
+    if int(profile.credit_score) >= 90:
+        return "good"
+    if int(profile.credit_score) >= 70:
+        return "normal"
+    return "watch"
+
+
+async def _get_quality_profile(session: AsyncSession, user_id) -> UserQualityProfile | None:
+    if not user_id:
+        return None
+    result = await session.execute(select(UserQualityProfile).where(UserQualityProfile.user_id == user_id))
+    return result.scalar_one_or_none()
+
+
+async def _calculate_resource_quality_score_with_profile(session: AsyncSession, resource: NetdiskResourceModel) -> int:
+    profile = await _get_quality_profile(session, getattr(resource, "uploader_user_id", None))
+    return _calculate_resource_quality_score(resource, profile)
+
+
+def _calculate_resource_quality_score(resource: NetdiskResourceModel, profile: UserQualityProfile | None = None) -> int:
+    level_bonus = {"normal": 0, "featured": 12, "official": 24}.get(resource.level, 0)
+    valid_days = _resource_valid_days(resource)
+    long_valid_bonus = min(valid_days, 30) // 7 * 3
+    profile_bonus = 0
+    if profile:
+        profile_bonus = int(profile.credit_score) // 10 + min(int(profile.contribution_score) // 10, 20)
+    return max(
+        0,
+        int(resource.downloads or 0)
+        + int(resource.favorites or 0) * 2
+        + level_bonus
+        + long_valid_bonus
+        + profile_bonus
+        - int(getattr(resource, "report_count", 0) or 0) * 10
+        - int(getattr(resource, "invalid_count", 0) or 0) * 20,
+    )
+
+
+def _resource_valid_days(resource: NetdiskResourceModel) -> int:
+    verified_at = getattr(resource, "verified_at", None)
+    if not verified_at:
+        return 0
+    value = verified_at.replace(tzinfo=None) if getattr(verified_at, "tzinfo", None) else verified_at
+    return max(0, (datetime.utcnow() - value).days)
+
+
+def _invalid_policy_for_resource(resource: NetdiskResourceModel) -> dict:
+    age_days = max(0, (datetime.utcnow() - resource.created_at.replace(tzinfo=None)).days) if resource.created_at else 0
+    if age_days < 7:
+        return {"bucket": "within_7d", "penalty_points": 5, "credit_delta": -3}
+    if age_days < 30:
+        return {"bucket": "within_30d", "penalty_points": 5, "credit_delta": -2}
+    return {"bucket": "after_30d", "penalty_points": 2, "credit_delta": -1}
+
+
+def _repair_reward_for_resource(resource: NetdiskResourceModel, config: dict) -> int:
+    by_level = config.get("repair_reward_points_by_level", {})
+    return int(by_level.get(resource.level, config["repair_reward_points"]))
 
 
 async def _clawback_upload_reward(session: AsyncSession, item: NetdiskUpload, reason: str) -> None:
@@ -1200,36 +1778,21 @@ async def _deduct_consumable_penalty(
     change_type: str,
     remark: str,
 ) -> None:
-    account, _ = await PointsAccountService.ensure_user_account(session, user_id)
     target_points = int(points)
-    penalty_points = min(target_points, int(account.consumable_points))
+    if target_points <= 0:
+        return
 
-    if penalty_points > 0:
-        await PointsAccountService.consume_consumable_points(
-            session=session,
-            user_id=user_id,
-            points=penalty_points,
-            source="netdisk",
-            change_type=change_type,
-            idempotency_key=idempotency_key,
-            related_type=related_type,
-            related_id=related_id,
-            remark=remark,
-        )
-
-    shortfall = target_points - penalty_points
-    if shortfall > 0:
-        await _create_risk_record(
-            session=session,
-            user_id=user_id,
-            related_type=related_type,
-            related_id=related_id,
-            reason=change_type,
-            points_due=shortfall,
-            points_collected=penalty_points,
-            idempotency_key=f"{idempotency_key}:risk",
-            note=f"{remark}；可用积分不足，待追缴 {shortfall} 分。",
-        )
+    await PointsAccountService.consume_consumable_points_allow_negative(
+        session=session,
+        user_id=user_id,
+        points=target_points,
+        source="netdisk",
+        change_type=change_type,
+        idempotency_key=idempotency_key,
+        related_type=related_type,
+        related_id=related_id,
+        remark=remark,
+    )
 
 
 async def _hide_resource_after_report_threshold(session: AsyncSession, resource_id: str, threshold: int = 3) -> None:
@@ -1313,9 +1876,19 @@ async def _get_netdisk_audit_config(session: AsyncSession) -> dict:
 
 def _normalize_netdisk_audit_config(raw: dict | None) -> dict:
     data = dict(raw or {})
+    upload_reward_points = max(0, int(data.get("upload_reward_points", 5) or 0))
+    upload_approved_points = max(0, int(data.get("upload_approved_points", 2) or 0))
+    upload_valid_7d_points = max(0, int(data.get("upload_valid_7d_points", upload_reward_points - upload_approved_points) or 0))
     return {
-        "upload_reward_points": max(0, int(data.get("upload_reward_points", 5) or 0)),
+        "upload_reward_points": upload_reward_points,
+        "upload_approved_points": min(upload_approved_points, upload_reward_points),
+        "upload_valid_7d_points": min(upload_valid_7d_points, upload_reward_points),
         "repair_reward_points": max(0, int(data.get("repair_reward_points", 5) or 0)),
+        "repair_reward_points_by_level": {
+            "normal": max(0, int(data.get("repair_reward_normal", 5) or 0)),
+            "featured": max(0, int(data.get("repair_reward_featured", 8) or 0)),
+            "official": max(0, int(data.get("repair_reward_official", 10) or 0)),
+        },
         "report_hide_threshold": max(1, int(data.get("report_hide_threshold", 3) or 3)),
         "invalid_penalty_multiplier": max(1, int(data.get("invalid_penalty_multiplier", 1) or 1)),
         "auto_hide_on_report": bool(data.get("auto_hide_on_report", True)),
@@ -1384,36 +1957,40 @@ async def _get_resource_map(session: AsyncSession, resource_ids: list[str]) -> d
 
 
 async def _ensure_seed_resources(session: AsyncSession) -> None:
-    result = await session.execute(select(func.count()).select_from(NetdiskResourceModel))
-    if int(result.scalar_one() or 0) > 0:
-        return
-
     now = datetime.utcnow()
     verified_offsets = {
         "r1": timedelta(hours=2),
         "r2": timedelta(hours=6),
         "r3": timedelta(days=1),
     }
+    rows = []
     for resource in NETDISK_RESOURCE_CATALOG.values():
-        session.add(
-            NetdiskResourceModel(
-                id=resource.id,
-                title=resource.title,
-                category=resource.category,
-                pan=resource.pan,
-                level=resource.level,
-                cost_points=resource.cost_points,
-                verified_at=now - verified_offsets.get(resource.id, timedelta(days=1)),
-                downloads=resource.downloads,
-                favorites=resource.favorites,
-                description=resource.description,
-                link=resource.link,
-                extract_code=resource.extract_code,
-                unzip_code=resource.unzip_code,
-                is_active=True,
-            )
+        seed = {
+            "id": resource.id,
+            "title": resource.title,
+            "category": resource.category,
+            "pan": resource.pan,
+            "level": resource.level,
+            "cost_points": resource.cost_points,
+            "verified_at": now - verified_offsets.get(resource.id, timedelta(days=1)),
+            "downloads": resource.downloads,
+            "favorites": resource.favorites,
+            "description": resource.description,
+            "link": resource.link,
+            "extract_code": resource.extract_code,
+            "unzip_code": resource.unzip_code,
+            "is_active": True,
+        }
+        seed["quality_score"] = _calculate_resource_quality_score(
+            NetdiskResourceModel(**seed)
         )
-    await session.flush()
+        rows.append(seed)
+    if rows:
+        statement = pg_insert(NetdiskResourceModel).values(rows).on_conflict_do_nothing(
+            index_elements=["id"]
+        )
+        await session.execute(statement)
+        await session.flush()
 
 
 def _normalize_level(level: str | None) -> str:
@@ -1445,13 +2022,41 @@ def _time_filter_start(time_filter: str) -> datetime | None:
 
 
 def _resource_order_by(sort: str):
-    if sort == "hot":
-        return [NetdiskResourceModel.downloads.desc(), NetdiskResourceModel.verified_at.desc()]
-    if sort == "pointsAsc":
+    if sort in {"hot", "recommend", "featured"}:
+        return [
+            NetdiskResourceModel.quality_score.desc(),
+            NetdiskResourceModel.downloads.desc(),
+            NetdiskResourceModel.favorites.desc(),
+            NetdiskResourceModel.verified_at.desc(),
+        ]
+    if sort in {"pointsAsc", "low_cost"}:
         return [NetdiskResourceModel.cost_points.asc(), NetdiskResourceModel.verified_at.desc()]
-    if sort == "pointsDesc":
+    if sort in {"pointsDesc", "high_cost"}:
         return [NetdiskResourceModel.cost_points.desc(), NetdiskResourceModel.verified_at.desc()]
     return [NetdiskResourceModel.verified_at.desc(), NetdiskResourceModel.created_at.desc()]
+
+
+async def _attach_resource_quality_labels(session: AsyncSession, resources: list[NetdiskResourceModel]) -> None:
+    user_ids = [resource.uploader_user_id for resource in resources if getattr(resource, "uploader_user_id", None)]
+    if not user_ids:
+        for resource in resources:
+            setattr(resource, "_uploader_credit_level", "good" if resource.level == "official" else "normal")
+            setattr(resource, "_uploader_credit_score", 100)
+            setattr(resource, "_uploader_nickname", "官方整理" if resource.level == "official" else "平台精选")
+            setattr(resource, "_uploader_avatar", "")
+        return
+    result = await session.execute(select(UserQualityProfile).where(UserQualityProfile.user_id.in_(user_ids)))
+    profiles = {profile.user_id: profile for profile in result.scalars().all()}
+    user_result = await session.execute(select(User).where(User.id.in_(user_ids)))
+    users = {user.id: user for user in user_result.scalars().all()}
+    for resource in resources:
+        uploader_id = getattr(resource, "uploader_user_id", None)
+        profile = profiles.get(uploader_id)
+        uploader = users.get(uploader_id)
+        setattr(resource, "_uploader_credit_level", _credit_level(profile))
+        setattr(resource, "_uploader_credit_score", int(profile.credit_score) if profile else 100)
+        setattr(resource, "_uploader_nickname", uploader.nickname if uploader and uploader.nickname else ("官方整理" if resource.level == "official" else "平台精选"))
+        setattr(resource, "_uploader_avatar", uploader.avatar if uploader else "")
 
 
 def _format_verified_at(value) -> str:
@@ -1472,6 +2077,7 @@ def _format_verified_at(value) -> str:
 
 
 def _build_resource_payload(resource: NetdiskResource | NetdiskResourceModel) -> dict:
+    valid_days = _resource_valid_days(resource) if isinstance(resource, NetdiskResourceModel) else 0
     return {
         "id": resource.id,
         "title": resource.title,
@@ -1485,6 +2091,14 @@ def _build_resource_payload(resource: NetdiskResource | NetdiskResourceModel) ->
         "description": resource.description,
         "is_active": bool(getattr(resource, "is_active", True)),
         "source_upload_id": getattr(resource, "source_upload_id", ""),
+        "quality_score": int(getattr(resource, "quality_score", 0) or 0),
+        "uploader_credit_level": getattr(resource, "_uploader_credit_level", "normal"),
+        "uploader_credit_score": int(getattr(resource, "_uploader_credit_score", 100) or 100),
+        "uploader_nickname": getattr(resource, "_uploader_nickname", "官方整理" if resource.level == "official" else "平台精选"),
+        "uploader_avatar": getattr(resource, "_uploader_avatar", ""),
+        "valid_days": valid_days,
+        "report_count": int(getattr(resource, "report_count", 0) or 0),
+        "invalid_count": int(getattr(resource, "invalid_count", 0) or 0),
     }
 
 
@@ -1496,6 +2110,51 @@ def _build_favorite_payload(favorite: NetdiskFavorite, resource: NetdiskResource
     }
 
 
+async def _get_request_by_id(session: AsyncSession, request_id: str, for_update: bool = False) -> NetdiskRequest | None:
+    try:
+        request_uuid = UUID(str(request_id))
+    except (TypeError, ValueError):
+        return None
+    stmt = select(NetdiskRequest).where(NetdiskRequest.id == request_uuid)
+    if for_update:
+        stmt = stmt.with_for_update()
+    result = await session.execute(stmt)
+    return result.scalar_one_or_none()
+
+
+async def _get_upload_by_id(session: AsyncSession, upload_id: str) -> NetdiskUpload | None:
+    try:
+        upload_uuid = UUID(str(upload_id))
+    except (TypeError, ValueError):
+        return None
+    result = await session.execute(select(NetdiskUpload).where(NetdiskUpload.id == upload_uuid))
+    return result.scalar_one_or_none()
+
+
+async def _return_request_bounty(
+    session: AsyncSession,
+    request: NetdiskRequest,
+    *,
+    status: str,
+    remark_prefix: str,
+) -> None:
+    now = datetime.utcnow()
+    request.status = status
+    request.bounty_status = "returned"
+    request.closed_at = now
+    request.updated_at = now
+    await PointsAccountService.return_frozen_to_consumable(
+        session=session,
+        user_id=request.user_id,
+        points=int(request.bounty_points),
+        idempotency_key=f"request_bounty_return:{request.id}:{status}",
+        related_type="netdisk_request",
+        related_id=str(request.id),
+        remark=f"{remark_prefix}：{request.title}",
+    )
+    await session.flush()
+
+
 def _build_request_payload(item: NetdiskRequest, user_id=None) -> dict:
     return {
         "id": str(item.id),
@@ -1505,21 +2164,31 @@ def _build_request_payload(item: NetdiskRequest, user_id=None) -> dict:
         "bounty_points": int(item.bounty_points),
         "note": item.note,
         "status": item.status,
+        "bounty_status": getattr(item, "bounty_status", "frozen"),
+        "accepted_upload_id": str(item.accepted_upload_id) if getattr(item, "accepted_upload_id", None) else None,
         "submissions_count": int(item.submissions_count),
         "deadline_text": item.deadline_text,
+        "expires_at": getattr(item, "expires_at", None),
+        "accepted_at": getattr(item, "accepted_at", None),
+        "closed_at": getattr(item, "closed_at", None),
         "created_at": item.created_at,
         "mine": bool(user_id and item.user_id == user_id),
+        "can_submit": bool((not user_id or item.user_id != user_id) and item.status == "open" and getattr(item, "bounty_status", "frozen") == "frozen"),
     }
 
 
 def _build_upload_payload(item: NetdiskUpload) -> dict:
     return {
         "id": str(item.id),
+        "request_id": str(item.request_id) if getattr(item, "request_id", None) else None,
         "title": item.title,
         "category": item.category,
         "pan": item.pan,
         "status": item.status,
+        "accepted_at": getattr(item, "accepted_at", None),
         "reward_points": int(item.reward_points),
+        "reward_released_points": int(getattr(item, "reward_released_points", 0) or 0),
+        "valid_days_rewarded": int(getattr(item, "valid_days_rewarded", 0) or 0),
         "audit_note": item.audit_note,
         "created_at": item.created_at,
     }
@@ -1601,6 +2270,8 @@ def _build_unlock_payload(
     ledger: PointsLedger,
     account: UserAccount,
     invite_reward: dict | None,
+    creator_reward: dict | None = None,
+    platform_recovered_points: int = 0,
 ) -> dict:
     return {
         "resource": _build_resource_payload(resource),
@@ -1614,6 +2285,8 @@ def _build_unlock_payload(
         },
         "account": _build_account_payload(account),
         "invite_reward": invite_reward,
+        "creator_reward": creator_reward,
+        "platform_recovered_points": int(platform_recovered_points),
     }
 
 

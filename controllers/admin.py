@@ -469,6 +469,30 @@ async def admin_restore_netdisk_resource(
     return response(data=jsonable_encoder(payload), msg="netdisk resource restored")
 
 
+@router.post("/netdisk/resources/{resource_id}/confirm-invalid", summary="admin confirm invalid netdisk resource")
+async def admin_confirm_netdisk_resource_invalid(
+    resource_id: str,
+    req: NetdiskAdminAuditRequest,
+    x_admin_role: str = Header("operator"),
+    session: AsyncSession = Depends(get_session),
+):
+    if not _is_quality_supervisor(x_admin_role):
+        return response([], 403, "仅主管可确认资源失效")
+    try:
+        payload = await NetdiskResourceService.confirm_resource_invalid(session, resource_id, req.note)
+    except ValueError as exc:
+        return response([], 400, str(exc))
+    await _record_netdisk_audit_log(
+        session,
+        "resource_confirm_invalid",
+        "netdisk_resource",
+        resource_id,
+        payload["resource"].get("title", ""),
+        req.note,
+    )
+    return response(data=jsonable_encoder(payload), msg="netdisk resource invalid confirmed")
+
+
 @router.get("/netdisk/risk-records", summary="admin netdisk pending recovery list")
 async def admin_list_netdisk_risk_records(
     status: Optional[str] = Query(None),
@@ -483,6 +507,26 @@ async def admin_list_netdisk_risk_records(
         page_size=page_size,
     )
     return response(data=jsonable_encoder(payload))
+
+
+@router.post("/netdisk/uploads/release-valid-7d-rewards", summary="release valid 7d upload rewards")
+async def admin_release_netdisk_valid_7d_rewards(
+    limit: int = Query(200, ge=1, le=1000),
+    x_admin_role: str = Header("operator"),
+    session: AsyncSession = Depends(get_session),
+):
+    if not _is_quality_supervisor(x_admin_role):
+        return response([], 403, "仅主管可释放长期有效奖励")
+    payload = await NetdiskResourceService.release_valid_7d_upload_rewards(session, limit)
+    await _record_netdisk_audit_log(
+        session,
+        "upload_valid_7d_rewards_release",
+        "netdisk_upload",
+        "batch",
+        "7天有效奖励释放",
+        f"释放 {payload.get('released_count', 0)} 条，{payload.get('released_points', 0)} 分",
+    )
+    return response(data=jsonable_encoder(payload), msg="netdisk valid 7d rewards released")
 
 
 @router.get("/netdisk/risk-records/{record_id}", summary="admin netdisk pending recovery detail")
