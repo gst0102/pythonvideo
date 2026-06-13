@@ -20,18 +20,21 @@ class VirtualPayConfig:
 
 
 def get_virtual_pay_config() -> VirtualPayConfig:
-    app_key = (
+    env = int(os.getenv("VIRTUAL_PAY_ENV", "0"))
+    sandbox_app_key = (os.getenv("VIRTUAL_PAY_SANDBOX_APP_KEY") or "").strip()
+    prod_app_key = (os.getenv("VIRTUAL_PAY_PROD_APP_KEY") or "").strip()
+    app_key = (sandbox_app_key if env == 1 else prod_app_key) or (
         os.getenv("VIRTUAL_PAY_APP_KEY")
-        or os.getenv("VIRTUAL_PAY_PROD_APP_KEY")
         or os.getenv("WECHAT_VIRTUAL_PAY_APP_KEY")
         or ""
-    ).strip()
+    )
+    app_key = app_key.strip()
 
     return VirtualPayConfig(
         app_id=(os.getenv("APPID") or os.getenv("VIRTUAL_PAY_APPID") or "").strip(),
         offer_id=(os.getenv("VIRTUAL_PAY_OFFER_ID") or "").strip(),
         app_key=app_key,
-        env=int(os.getenv("VIRTUAL_PAY_ENV", "0")),
+        env=env,
         mode=os.getenv("VIRTUAL_PAY_MODE", "short_series_coin").strip() or "short_series_coin",
         currency_type=os.getenv("VIRTUAL_PAY_CURRENCY", "CNY").strip() or "CNY",
     )
