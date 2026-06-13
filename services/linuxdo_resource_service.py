@@ -20,7 +20,7 @@ from urllib.parse import urljoin, urlparse
 
 from sqlmodel import select
 
-from core.browser_guard import browser_slot, chromium_launch_args
+from core.browser_guard import browser_slot, chromium_launch_options
 from models.base import get_session_ctx
 from models.netdisk_collected_resource import NetdiskCollectedResource
 from models.netdisk_resource import NetdiskResource as NetdiskResourceModel
@@ -229,7 +229,7 @@ async def crawl_linuxdo_assets(
 
     with browser_slot("linuxdo_resource_service.crawl_assets"):
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True, args=chromium_launch_args())
+            browser = await p.chromium.launch(headless=True, **chromium_launch_options())
             context = None
             page = None
             try:

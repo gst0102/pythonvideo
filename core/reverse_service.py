@@ -23,7 +23,7 @@ import requests
 from playwright.sync_api import TimeoutError as PlaywrightTimeout
 from playwright.sync_api import sync_playwright
 
-from core.browser_guard import browser_slot, chromium_launch_args
+from core.browser_guard import browser_slot, chromium_launch_options
 
 logger = logging.getLogger(__name__)
 
@@ -320,7 +320,7 @@ class ReverseService:
         with browser_slot("reverse_service.douyin"), sync_playwright() as playwright:
             browser = playwright.chromium.launch(
                 headless=True,
-                args=chromium_launch_args("--disable-blink-features=AutomationControlled"),
+                **chromium_launch_options("--disable-blink-features=AutomationControlled"),
             )
             context = browser.new_context(user_agent=UA, viewport={"width": 1280, "height": 720})
             page = context.new_page()
@@ -506,7 +506,7 @@ class ReverseService:
         with browser_slot("reverse_service.kuaishou"), sync_playwright() as playwright:
             browser = playwright.chromium.launch(
                 headless=True,
-                args=chromium_launch_args("--disable-blink-features=AutomationControlled"),
+                **chromium_launch_options("--disable-blink-features=AutomationControlled"),
             )
             context = browser.new_context(user_agent=UA, viewport={"width": 1280, "height": 720})
             page = context.new_page()

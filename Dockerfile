@@ -62,6 +62,7 @@ RUN sed -i 's|http://deb.debian.org|http://mirrors.tuna.tsinghua.edu.cn|g' /etc/
 # Runtime system packages for ffmpeg and Playwright Chromium.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
+    chromium \
     curl \
     libatk-bridge2.0-0 \
     libatk1.0-0 \
@@ -93,13 +94,11 @@ RUN mkdir -p /app/image /app/downloads /app/logs /app/certs /home/appuser \
     && echo 'appuser:x:1000:' >> /etc/group \
     && chown -R 1000:1000 /app /home/appuser
 
-USER 1000:1000
+ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
 
-RUN if [ -n "$PLAYWRIGHT_DOWNLOAD_HOST" ]; then \
-        python -m playwright install chromium; \
-    else \
-        env -u PLAYWRIGHT_DOWNLOAD_HOST python -m playwright install chromium; \
-    fi
+RUN chromium --version
+
+USER 1000:1000
 
 EXPOSE 8000
 

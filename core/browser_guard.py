@@ -64,6 +64,16 @@ def chromium_launch_args(*extra_args: str) -> list[str]:
     return list(dict.fromkeys(args))
 
 
+def chromium_launch_options(*extra_args: str) -> dict:
+    options = {"args": chromium_launch_args(*extra_args)}
+    executable_path = os.getenv("PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH", "").strip()
+    if not executable_path and os.path.exists("/usr/bin/chromium"):
+        executable_path = "/usr/bin/chromium"
+    if executable_path:
+        options["executable_path"] = executable_path
+    return options
+
+
 def _browser_pids() -> set[int]:
     try:
         result = subprocess.run(
