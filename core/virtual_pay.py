@@ -6,6 +6,9 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 
+VIRTUAL_PAY_METHOD = "requestMidasPaymentGameItem"
+
+
 @dataclass(frozen=True)
 class VirtualPayConfig:
     app_id: str
@@ -65,7 +68,7 @@ def dumps_sign_data(sign_data: Dict[str, Any]) -> str:
 def create_pay_sig(sign_data_json: str, app_key: str) -> str:
     if not app_key:
         raise ValueError("VIRTUAL_PAY_APP_KEY is not configured")
-    return _hmac_sha256(app_key, sign_data_json)
+    return _hmac_sha256(app_key, f"{VIRTUAL_PAY_METHOD}&{sign_data_json}")
 
 
 def create_user_signature(sign_data_json: str, session_key: str, app_key: str) -> str:
