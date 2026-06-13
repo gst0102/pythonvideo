@@ -351,12 +351,17 @@ def _verify_notify_signature(sig: str, timestamp: str, nonce: str, body: str) ->
 
 def _build_runtime_virtual_config(config: dict, env_config: VirtualPayConfig) -> VirtualPayConfig:
     runtime_cfg = config.get("virtual_pay", {}) if isinstance(config, dict) else {}
+    runtime_app_id = str(runtime_cfg.get("appid") or "").strip()
+    runtime_offer_id = str(runtime_cfg.get("offer_id") or "").strip()
+    use_runtime_pay_cfg = bool(runtime_app_id or runtime_offer_id)
     return VirtualPayConfig(
-        app_id=str(runtime_cfg.get("appid") or env_config.app_id or "").strip(),
-        offer_id=str(runtime_cfg.get("offer_id") or env_config.offer_id or "").strip(),
+        app_id=runtime_app_id or env_config.app_id,
+        offer_id=runtime_offer_id or env_config.offer_id,
         app_key=env_config.app_key,
-        env=int(runtime_cfg.get("env", env_config.env)),
-        mode=str(runtime_cfg.get("mode") or env_config.mode or "short_series_coin").strip(),
+        env=int(runtime_cfg.get("env", env_config.env)) if use_runtime_pay_cfg else env_config.env,
+        mode=str(runtime_cfg.get("mode") or env_config.mode or "short_series_coin").strip()
+        if use_runtime_pay_cfg
+        else env_config.mode,
         currency_type=env_config.currency_type,
     )
 
