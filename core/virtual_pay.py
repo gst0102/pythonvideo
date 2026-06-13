@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 
-VIRTUAL_PAY_METHOD = "requestMidasPaymentGameItem"
+VIRTUAL_PAY_METHOD = "requestVirtualPayment"
 
 
 @dataclass(frozen=True)
