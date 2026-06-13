@@ -72,13 +72,9 @@ def create_pay_sig(sign_data_json: str, app_key: str) -> str:
 
 
 def create_user_signature(sign_data_json: str, session_key: str, app_key: str) -> str:
-    # WeChat verifies this as a user-state signature. Prefer the user's current
-    # session_key; fall back to app_key only for older clients that have not
-    # refreshed login after this upgrade.
-    key = session_key or app_key
-    if not key:
-        raise ValueError("session_key or VIRTUAL_PAY_APP_KEY is required")
-    return _hmac_sha256(key, sign_data_json)
+    if not session_key:
+        raise ValueError("session_key is required")
+    return _hmac_sha256(session_key, sign_data_json)
 
 
 def _hmac_sha256(key: str, message: str) -> str:

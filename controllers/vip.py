@@ -29,6 +29,7 @@ from models.user import User
 from schemas.user import CreateOrderRequest, VipStatusResponse
 from services.config_service import ConfigService
 from services.payment_service import PaymentService
+from services.wechat_session_service import get_session_key
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/vip", tags=["VIP"])
@@ -85,6 +86,7 @@ async def get_points_packages():
 @router.post("/points-order", summary="create points virtual payment order")
 async def create_points_order(
     req: CreateOrderRequest,
+    request: Request,
     claims: dict = Depends(get_current_claims),
     session: AsyncSession = Depends(get_session),
 ):
@@ -100,6 +102,9 @@ async def create_points_order(
     virtual_config, config_error = _resolve_virtual_pay_config(config)
     if config_error:
         return config_error
+    session_key = await get_session_key(request, user.openid)
+    if not session_key:
+        return response([], 401, "登录状态已过期，请重新登录后再试")
 
     price = float(package["price"])
     points = int(package["points"])
@@ -120,7 +125,7 @@ async def create_points_order(
 
     pay_params = _build_virtual_pay_params(
         virtual_config,
-        claims=claims,
+        session_key=session_key,
         order=order,
         package_id=str(package["id"]),
         product_id=str(package.get("product_id") or package["id"]),
@@ -178,6 +183,7 @@ async def get_order_status(
 @router.post("/order", summary="create vip virtual payment order")
 async def create_order(
     req: CreateOrderRequest,
+    request: Request,
     claims: dict = Depends(get_current_claims),
     session: AsyncSession = Depends(get_session),
 ):
@@ -194,6 +200,9 @@ async def create_order(
     virtual_config, config_error = _resolve_virtual_pay_config(config)
     if config_error:
         return config_error
+    session_key = await get_session_key(request, user.openid)
+    if not session_key:
+        return response([], 401, "登录状态已过期，请重新登录后再试")
 
     price = float(package["price"])
     period = str(package["id"])
@@ -216,7 +225,7 @@ async def create_order(
     product_id = package.get("product_id") or package.get("productId") or period
     pay_params = _build_virtual_pay_params(
         virtual_config,
-        claims=claims,
+        session_key=session_key,
         order=order,
         package_id=period,
         product_id=str(product_id),
@@ -297,7 +306,7 @@ def _resolve_virtual_pay_config(config: dict):
 def _build_virtual_pay_params(
     virtual_config: VirtualPayConfig,
     *,
-    claims: dict,
+    session_key: str,
     order: Order,
     package_id: str,
     product_id: str,
@@ -324,7 +333,7 @@ def _build_virtual_pay_params(
         "paySig": create_pay_sig(sign_data_json, virtual_config.app_key),
         "signature": create_user_signature(
             sign_data_json,
-            str(claims.get("session_key") or ""),
+            session_key,
             virtual_config.app_key,
         ),
         "out_trade_no": order.out_trade_no,

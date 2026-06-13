@@ -8,7 +8,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from typing import cast
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, UploadFile
+from fastapi import APIRouter, Depends, Request, UploadFile
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
@@ -33,17 +33,19 @@ from schemas.user import (
 from services.user_service import UserService
 from services.ad_analytics_service import get_reward_config, now_keys, scene_location
 from services.points_account_service import PointsAccountService
+from services.wechat_session_service import save_session_key
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/user", tags=["user"])
 
 
 @router.post("/login", summary="微信登录/注册")
-async def login(req: UserLoginRequest, session: AsyncSession = Depends(get_session)):
+async def login(req: UserLoginRequest, request: Request, session: AsyncSession = Depends(get_session)):
     wx_data = await UserService.wx_code2session(req.code)
     openid = wx_data.get("openid")
     if not openid:
         return response([], 400, wx_data)
+    await save_session_key(request, openid, str(wx_data.get("session_key") or ""))
 
     user, is_new = await UserService.get_or_create_user(
         session,
