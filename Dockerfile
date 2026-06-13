@@ -89,7 +89,7 @@ RUN find /app/.venv/bin -maxdepth 1 -type f -exec \
 
 COPY . .
 
-RUN mkdir -p /app/image /app/downloads /app/logs /app/certs /home/appuser \
+RUN mkdir -p /app/image /app/downloads /app/logs /app/certs /app/storage /app/output /home/appuser \
     && echo 'appuser:x:1000:1000::/home/appuser:/bin/sh' >> /etc/passwd \
     && echo 'appuser:x:1000:' >> /etc/group \
     && chown -R 1000:1000 /app /home/appuser

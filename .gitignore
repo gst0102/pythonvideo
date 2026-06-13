@@ -68,6 +68,8 @@ certs/*.crt
 # Downloads and media files
 downloads/*
 image/*
+storage/*
+output/*
 !image/.gitkeep
 !downloads/.gitkeep
 
