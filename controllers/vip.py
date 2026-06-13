@@ -38,6 +38,13 @@ POINT_RECHARGE_PACKAGES = [
     {"id": "points_300", "title": "300积分", "points": 300, "price": 30.0, "desc": "适合持续找资源"},
     {"id": "points_680", "title": "680积分", "points": 680, "price": 68.0, "desc": "适合高频资源需求"},
 ]
+POINT_RECHARGE_TEST_PACKAGE = {
+    "id": "points_1",
+    "title": "测试单",
+    "points": 1,
+    "price": 0.01,
+    "desc": "仅用于支付链路测试，测试完成后关闭",
+}
 
 
 @router.get("/packages", summary="get vip packages")
@@ -71,7 +78,7 @@ async def get_status(
 
 @router.get("/points-packages", summary="get points recharge packages")
 async def get_points_packages():
-    return response(data={"packages": POINT_RECHARGE_PACKAGES})
+    return response(data={"packages": _get_point_recharge_packages()})
 
 
 @router.post("/points-order", summary="create points virtual payment order")
@@ -84,7 +91,7 @@ async def create_points_order(
     if not user:
         return response([], 404, "user not found")
 
-    package = next((item for item in POINT_RECHARGE_PACKAGES if item.get("id") == req.package_id), None)
+    package = next((item for item in _get_point_recharge_packages() if item.get("id") == req.package_id), None)
     if not package:
         return response([], 400, "package not found")
 
@@ -95,6 +102,8 @@ async def create_points_order(
 
     price = float(package["price"])
     points = int(package["points"])
+    if price < 0.01:
+        return response([], 400, "测试金额不能低于0.01元")
     out_trade_no = _generate_out_trade_no()
     order = Order(
         user_id=user.id,
@@ -126,6 +135,13 @@ async def create_points_order(
         },
         msg="order created",
     )
+
+
+def _get_point_recharge_packages() -> list[dict]:
+    packages = [dict(item) for item in POINT_RECHARGE_PACKAGES]
+    if os.getenv("POINTS_RECHARGE_TEST_PACKAGE_ENABLED", "false").lower() == "true":
+        packages.insert(0, dict(POINT_RECHARGE_TEST_PACKAGE))
+    return packages
 
 
 @router.get("/orders/{out_trade_no}", summary="get virtual payment order status")
