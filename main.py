@@ -65,18 +65,7 @@ async def lifespan(app: FastAPI):
     # 微信支付证书管理器
     await init_wechat_cert_manager_async(redis_pool)
 
-    # 番剧数据定时同步（APScheduler）
-    try:
-        from services.sync_service import create_scheduler, sync_anime_from_kdocs, SYNC_ENABLED
-        scheduler = create_scheduler()
-        if scheduler:
-            scheduler.start()
-            app.state.anime_scheduler = scheduler
-            print("✅ 影视剧定时同步已启动（影视剧每1小时，电影/4K每日凌晨）")
-        else:
-            print("⏸️ 番剧定时同步已关闭（ANIME_SYNC_ENABLED=false）")
-    except Exception as e:
-        print(f"⚠️ 番剧同步服务启动失败: {e}")
+    print("⏸️ 浏览器采集定时任务由 crawler-worker 独立运行")
 
     # 网盘资源质量统计定时刷新（每日凌晨）
     try:
@@ -129,28 +118,10 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"⚠️ 网盘资源质量统计定时任务启动失败: {e}")
 
-    # LinuxDo 云资产每12小时采集入库（网盘资源补充来源）
-    try:
-        from services.linuxdo_resource_service import create_linuxdo_scheduler
-
-        linuxdo_scheduler = create_linuxdo_scheduler()
-        if linuxdo_scheduler:
-            linuxdo_scheduler.start()
-            app.state.linuxdo_scheduler = linuxdo_scheduler
-            print("✅ LinuxDo 网盘资源每12小时同步已启动")
-        else:
-            print("⏸️ LinuxDo 网盘资源同步已关闭（LINUXDO_SYNC_ENABLED=false）")
-    except Exception as e:
-        print(f"⚠️ LinuxDo 网盘资源同步服务启动失败: {e}")
-
     yield
     # ── 应用关闭时 ──────────────────────────────────────────
-    if hasattr(app.state, "anime_scheduler"):
-        app.state.anime_scheduler.shutdown(wait=False)
     if hasattr(app.state, "netdisk_quality_scheduler"):
         app.state.netdisk_quality_scheduler.shutdown(wait=False)
-    if hasattr(app.state, "linuxdo_scheduler"):
-        app.state.linuxdo_scheduler.shutdown(wait=False)
     await close_db()
     await close_redis_pool()
     print("👋 应用关闭执行")
@@ -230,9 +201,20 @@ app.include_router(pc_router, prefix="/api")  # /api/pc → 云函数代理
 async def manual_sync_anime(type: str = "anime"):
     """手动触发金山文档数据同步（type=anime|movie|4k，逗号分隔多个）"""
     try:
-        from services.sync_service import sync_anime_from_kdocs
-        types = [t.strip() for t in type.split(",") if t.strip()]
-        result = await sync_anime_from_kdocs(types)
+        import httpx
+
+        worker_url = os.getenv("CRAWLER_WORKER_URL", "http://crawler-worker:8010").rstrip("/")
+        types = [t.strip() for t in type.split(",") if t.strip()] or ["anime"]
+        result = {}
+        async with httpx.AsyncClient(timeout=300) as client:
+            for item in types:
+                key = {"anime": "kdocs_anime", "movie": "kdocs_movie", "4k": "kdocs_4k"}.get(item)
+                if not key:
+                    result[item] = {"error": "未知同步类型"}
+                    continue
+                resp = await client.post(f"{worker_url}/run/{key}")
+                resp.raise_for_status()
+                result[item] = resp.json().get("data", resp.json())
         return {"code": 0, "message": "同步完成", "data": result}
     except Exception as e:
         return {"code": 500, "message": f"同步失败: {str(e)}"}

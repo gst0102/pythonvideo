@@ -33,24 +33,10 @@ services:
       - DOMAIN=${DOMAIN:-}
       - CORS_ORIGINS=${CORS_ORIGINS:-*}
       - NOTIFY_URL=${NOTIFY_URL:-}
+      - CRAWLER_WORKER_URL=${CRAWLER_WORKER_URL:-http://crawler-worker:8010}
       # Proxy / Cookie
       - PROXY_URL=${PROXY_URL:-}
       - COOKIE_FILE=${COOKIE_FILE:-}
-      # Browser automation guard
-      - BROWSER_AUTOMATION_CONCURRENCY=${BROWSER_AUTOMATION_CONCURRENCY:-1}
-      - BROWSER_AUTOMATION_QUEUE_TIMEOUT=${BROWSER_AUTOMATION_QUEUE_TIMEOUT:-120}
-      - BROWSER_FORCE_CLEANUP=${BROWSER_FORCE_CLEANUP:-true}
-      - PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=${PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH:-/usr/bin/chromium}
-      # Netdisk crawler sync
-      - ANIME_SYNC_ENABLED=${ANIME_SYNC_ENABLED:-true}
-      - ANIME_SYNC_INTERVAL=${ANIME_SYNC_INTERVAL:-60}
-      - KDOCS_SYNC_LIMIT_PER_TYPE=${KDOCS_SYNC_LIMIT_PER_TYPE:-20}
-      - LINUXDO_SYNC_ENABLED=${LINUXDO_SYNC_ENABLED:-true}
-      - LINUXDO_SYNC_INTERVAL_HOURS=${LINUXDO_SYNC_INTERVAL_HOURS:-12}
-      - LINUXDO_SYNC_PAGES=${LINUXDO_SYNC_PAGES:-1}
-      - LINUXDO_SYNC_LIMIT=${LINUXDO_SYNC_LIMIT:-20}
-      - LINUXDO_STATE_FILE=${LINUXDO_STATE_FILE:-/app/storage/linuxdo_storage_state.json}
-      - LINUXDO_OUTPUT_DIR=${LINUXDO_OUTPUT_DIR:-/app/output}
       # WeChat
       - WECHAT_APPID=${WECHAT_APPID:-}
       - WECHAT_SECRET=${WECHAT_SECRET:-}
@@ -81,6 +67,74 @@ services:
         reservations:
           cpus: "0.5"
           memory: 512M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+  # ========================================
+  # Browser crawler worker
+  # ========================================
+  crawler-worker:
+    image: ${CRAWLER_IMAGE:-pythonvideo-crawler:stage2-local}
+    init: true
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: crawler-runtime
+      args:
+        UV_INDEX_URL: ${UV_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}
+        PLAYWRIGHT_DOWNLOAD_HOST: ${PLAYWRIGHT_DOWNLOAD_HOST:-}
+        PLAYWRIGHT_DOWNLOAD_CONNECTION_TIMEOUT: ${PLAYWRIGHT_DOWNLOAD_CONNECTION_TIMEOUT:-1200000}
+        APP_VERSION: ${APP_VERSION:-local}
+        VCS_REF: ${VCS_REF:-local}
+        BUILD_DATE: ${BUILD_DATE:-unknown}
+    container_name: video-service-crawler-worker
+    expose:
+      - "8010"
+    environment:
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - DATABASE_URL=${DATABASE_URL:-postgresql+asyncpg://postgres:${DB_PASSWORD:-postgres}@postgres:5432/agent}
+      - DB_ECHO=${DB_ECHO:-false}
+      - DB_SSL_MODE=${DB_SSL_MODE:-prefer}
+      - PROXY_URL=${PROXY_URL:-}
+      - COOKIE_FILE=${COOKIE_FILE:-}
+      - BROWSER_AUTOMATION_CONCURRENCY=${BROWSER_AUTOMATION_CONCURRENCY:-1}
+      - BROWSER_AUTOMATION_QUEUE_TIMEOUT=${BROWSER_AUTOMATION_QUEUE_TIMEOUT:-120}
+      - BROWSER_FORCE_CLEANUP=${BROWSER_FORCE_CLEANUP:-true}
+      - PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=${PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH:-/usr/bin/chromium}
+      - ANIME_SYNC_ENABLED=${ANIME_SYNC_ENABLED:-true}
+      - ANIME_SYNC_INTERVAL=${ANIME_SYNC_INTERVAL:-60}
+      - KDOCS_SYNC_LIMIT_PER_TYPE=${KDOCS_SYNC_LIMIT_PER_TYPE:-20}
+      - LINUXDO_SYNC_ENABLED=${LINUXDO_SYNC_ENABLED:-true}
+      - LINUXDO_SYNC_INTERVAL_HOURS=${LINUXDO_SYNC_INTERVAL_HOURS:-12}
+      - LINUXDO_SYNC_PAGES=${LINUXDO_SYNC_PAGES:-1}
+      - LINUXDO_SYNC_LIMIT=${LINUXDO_SYNC_LIMIT:-20}
+      - LINUXDO_STATE_FILE=${LINUXDO_STATE_FILE:-/app/storage/linuxdo_storage_state.json}
+      - LINUXDO_OUTPUT_DIR=${LINUXDO_OUTPUT_DIR:-/app/output}
+    volumes:
+      - ./logs:/app/logs
+      - ./storage:/app/storage
+      - ./output:/app/output
+      - ./.env:/app/.env:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - app-network
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1.5G
+        reservations:
+          cpus: "0.25"
+          memory: 384M
     logging:
       driver: "json-file"
       options:

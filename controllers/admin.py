@@ -964,6 +964,11 @@ async def admin_netdisk_crawler_status(session: AsyncSession = Depends(get_sessi
     return response(
         data={
             "crawlers": crawlers,
+            "worker": {
+                "mode": "independent",
+                "url": os.getenv("CRAWLER_WORKER_URL", "http://crawler-worker:8010"),
+                "note": "浏览器采集运行在独立 worker，主 API 不安装 Chromium",
+            },
             "browser_guard": {
                 "concurrency": int(os.getenv("BROWSER_AUTOMATION_CONCURRENCY", "1")),
                 "force_cleanup": os.getenv("BROWSER_FORCE_CLEANUP", "true").lower() != "false",
@@ -982,24 +987,18 @@ async def admin_run_netdisk_crawler(
         return response([], 403, "需要主管权限才能手动触发采集")
 
     try:
-        if crawler_key == "kdocs_anime":
-            from services.sync_service import sync_anime_from_kdocs
-
-            result = await sync_anime_from_kdocs(["anime"])
-        elif crawler_key == "kdocs_movie":
-            from services.sync_service import sync_anime_from_kdocs
-
-            result = await sync_anime_from_kdocs(["movie"])
-        elif crawler_key == "kdocs_4k":
-            from services.sync_service import sync_anime_from_kdocs
-
-            result = await sync_anime_from_kdocs(["4k"])
-        elif crawler_key == "linuxdo":
-            from services.linuxdo_resource_service import LINUXDO_SYNC_LIMIT, sync_linuxdo_resources
-
-            result = await sync_linuxdo_resources(limit=LINUXDO_SYNC_LIMIT)
-        else:
+        if crawler_key not in {"kdocs_anime", "kdocs_movie", "kdocs_4k", "linuxdo"}:
             return response([], 400, "未知采集任务")
+        import httpx
+
+        worker_url = os.getenv("CRAWLER_WORKER_URL", "http://crawler-worker:8010").rstrip("/")
+        async with httpx.AsyncClient(timeout=300) as client:
+            worker_resp = await client.post(f"{worker_url}/run/{crawler_key}")
+            worker_resp.raise_for_status()
+        worker_payload = worker_resp.json()
+        if worker_payload.get("code") not in {0, 200, None}:
+            return response(worker_payload.get("data", []), 500, worker_payload.get("msg") or "采集失败")
+        result = worker_payload.get("data", worker_payload)
     except Exception as exc:
         logger.error("manual crawler run failed: %s", exc, exc_info=True)
         return response([], 500, f"采集失败：{exc}")

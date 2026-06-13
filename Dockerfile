@@ -34,9 +34,9 @@ RUN /build/.venv/bin/uvicorn --version
 
 
 # ========================================
-# Stage 2: runtime image
+# Stage 2: shared runtime base
 # ========================================
-FROM python:3.10-slim-bookworm AS runtime
+FROM python:3.10-slim-bookworm AS runtime-base
 
 ARG APP_VERSION=dev
 ARG VCS_REF=local
@@ -59,25 +59,10 @@ LABEL org.opencontainers.image.title="pythonvideo-app" \
 
 RUN sed -i 's|http://deb.debian.org|http://mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list.d/debian.sources
 
-# Runtime system packages for ffmpeg and Playwright Chromium.
+# Runtime system packages for API service. Browser packages live in crawler-runtime.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
-    chromium \
     curl \
-    libatk-bridge2.0-0 \
-    libatk1.0-0 \
-    libcups2 \
-    libdrm2 \
-    libgbm1 \
-    libnss3 \
-    libxcomposite1 \
-    libxdamage1 \
-    libxfixes3 \
-    libxkbcommon0 \
-    libxrandr2 \
-    libasound2 \
-    libpango-1.0-0 \
-    libcairo2 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /build/.venv /app/.venv
@@ -94,9 +79,7 @@ RUN mkdir -p /app/image /app/downloads /app/logs /app/certs /app/storage /app/ou
     && echo 'appuser:x:1000:' >> /etc/group \
     && chown -R 1000:1000 /app /home/appuser
 
-ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
-
-RUN chromium --version
+FROM runtime-base AS runtime
 
 USER 1000:1000
 
@@ -106,3 +89,42 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4"]
+
+
+# ========================================
+# Stage 3: browser crawler worker image
+# ========================================
+FROM runtime-base AS crawler-runtime
+
+USER root
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    chromium \
+    libatk-bridge2.0-0 \
+    libatk1.0-0 \
+    libcups2 \
+    libdrm2 \
+    libgbm1 \
+    libnss3 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxfixes3 \
+    libxkbcommon0 \
+    libxrandr2 \
+    libasound2 \
+    libpango-1.0-0 \
+    libcairo2 \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
+
+RUN chromium --version
+
+USER 1000:1000
+
+EXPOSE 8010
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
+    CMD curl -f http://localhost:8010/health || exit 1
+
+CMD ["uvicorn", "scripts.crawler_worker:app", "--host", "0.0.0.0", "--port", "8010", "--workers", "1"]
