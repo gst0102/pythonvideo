@@ -1,12 +1,13 @@
 import csv
 import io
+import json
 import logging
 import os
 from datetime import datetime, timedelta
 from typing import Optional
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, Header, Query, Response
+from fastapi import APIRouter, Depends, File, Header, Query, Response, UploadFile
 from fastapi.encoders import jsonable_encoder
 from sqlalchemy import or_
 from sqlmodel import and_, func, select
@@ -1057,6 +1058,45 @@ async def admin_handle_netdisk_collected_resource(
     return response(data=jsonable_encoder(payload), msg="采集候选已处理")
 
 
+@router.post("/netdisk/collected-resources/import", summary="import collected resources from file")
+async def admin_import_netdisk_collected_resources(
+    file: UploadFile = File(...),
+    source_type: str = Query("manual"),
+    x_admin_role: str = Header("operator"),
+    session: AsyncSession = Depends(get_session),
+):
+    if not _is_quality_supervisor(x_admin_role):
+        return response([], 403, "需要主管权限才能导入资源文件")
+    filename = file.filename or ""
+    suffix = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    if suffix not in {"json", "csv"}:
+        return response([], 400, "只支持 JSON 或 CSV 文件")
+    raw = await file.read()
+    if len(raw) > 2 * 1024 * 1024:
+        return response([], 400, "文件不能超过 2MB")
+    try:
+        rows = _parse_netdisk_import_file(raw, suffix, source_type)
+        if not rows:
+            return response([], 400, "文件里没有可导入的数据")
+        from services.linuxdo_resource_service import ingest_linuxdo_rows
+
+        payload = await ingest_linuxdo_rows(session, rows)
+        await _record_netdisk_audit_log(
+            session,
+            "collected_file_import",
+            "netdisk_collected_resource",
+            filename,
+            "批量导入资源",
+            f"来源 {source_type}，导入 {len(rows)} 条",
+        )
+        await session.commit()
+    except Exception as exc:
+        logger.error("netdisk collected import failed: %s", exc, exc_info=True)
+        return response([], 400, f"导入失败：{exc}")
+
+    return response(data=jsonable_encoder({"filename": filename, "source_type": source_type, **payload}), msg="文件导入完成")
+
+
 @router.post("/netdisk/dev-seed", summary="seed netdisk review demo data")
 async def admin_seed_netdisk_review_demo(session: AsyncSession = Depends(get_session)):
     if os.getenv("ENABLE_DEV_LOGIN", "false").lower() != "true":
@@ -1590,6 +1630,28 @@ async def admin_reply(req: AdminReplyRequest, session: AsyncSession = Depends(ge
         data={"id": str(msg.id), "content": msg.content, "created_at": msg.created_at.isoformat()},
         msg="reply sent",
     )
+
+
+def _parse_netdisk_import_file(raw: bytes, suffix: str, source_type: str) -> list[dict]:
+    text = raw.decode("utf-8-sig").strip()
+    if not text:
+        return []
+    if suffix == "json":
+        payload = json.loads(text)
+        if isinstance(payload, dict):
+            rows = payload.get("rows") or payload.get("items") or payload.get("resources") or payload.get("data") or []
+        else:
+            rows = payload
+        if not isinstance(rows, list):
+            raise ValueError("JSON 文件应为数组，或包含 rows/items/resources/data 数组")
+        normalized = [dict(item) for item in rows if isinstance(item, dict)]
+    else:
+        reader = csv.DictReader(io.StringIO(text))
+        normalized = [dict(row) for row in reader]
+    for index, row in enumerate(normalized, start=1):
+        row.setdefault("source_type", source_type or "manual")
+        row.setdefault("source_id", row.get("source_id") or row.get("topic_id") or row.get("id") or f"file-row-{index}")
+    return normalized
 
 
 async def _record_netdisk_audit_log(

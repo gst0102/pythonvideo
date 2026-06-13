@@ -82,6 +82,8 @@ class LinuxDoAssetRow:
     netdisk: str
     link: str
     code: str
+    source_type: str = "linuxdo"
+    source_id: str = ""
 
 
 class LinkTextParser(HTMLParser):
@@ -284,7 +286,7 @@ def _parse_boundary_date(value: str | date | None, is_end: bool) -> datetime | N
 async def ingest_linuxdo_rows(session, rows: Iterable[LinuxDoAssetRow | dict]) -> dict:
     result = {"synced": 0, "auto_published": 0, "review_required": 0, "skipped": 0, "error": None}
     for raw in rows:
-        row = raw if isinstance(raw, LinuxDoAssetRow) else LinuxDoAssetRow(**raw)
+        row = raw if isinstance(raw, LinuxDoAssetRow) else coerce_asset_row(raw)
         if row.crawl_status != "ok" or not row.link:
             result["skipped"] += 1
             continue
@@ -305,6 +307,40 @@ async def ingest_linuxdo_rows(session, rows: Iterable[LinuxDoAssetRow | dict]) -
         result["synced"] += 1
     await session.flush()
     return result
+
+
+def coerce_asset_row(raw: dict, default_source_type: str = "import") -> LinuxDoAssetRow:
+    def pick(*keys: str, default: str = "") -> str:
+        for key in keys:
+            value = raw.get(key)
+            if value is not None and str(value).strip():
+                return str(value).strip()
+        return default
+
+    source_type = pick("source_type", "source", default=default_source_type) or default_source_type
+    source_id_text = pick("source_id", "topic_id", "id", "source_ref")
+    try:
+        topic_id = int(source_id_text) if source_id_text else 0
+    except ValueError:
+        topic_id = 0
+    title = pick("title", "name", "resource_name", "资源名称")
+    link = normalize_url(pick("link", "url", "share_url", "网盘链接", "链接"))
+    netdisk = pick("netdisk", "pan", "disk", "网盘", default=netdisk_type(link))
+    topic_link = pick("topic_url", "source_url", "origin_url", "来源链接", default=link)
+    return LinuxDoAssetRow(
+        topic_id=topic_id,
+        title=title,
+        posted_at=pick("posted_at", "created_at", "published_at", "上架时间"),
+        crawled_at=pick("crawled_at", "imported_at", default=utc_now()),
+        crawl_status=pick("crawl_status", "status", default="ok"),
+        error=pick("error", "错误"),
+        topic_url=topic_link,
+        netdisk=netdisk,
+        link=link,
+        code=pick("code", "extract_code", "pwd", "提取码"),
+        source_type=source_type,
+        source_id=source_id_text,
+    )
 
 
 def _topic_created_datetime(topic: LinuxDoTopic) -> datetime | None:
@@ -485,7 +521,7 @@ async def _publish_resource(session, row: LinuxDoAssetRow, classification, norma
         resource.is_active = True
     else:
         resource = NetdiskResourceModel(
-            id=f"linuxdo-{hashlib.sha1(source_ref.encode('utf-8')).hexdigest()[:20]}",
+            id=f"{row.source_type}-{hashlib.sha1(source_ref.encode('utf-8')).hexdigest()[:20]}",
             title=row.title[:120],
             category=classification.category,
             pan=row.netdisk[:32],
@@ -493,15 +529,15 @@ async def _publish_resource(session, row: LinuxDoAssetRow, classification, norma
             cost_points=cost,
             downloads=0,
             favorites=0,
-            description=f"系统从 LinuxDo 云资产采集的资源，来源帖子：{row.topic_url}",
+            description=f"系统从{_source_type_text(row.source_type)}导入的资源，来源：{row.topic_url}",
             link=row.link,
             extract_code=row.code or "",
             unzip_code="",
             tags=json.dumps(tags, ensure_ascii=False),
-            source_type="linuxdo",
+            source_type=row.source_type,
             source_ref=source_ref,
             normalized_title=normalized_title,
-            source_upload_id=f"linuxdo:{row.topic_id}",
+            source_upload_id=f"{row.source_type}:{row.source_id or row.topic_id}",
             uploader_user_id=None,
             is_active=True,
             verified_at=datetime.utcnow(),
@@ -546,7 +582,7 @@ async def _upsert_candidate(session, row: LinuxDoAssetRow, classification, norma
             extract_code=row.code or "",
             tags=tags,
             normalized_title=normalized_title,
-            source_type="linuxdo",
+            source_type=row.source_type,
             source_ref=source_ref,
             source_url=row.topic_url,
             confidence=classification.confidence,
@@ -559,8 +595,18 @@ async def _upsert_candidate(session, row: LinuxDoAssetRow, classification, norma
 
 
 def _source_ref(row: LinuxDoAssetRow) -> str:
-    digest = hashlib.sha1(f"{row.topic_id}:{row.link}".encode("utf-8")).hexdigest()[:24]
-    return f"linuxdo:{row.topic_id}:{digest}"[:180]
+    stable_id = row.source_id or (str(row.topic_id) if row.topic_id else "") or row.topic_url or row.link
+    digest = hashlib.sha1(f"{stable_id}:{row.link}".encode("utf-8")).hexdigest()[:24]
+    return f"{row.source_type}:{stable_id}:{digest}"[:180]
+
+
+def _source_type_text(source_type: str) -> str:
+    return {
+        "linuxdo": "LinuxDo 云资产",
+        "manual": "后台文件",
+        "import": "批量文件",
+        "kdocs": "KDocs",
+    }.get(source_type, source_type or "批量文件")
 
 
 def write_outputs(rows: Sequence[LinuxDoAssetRow], csv_path: Path, json_path: Path) -> None:
