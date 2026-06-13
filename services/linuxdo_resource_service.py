@@ -284,29 +284,61 @@ def _parse_boundary_date(value: str | date | None, is_end: bool) -> datetime | N
 
 
 async def ingest_linuxdo_rows(session, rows: Iterable[LinuxDoAssetRow | dict]) -> dict:
-    result = {"synced": 0, "auto_published": 0, "review_required": 0, "skipped": 0, "error": None}
-    for raw in rows:
-        row = raw if isinstance(raw, LinuxDoAssetRow) else coerce_asset_row(raw)
-        if row.crawl_status != "ok" or not row.link:
-            result["skipped"] += 1
-            continue
-        classification = await classify_resource(row.title, "", row.netdisk)
-        normalized_title = normalize_resource_title(row.title)
-        duplicate_status = await _duplicate_status(session, normalized_title, row.netdisk, row.link, classification.category)
-        source_ref = _source_ref(row)
-        if duplicate_status in {"same_link", "same_title_same_pan"}:
-            await _upsert_candidate(session, row, classification, normalized_title, duplicate_status, "skip_duplicate", "skipped")
-            result["skipped"] += 1
-            continue
-        if classification.confidence >= 75 and duplicate_status in {"none", "supplement_pan"}:
-            await _publish_resource(session, row, classification, normalized_title, duplicate_status, source_ref)
-            result["auto_published"] += 1
-        else:
-            await _upsert_candidate(session, row, classification, normalized_title, duplicate_status, "review_required", "pending")
-            result["review_required"] += 1
-        result["synced"] += 1
+    result = {
+        "synced": 0,
+        "auto_published": 0,
+        "review_required": 0,
+        "skipped": 0,
+        "failed": 0,
+        "failed_rows": [],
+        "error": None,
+    }
+    for index, raw in enumerate(rows, start=1):
+        try:
+            row = raw if isinstance(raw, LinuxDoAssetRow) else coerce_asset_row(raw)
+            if row.crawl_status != "ok":
+                _append_failed_row(result, index, raw, row.error or "采集状态异常")
+                continue
+            if not row.title:
+                _append_failed_row(result, index, raw, "缺少资源标题")
+                continue
+            if not row.link:
+                _append_failed_row(result, index, raw, "缺少网盘链接")
+                continue
+            classification = await classify_resource(row.title, "", row.netdisk)
+            normalized_title = normalize_resource_title(row.title)
+            duplicate_status = await _duplicate_status(session, normalized_title, row.netdisk, row.link, classification.category)
+            source_ref = _source_ref(row)
+            if duplicate_status in {"same_link", "same_title_same_pan"}:
+                await _upsert_candidate(session, row, classification, normalized_title, duplicate_status, "skip_duplicate", "skipped")
+                result["skipped"] += 1
+                continue
+            if classification.confidence >= 75 and duplicate_status in {"none", "supplement_pan"}:
+                await _publish_resource(session, row, classification, normalized_title, duplicate_status, source_ref)
+                result["auto_published"] += 1
+            else:
+                await _upsert_candidate(session, row, classification, normalized_title, duplicate_status, "review_required", "pending")
+                result["review_required"] += 1
+            result["synced"] += 1
+        except Exception as exc:
+            logger.warning("[linuxdo] ingest row failed: %s", exc, exc_info=True)
+            _append_failed_row(result, index, raw, str(exc) or "单行处理失败")
     await session.flush()
     return result
+
+
+def _append_failed_row(result: dict, index: int, raw: LinuxDoAssetRow | dict, reason: str) -> None:
+    payload = asdict(raw) if isinstance(raw, LinuxDoAssetRow) else dict(raw or {})
+    result["failed"] += 1
+    result["failed_rows"].append(
+        {
+            "row_index": index,
+            "reason": reason[:300],
+            "title": str(payload.get("title") or payload.get("name") or payload.get("resource_name") or "")[:180],
+            "link": str(payload.get("link") or payload.get("url") or payload.get("share_url") or "")[:500],
+            "raw": payload,
+        }
+    )
 
 
 def coerce_asset_row(raw: dict, default_source_type: str = "import") -> LinuxDoAssetRow:

@@ -18,6 +18,7 @@ from models.base import get_session
 from models.chat import ChatMessage
 from models.netdisk_audit_log import NetdiskAuditLog
 from models.netdisk_collected_resource import NetdiskCollectedResource
+from models.netdisk_import_batch import NetdiskImportBatch
 from models.netdisk_quality_alert import NetdiskQualityAlert
 from models.netdisk_quality_daily_stat import NetdiskQualityDailyStat
 from models.netdisk_repair import NetdiskRepair
@@ -1075,12 +1076,32 @@ async def admin_import_netdisk_collected_resources(
     if len(raw) > 2 * 1024 * 1024:
         return response([], 400, "文件不能超过 2MB")
     try:
-        rows = _parse_netdisk_import_file(raw, suffix, source_type)
+        rows, parse_failed_rows = _parse_netdisk_import_file(raw, suffix, source_type)
         if not rows:
+            batch = _create_import_batch(
+                filename,
+                source_type,
+                x_admin_role,
+                total_rows=0,
+                payload={"failed": len(parse_failed_rows), "failed_rows": parse_failed_rows, "error": "文件里没有可导入的数据"},
+            )
+            session.add(batch)
+            await session.commit()
             return response([], 400, "文件里没有可导入的数据")
         from services.linuxdo_resource_service import ingest_linuxdo_rows
 
         payload = await ingest_linuxdo_rows(session, rows)
+        failed_rows = [*parse_failed_rows, *payload.get("failed_rows", [])]
+        payload["failed"] = len(failed_rows)
+        payload["failed_rows"] = failed_rows
+        batch = _create_import_batch(
+            filename,
+            source_type,
+            x_admin_role,
+            total_rows=len(rows) + len(parse_failed_rows),
+            payload=payload,
+        )
+        session.add(batch)
         await _record_netdisk_audit_log(
             session,
             "collected_file_import",
@@ -1092,9 +1113,93 @@ async def admin_import_netdisk_collected_resources(
         await session.commit()
     except Exception as exc:
         logger.error("netdisk collected import failed: %s", exc, exc_info=True)
+        await session.rollback()
+        batch = _create_import_batch(
+            filename,
+            source_type,
+            x_admin_role,
+            total_rows=0,
+            payload={"failed": 1, "failed_rows": [{"row_index": 0, "reason": str(exc), "title": "", "link": "", "raw": {}}], "error": str(exc)},
+        )
+        batch.status = "failed"
+        session.add(batch)
+        await session.commit()
         return response([], 400, f"导入失败：{exc}")
 
-    return response(data=jsonable_encoder({"filename": filename, "source_type": source_type, **payload}), msg="文件导入完成")
+    return response(data=jsonable_encoder({"batch": _build_import_batch_payload(batch), "filename": filename, "source_type": source_type, **payload}), msg="文件导入完成")
+
+
+@router.get("/netdisk/collected-resources/import-batches", summary="list collected resource import batches")
+async def admin_list_netdisk_import_batches(
+    source_type: str = Query("all"),
+    status: str = Query("all"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    session: AsyncSession = Depends(get_session),
+):
+    query = select(NetdiskImportBatch)
+    if source_type and source_type != "all":
+        query = query.where(NetdiskImportBatch.source_type == source_type)
+    if status and status != "all":
+        query = query.where(NetdiskImportBatch.status == status)
+    total = (await session.execute(select(func.count()).select_from(query.subquery()))).scalar() or 0
+    items = (
+        await session.execute(
+            query.order_by(NetdiskImportBatch.created_at.desc())
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        )
+    ).scalars().all()
+    return response(
+        data=jsonable_encoder(
+            {
+                "import_batches": [_build_import_batch_payload(item) for item in items],
+                "total": int(total),
+                "page": page,
+                "page_size": page_size,
+                "has_more": page * page_size < int(total),
+            }
+        ),
+        msg="导入记录列表",
+    )
+
+
+@router.get("/netdisk/collected-resources/import-batches/{batch_id}/failed.csv", summary="download import failed rows")
+async def admin_download_netdisk_import_failed_rows(
+    batch_id: str,
+    x_admin_role: str = Header("operator"),
+    session: AsyncSession = Depends(get_session),
+):
+    if not _is_quality_supervisor(x_admin_role):
+        return response([], 403, "需要主管权限才能下载失败明细")
+    try:
+        item_id = UUID(batch_id)
+    except ValueError:
+        return response([], 400, "导入记录不存在")
+    batch = await session.get(NetdiskImportBatch, item_id)
+    if not batch:
+        return response([], 404, "导入记录不存在")
+    failed_rows = _parse_failed_rows(batch.failed_rows)
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=["row_index", "reason", "title", "link", "raw"])
+    writer.writeheader()
+    for row in failed_rows:
+        writer.writerow(
+            {
+                "row_index": row.get("row_index", ""),
+                "reason": row.get("reason", ""),
+                "title": row.get("title", ""),
+                "link": row.get("link", ""),
+                "raw": json.dumps(row.get("raw", {}), ensure_ascii=False),
+            }
+        )
+    content = "\ufeff" + output.getvalue()
+    filename = f"netdisk-import-failed-{str(batch.id)[:8]}.csv"
+    return Response(
+        content=content,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.post("/netdisk/dev-seed", summary="seed netdisk review demo data")
@@ -1632,10 +1737,10 @@ async def admin_reply(req: AdminReplyRequest, session: AsyncSession = Depends(ge
     )
 
 
-def _parse_netdisk_import_file(raw: bytes, suffix: str, source_type: str) -> list[dict]:
+def _parse_netdisk_import_file(raw: bytes, suffix: str, source_type: str) -> tuple[list[dict], list[dict]]:
     text = raw.decode("utf-8-sig").strip()
     if not text:
-        return []
+        return [], []
     if suffix == "json":
         payload = json.loads(text)
         if isinstance(payload, dict):
@@ -1644,14 +1749,84 @@ def _parse_netdisk_import_file(raw: bytes, suffix: str, source_type: str) -> lis
             rows = payload
         if not isinstance(rows, list):
             raise ValueError("JSON 文件应为数组，或包含 rows/items/resources/data 数组")
-        normalized = [dict(item) for item in rows if isinstance(item, dict)]
+        normalized = []
+        failed_rows = []
+        for index, item in enumerate(rows, start=1):
+            if isinstance(item, dict):
+                normalized.append(dict(item))
+            else:
+                failed_rows.append({"row_index": index, "reason": "该行不是对象", "title": "", "link": "", "raw": {"value": str(item)}})
     else:
         reader = csv.DictReader(io.StringIO(text))
         normalized = [dict(row) for row in reader]
+        failed_rows = []
     for index, row in enumerate(normalized, start=1):
         row.setdefault("source_type", source_type or "manual")
         row.setdefault("source_id", row.get("source_id") or row.get("topic_id") or row.get("id") or f"file-row-{index}")
-    return normalized
+    return normalized, failed_rows
+
+
+def _create_import_batch(filename: str, source_type: str, operator_role: str, total_rows: int, payload: dict) -> NetdiskImportBatch:
+    failed_rows = payload.get("failed_rows") or []
+    failed_count = int(payload.get("failed") or len(failed_rows))
+    error = str(payload.get("error") or "")
+    if error:
+        status = "failed"
+    elif failed_count:
+        status = "partial_failed"
+    else:
+        status = "success"
+    return NetdiskImportBatch(
+        filename=(filename or "未命名文件")[:180],
+        source_type=(source_type or "manual")[:32],
+        operator_role=(operator_role or "operator")[:32],
+        status=status,
+        total_rows=int(total_rows or 0),
+        synced_count=int(payload.get("synced") or 0),
+        auto_published_count=int(payload.get("auto_published") or 0),
+        review_required_count=int(payload.get("review_required") or 0),
+        skipped_count=int(payload.get("skipped") or 0),
+        failed_count=failed_count,
+        failed_rows=json.dumps(failed_rows, ensure_ascii=False),
+        error=error[:800],
+    )
+
+
+def _build_import_batch_payload(item: NetdiskImportBatch) -> dict:
+    return {
+        "id": str(item.id),
+        "filename": item.filename,
+        "source_type": item.source_type,
+        "operator_role": item.operator_role,
+        "status": item.status,
+        "status_text": _import_batch_status_text(item.status),
+        "total_rows": int(item.total_rows or 0),
+        "synced_count": int(item.synced_count or 0),
+        "auto_published_count": int(item.auto_published_count or 0),
+        "review_required_count": int(item.review_required_count or 0),
+        "skipped_count": int(item.skipped_count or 0),
+        "failed_count": int(item.failed_count or 0),
+        "error": item.error,
+        "created_at": item.created_at,
+    }
+
+
+def _import_batch_status_text(status: str) -> str:
+    if status == "success":
+        return "成功"
+    if status == "partial_failed":
+        return "部分失败"
+    if status == "failed":
+        return "失败"
+    return "未知"
+
+
+def _parse_failed_rows(raw: str | None) -> list[dict]:
+    try:
+        parsed = json.loads(raw or "[]")
+    except json.JSONDecodeError:
+        return []
+    return parsed if isinstance(parsed, list) else []
 
 
 async def _record_netdisk_audit_log(

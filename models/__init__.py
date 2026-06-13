@@ -42,6 +42,7 @@ from models.game_user_settlement import GameUserSettlement
 from models.invite_relation import InviteRelation
 from models.netdisk_favorite import NetdiskFavorite
 from models.netdisk_feedback import NetdiskFeedback
+from models.netdisk_import_batch import NetdiskImportBatch
 from models.netdisk_audit_log import NetdiskAuditLog
 from models.netdisk_collected_resource import NetdiskCollectedResource
 from models.netdisk_quality_alert import NetdiskQualityAlert
@@ -76,6 +77,7 @@ __all__ = [
     "InviteRelation",
     "NetdiskFavorite",
     "NetdiskFeedback",
+    "NetdiskImportBatch",
     "NetdiskAuditLog",
     "NetdiskCollectedResource",
     "NetdiskQualityAlert",
