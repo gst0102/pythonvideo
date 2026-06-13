@@ -41,7 +41,7 @@ FROM python:3.10-slim-bookworm AS runtime
 ARG APP_VERSION=dev
 ARG VCS_REF=local
 ARG BUILD_DATE=unknown
-ARG PLAYWRIGHT_DOWNLOAD_HOST=https://npmmirror.com/mirrors/playwright
+ARG PLAYWRIGHT_DOWNLOAD_HOST=
 ARG PLAYWRIGHT_DOWNLOAD_CONNECTION_TIMEOUT=1200000
 
 ENV PYTHONUNBUFFERED=1 \
@@ -95,7 +95,11 @@ RUN mkdir -p /app/image /app/downloads /app/logs /app/certs /home/appuser \
 
 USER 1000:1000
 
-RUN python -m playwright install chromium
+RUN if [ -n "$PLAYWRIGHT_DOWNLOAD_HOST" ]; then \
+        python -m playwright install chromium; \
+    else \
+        env -u PLAYWRIGHT_DOWNLOAD_HOST python -m playwright install chromium; \
+    fi
 
 EXPOSE 8000
 
