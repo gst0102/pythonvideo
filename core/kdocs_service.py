@@ -15,7 +15,7 @@ import logging
 import os
 import re
 import time
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Iterator
 from urllib.parse import urlparse
@@ -33,6 +33,13 @@ UA = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/148.0.0.0 Safari/537.36"
 )
+
+DATE_LINE_PATTERNS = [
+    re.compile(r"(20\d{2})\s*[年./-]\s*(\d{1,2})\s*[月./-]\s*(\d{1,2})\s*(?:日|号)?"),
+    re.compile(r"(\d{1,2})\s*月\s*(\d{1,2})\s*(?:日|号)?"),
+    re.compile(r"(\d{1,2})[./-](\d{1,2})"),
+]
+DATE_HINT_WORDS = ("更新", "新增", "上新", "日期", "分割", "今日", "今天", "昨日", "昨天")
 
 DEFAULT_SOURCES = [
     {
@@ -118,6 +125,49 @@ def _read_following_link(all_texts: list[str], index: int) -> tuple[str, int]:
     return "", index + 1
 
 
+def _parse_section_date(text: str, current_year: int, today: date | None = None) -> date | None:
+    value = (text or "").strip()
+    if not value:
+        return None
+
+    today = today or date.today()
+    compact_value = re.sub(r"[\s\-—_｜|\[\]【】（）()：:]", "", value)
+    if compact_value in {"今日", "今天", "今日更新", "今天更新", "今日新增", "今天新增", "今日上新", "今天上新"}:
+        return today
+    if compact_value in {"昨日", "昨天", "昨日更新", "昨天更新", "昨日新增", "昨天新增", "昨日上新", "昨天上新"}:
+        return today - timedelta(days=1)
+
+    for index, pattern in enumerate(DATE_LINE_PATTERNS):
+        match = pattern.search(value)
+        if not match:
+            continue
+        date_text = match.group(0).strip()
+        is_plain_date_line = value.strip(" -—_｜|[]【】（）()：:").strip() == date_text
+        has_date_hint = any(word in value for word in DATE_HINT_WORDS)
+        if not is_plain_date_line and not has_date_hint:
+            continue
+        try:
+            if index == 0:
+                return date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+            return date(current_year, int(match.group(1)), int(match.group(2)))
+        except ValueError:
+            return None
+    return None
+
+
+def _filter_latest_section_entries(entries: list[dict], limit: int | None = None) -> list[dict]:
+    if not entries:
+        return []
+
+    dated_entries = [entry for entry in entries if entry.get("source_date")]
+    if not dated_entries:
+        return entries[:limit] if limit and limit > 0 else entries
+
+    latest_date = max(entry["source_date"] for entry in dated_entries)
+    latest_entries = [entry for entry in dated_entries if entry.get("source_date") == latest_date]
+    return latest_entries[:limit] if limit and limit > 0 else latest_entries
+
+
 def parse_doc(doc_data: dict, crawl_time: str) -> list[dict]:
     content = doc_data.get("content", {}).get("content", [])
     if not content:
@@ -125,6 +175,8 @@ def parse_doc(doc_data: dict, crawl_time: str) -> list[dict]:
 
     entries = []
     all_texts = extract_text_nodes(content)
+    current_year = datetime.now().year
+    current_section_date: date | None = None
 
     SKIP_PREFIXES = [
         "http", "百度", "夸克", "提取码", "4K", "注意", "搜索", "解决",
@@ -140,11 +192,13 @@ def parse_doc(doc_data: dict, crawl_time: str) -> list[dict]:
             i += 1
             continue
 
-        if "日期分割线" in text or "置顶分割线" in text:
+        section_date = _parse_section_date(text, current_year)
+        if section_date:
+            current_section_date = section_date
             i += 1
             continue
 
-        if re.match(r"\d{4}\.\d{1,2}\.\d{1,2}", text):
+        if "日期分割线" in text or "置顶分割线" in text:
             i += 1
             continue
 
@@ -255,6 +309,7 @@ def parse_doc(doc_data: dict, crawl_time: str) -> list[dict]:
             "4k_link": k4_link,
             "xunlei_link": xunlei_link,
             "update_time": crawl_time,
+            "source_date": current_section_date.isoformat() if current_section_date else "",
         })
 
     return entries
@@ -415,7 +470,7 @@ class KDocsService:
             return resp.json()
 
     @classmethod
-    def crawl_source(cls, source: dict) -> list[dict]:
+    def crawl_source(cls, source: dict, limit: int | None = None) -> list[dict]:
         share_url = source.get("share_url", "")
         file_id = source.get("file_id", "")
         share_code = source.get("share_code", "")
@@ -447,7 +502,14 @@ class KDocsService:
             return []
 
         entries = parse_doc(doc_data, now)
-        logger.info("[KDocs] %s 爬取完成: %d 条", source.get("name", ""), len(entries))
+        total_entries = len(entries)
+        entries = _filter_latest_section_entries(entries, limit=limit)
+        logger.info(
+            "[KDocs] %s 爬取完成: 本次入库候选 %d/%d 条",
+            source.get("name", ""),
+            len(entries),
+            total_entries,
+        )
 
         results = []
         for idx, entry in enumerate(entries):
@@ -465,19 +527,19 @@ class KDocsService:
                 "quark_url": entry.get("quark_link", ""),
                 "4k_url": entry.get("4k_link", ""),
                 "xunlei_url": entry.get("xunlei_link", ""),
-                "update_time": now,
+                "update_time": entry.get("source_date") or now,
             })
 
         return results
 
     @classmethod
-    def crawl_all(cls, categories: list[str] | None = None) -> list[dict]:
+    def crawl_all(cls, categories: list[str] | None = None, limit_per_source: int | None = None) -> list[dict]:
         all_entries = []
         for source in KDOCS_SOURCES:
             if categories and source.get("category") not in categories:
                 continue
             try:
-                entries = cls.crawl_source(source)
+                entries = cls.crawl_source(source, limit=limit_per_source)
                 all_entries.extend(entries)
             except Exception as e:
                 logger.error("[KDocs] 爬取 %s 失败: %s", source.get("name", ""), e)

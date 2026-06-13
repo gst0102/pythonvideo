@@ -16,6 +16,7 @@ from core.response import response
 from models.base import get_session
 from models.chat import ChatMessage
 from models.netdisk_audit_log import NetdiskAuditLog
+from models.netdisk_collected_resource import NetdiskCollectedResource
 from models.netdisk_quality_alert import NetdiskQualityAlert
 from models.netdisk_quality_daily_stat import NetdiskQualityDailyStat
 from models.netdisk_repair import NetdiskRepair
@@ -425,6 +426,45 @@ async def admin_list_netdisk_repairs(
         page_size=page_size,
     )
     return response(data=jsonable_encoder(payload))
+
+
+@router.get("/netdisk/feedbacks", summary="admin netdisk feedback ticket list")
+async def admin_list_netdisk_feedbacks(
+    status: Optional[str] = Query(None),
+    feedback_type: Optional[str] = Query(None),
+    feedback_id: Optional[str] = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    session: AsyncSession = Depends(get_session),
+):
+    payload = await NetdiskResourceService.list_admin_feedbacks(
+        session=session,
+        status=status,
+        feedback_type=feedback_type,
+        feedback_id=feedback_id,
+        page=page,
+        page_size=page_size,
+    )
+    return response(data=jsonable_encoder(payload))
+
+
+@router.post("/netdisk/feedbacks/{feedback_id}/reply", summary="admin reply netdisk feedback ticket")
+async def admin_reply_netdisk_feedback(
+    feedback_id: str,
+    req: NetdiskAdminAuditRequest,
+    session: AsyncSession = Depends(get_session),
+):
+    try:
+        payload = await NetdiskResourceService.update_admin_feedback(
+            session=session,
+            feedback_id=feedback_id,
+            status=req.result_action or "processing",
+            admin_reply=req.note,
+        )
+    except ValueError as exc:
+        return response([], 400, str(exc))
+    await _record_netdisk_audit_log(session, "feedback_reply", "netdisk_feedback", feedback_id, "用户反馈", req.note)
+    return response(data=jsonable_encoder(payload), msg="netdisk feedback replied")
 
 
 @router.get("/netdisk/resources", summary="admin netdisk resource list")
@@ -846,6 +886,175 @@ async def admin_netdisk_ops_dashboard(
             "generated_at": datetime.utcnow().isoformat(),
         }
     )
+
+
+@router.get("/netdisk/crawlers/status", summary="netdisk crawler rules and status")
+async def admin_netdisk_crawler_status(session: AsyncSession = Depends(get_session)):
+    kdocs_limit = int(os.getenv("KDOCS_SYNC_LIMIT_PER_TYPE", "20"))
+    linuxdo_limit = int(os.getenv("LINUXDO_SYNC_LIMIT", "20"))
+    anime_interval = int(os.getenv("ANIME_SYNC_INTERVAL", "60"))
+    linuxdo_interval = int(os.getenv("LINUXDO_SYNC_INTERVAL_HOURS", "12"))
+
+    kdocs_count = (
+        await session.execute(
+            select(func.count()).select_from(NetdiskResourceModel).where(NetdiskResourceModel.source_type == "kdocs")
+        )
+    ).scalar() or 0
+    linuxdo_count = (
+        await session.execute(
+            select(func.count()).select_from(NetdiskResourceModel).where(NetdiskResourceModel.source_type == "linuxdo")
+        )
+    ).scalar() or 0
+    linuxdo_pending = (
+        await session.execute(
+            select(func.count())
+            .select_from(NetdiskCollectedResource)
+            .where(NetdiskCollectedResource.source_type == "linuxdo", NetdiskCollectedResource.status == "pending")
+        )
+    ).scalar() or 0
+
+    crawlers = [
+        {
+            "key": "kdocs_anime",
+            "name": "KDocs 影视剧",
+            "source": "kdocs",
+            "schedule": f"每 {anime_interval} 分钟",
+            "limit_text": f"最新日期分组最多 {kdocs_limit} 条",
+            "enabled": os.getenv("ANIME_SYNC_ENABLED", "true").lower() == "true",
+            "published_count": int(kdocs_count),
+            "pending_count": 0,
+            "note": "只取最新日期分组，不足 20 条不补旧数据",
+        },
+        {
+            "key": "kdocs_movie",
+            "name": "KDocs 电影",
+            "source": "kdocs",
+            "schedule": "每天 00:00",
+            "limit_text": f"最新日期分组最多 {kdocs_limit} 条",
+            "enabled": os.getenv("ANIME_SYNC_ENABLED", "true").lower() == "true",
+            "published_count": int(kdocs_count),
+            "pending_count": 0,
+            "note": "与 4K 同一批定时任务",
+        },
+        {
+            "key": "kdocs_4k",
+            "name": "KDocs 4K影视",
+            "source": "kdocs",
+            "schedule": "每天 00:00",
+            "limit_text": f"最新日期分组最多 {kdocs_limit} 条",
+            "enabled": os.getenv("ANIME_SYNC_ENABLED", "true").lower() == "true",
+            "published_count": int(kdocs_count),
+            "pending_count": 0,
+            "note": "与电影同一批定时任务",
+        },
+        {
+            "key": "linuxdo",
+            "name": "LinuxDo 云资产",
+            "source": "linuxdo",
+            "schedule": f"每 {linuxdo_interval} 小时",
+            "limit_text": f"最新 {linuxdo_limit} 条",
+            "enabled": os.getenv("LINUXDO_SYNC_ENABLED", "true").lower() == "true",
+            "published_count": int(linuxdo_count),
+            "pending_count": int(linuxdo_pending),
+            "note": "高置信自动入库，低置信进入待审核",
+        },
+    ]
+    return response(
+        data={
+            "crawlers": crawlers,
+            "browser_guard": {
+                "concurrency": int(os.getenv("BROWSER_AUTOMATION_CONCURRENCY", "1")),
+                "force_cleanup": os.getenv("BROWSER_FORCE_CLEANUP", "true").lower() != "false",
+            },
+            "generated_at": datetime.utcnow().isoformat(),
+        }
+    )
+
+
+@router.post("/netdisk/crawlers/{crawler_key}/run", summary="run one netdisk crawler latest batch")
+async def admin_run_netdisk_crawler(
+    crawler_key: str,
+    x_admin_role: str = Header("operator"),
+):
+    if not _is_quality_supervisor(x_admin_role):
+        return response([], 403, "需要主管权限才能手动触发采集")
+
+    try:
+        if crawler_key == "kdocs_anime":
+            from services.sync_service import sync_anime_from_kdocs
+
+            result = await sync_anime_from_kdocs(["anime"])
+        elif crawler_key == "kdocs_movie":
+            from services.sync_service import sync_anime_from_kdocs
+
+            result = await sync_anime_from_kdocs(["movie"])
+        elif crawler_key == "kdocs_4k":
+            from services.sync_service import sync_anime_from_kdocs
+
+            result = await sync_anime_from_kdocs(["4k"])
+        elif crawler_key == "linuxdo":
+            from services.linuxdo_resource_service import LINUXDO_SYNC_LIMIT, sync_linuxdo_resources
+
+            result = await sync_linuxdo_resources(limit=LINUXDO_SYNC_LIMIT)
+        else:
+            return response([], 400, "未知采集任务")
+    except Exception as exc:
+        logger.error("manual crawler run failed: %s", exc, exc_info=True)
+        return response([], 500, f"采集失败：{exc}")
+
+    return response(data=result, msg="采集任务已完成")
+
+
+@router.get("/netdisk/collected-resources", summary="admin collected resource review pool")
+async def admin_list_netdisk_collected_resources(
+    status: str = Query("pending"),
+    bucket: str = Query("all"),
+    keyword: str | None = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=100),
+    session: AsyncSession = Depends(get_session),
+):
+    payload = await NetdiskResourceService.list_admin_collected_resources(
+        session,
+        status=status,
+        bucket=bucket,
+        keyword=keyword,
+        page=page,
+        page_size=page_size,
+    )
+    return response(data=jsonable_encoder(payload), msg="采集待审核池")
+
+
+@router.post("/netdisk/collected-resources/{candidate_id}/{action}", summary="handle collected resource candidate")
+async def admin_handle_netdisk_collected_resource(
+    candidate_id: str,
+    action: str,
+    req: NetdiskAdminAuditRequest,
+    x_admin_role: str = Header("operator"),
+    session: AsyncSession = Depends(get_session),
+):
+    if not _is_quality_supervisor(x_admin_role):
+        return response([], 403, "需要主管权限才能处理采集候选")
+    if action not in {"approve", "skip", "merge"}:
+        return response([], 400, "未知处理动作")
+    try:
+        payload = await NetdiskResourceService.handle_admin_collected_resource(
+            session,
+            candidate_id,
+            action,  # type: ignore[arg-type]
+            note=req.note,
+        )
+    except ValueError as exc:
+        return response([], 400, str(exc))
+    await _record_netdisk_audit_log(
+        session,
+        f"collected_{action}",
+        "netdisk_collected_resource",
+        candidate_id,
+        payload.get("candidate", {}).get("title", "采集候选"),
+        req.note,
+    )
+    return response(data=jsonable_encoder(payload), msg="采集候选已处理")
 
 
 @router.post("/netdisk/dev-seed", summary="seed netdisk review demo data")

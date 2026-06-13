@@ -10,6 +10,7 @@
 
 import asyncio
 import hashlib
+import json
 import logging
 import os
 from datetime import datetime
@@ -21,11 +22,13 @@ from models.anime_resource import AnimeResource
 from models.base import get_session_ctx
 from models.netdisk_resource import NetdiskResource as NetdiskResourceModel
 from services.netdisk_resource_service import _calculate_resource_quality_score
+from services.resource_classification_service import media_level_and_cost, normalize_resource_title
 
 logger = logging.getLogger("sync_anime")
 
-SYNC_INTERVAL_MINUTES = int(os.getenv("ANIME_SYNC_INTERVAL", "15"))
+SYNC_INTERVAL_MINUTES = int(os.getenv("ANIME_SYNC_INTERVAL", "60"))
 SYNC_ENABLED = os.getenv("ANIME_SYNC_ENABLED", "true").lower() == "true"
+KDOCS_SYNC_LIMIT_PER_TYPE = int(os.getenv("KDOCS_SYNC_LIMIT_PER_TYPE", "20"))
 
 
 async def _upsert_anime(session: AsyncSession, item: dict) -> None:
@@ -107,6 +110,13 @@ def _netdisk_source_key(item: dict) -> str:
     return f"kdocs:{category}:{digest}"
 
 
+def _netdisk_source_ref(item: dict, pan: str, link: str) -> str:
+    category = (item.get("category") or "anime").strip()
+    anime_id = (item.get("anime_id") or "").strip()
+    digest = hashlib.sha1(link.encode("utf-8")).hexdigest()[:16]
+    return f"kdocs:{category}:{anime_id}:{pan}:{digest}"[:180]
+
+
 def _detect_pan(link: str, fallback: str) -> str:
     value = (link or "").lower()
     if "pan.quark.cn" in value:
@@ -170,21 +180,29 @@ async def _upsert_netdisk_resources(session: AsyncSession, item: dict) -> list[s
     title = (item.get("title") or "").strip()
     if not title:
         return active_ids
+    level, cost_points, media_tags = media_level_and_cost(title)
+    normalized_title = normalize_resource_title(title)
 
     for pan, link, extract_code in _iter_netdisk_links(item):
         resource_id = _netdisk_resource_id(item, pan, link)
         source_key = _netdisk_source_key(item)
+        source_ref = _netdisk_source_ref(item, pan, link)
+        tags = sorted(set([*media_tags, pan]))
         active_ids.append(resource_id)
         resource = await session.get(NetdiskResourceModel, resource_id)
         if resource:
             resource.title = title
             resource.category = "影视剧"
             resource.pan = pan
-            resource.level = "official"
-            resource.cost_points = 20
+            resource.level = level
+            resource.cost_points = cost_points
             resource.description = _netdisk_description(item, pan)
             resource.link = link
             resource.extract_code = extract_code or ""
+            resource.tags = json.dumps(tags, ensure_ascii=False)
+            resource.source_type = "kdocs"
+            resource.source_ref = source_ref
+            resource.normalized_title = normalized_title
             resource.source_upload_id = source_key
             resource.uploader_user_id = None
             resource.is_active = True
@@ -199,14 +217,18 @@ async def _upsert_netdisk_resources(session: AsyncSession, item: dict) -> list[s
             title=title,
             category="影视剧",
             pan=pan,
-            level="official",
-            cost_points=20,
+            level=level,
+            cost_points=cost_points,
             downloads=0,
             favorites=0,
             description=_netdisk_description(item, pan),
             link=link,
             extract_code=extract_code or "",
             unzip_code="",
+            tags=json.dumps(tags, ensure_ascii=False),
+            source_type="kdocs",
+            source_ref=source_ref,
+            normalized_title=normalized_title,
             source_upload_id=source_key,
             uploader_user_id=None,
             is_active=True,
@@ -228,7 +250,7 @@ async def sync_anime_from_kdocs(types: list[str] | None = None) -> dict:
         from core.kdocs_service import KDocsService
 
         loop = asyncio.get_event_loop()
-        all_items = await loop.run_in_executor(None, KDocsService.crawl_all, types)
+        all_items = await loop.run_in_executor(None, KDocsService.crawl_all, types, KDOCS_SYNC_LIMIT_PER_TYPE)
 
         logger.info("[sync] kdocs fetched %s items", len(all_items))
         all_items = _dedupe_source_links(all_items)
@@ -319,7 +341,7 @@ def create_scheduler():
         minutes=SYNC_INTERVAL_MINUTES,
         kwargs={"types": ["anime"]},
         id="sync_anime_job",
-        name="番剧数据定时同步(金山文档)",
+        name="影视剧数据每小时同步(金山文档)",
         replace_existing=True,
     )
 

@@ -72,7 +72,7 @@ async def lifespan(app: FastAPI):
         if scheduler:
             scheduler.start()
             app.state.anime_scheduler = scheduler
-            print("✅ 番剧定时同步已启动（每15分钟）")
+            print("✅ 影视剧定时同步已启动（影视剧每1小时，电影/4K每日凌晨）")
         else:
             print("⏸️ 番剧定时同步已关闭（ANIME_SYNC_ENABLED=false）")
     except Exception as e:
@@ -129,12 +129,28 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"⚠️ 网盘资源质量统计定时任务启动失败: {e}")
 
+    # LinuxDo 云资产每12小时采集入库（网盘资源补充来源）
+    try:
+        from services.linuxdo_resource_service import create_linuxdo_scheduler
+
+        linuxdo_scheduler = create_linuxdo_scheduler()
+        if linuxdo_scheduler:
+            linuxdo_scheduler.start()
+            app.state.linuxdo_scheduler = linuxdo_scheduler
+            print("✅ LinuxDo 网盘资源每12小时同步已启动")
+        else:
+            print("⏸️ LinuxDo 网盘资源同步已关闭（LINUXDO_SYNC_ENABLED=false）")
+    except Exception as e:
+        print(f"⚠️ LinuxDo 网盘资源同步服务启动失败: {e}")
+
     yield
     # ── 应用关闭时 ──────────────────────────────────────────
     if hasattr(app.state, "anime_scheduler"):
         app.state.anime_scheduler.shutdown(wait=False)
     if hasattr(app.state, "netdisk_quality_scheduler"):
         app.state.netdisk_quality_scheduler.shutdown(wait=False)
+    if hasattr(app.state, "linuxdo_scheduler"):
+        app.state.linuxdo_scheduler.shutdown(wait=False)
     await close_db()
     await close_redis_pool()
     print("👋 应用关闭执行")

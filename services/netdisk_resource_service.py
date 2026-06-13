@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import hashlib
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta
 from typing import Literal
@@ -13,6 +15,8 @@ from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from models.netdisk_favorite import NetdiskFavorite
+from models.netdisk_feedback import NetdiskFeedback
+from models.netdisk_collected_resource import NetdiskCollectedResource
 from models.netdisk_repair import NetdiskRepair
 from models.netdisk_request import NetdiskRequest
 from models.netdisk_resource import NetdiskResource as NetdiskResourceModel
@@ -26,6 +30,7 @@ from models.user_account import UserAccount
 from services.invite_reward_service import InviteRewardService
 from services.config_service import ConfigService
 from services.points_account_service import PointsAccountService
+from services.resource_classification_service import ClassificationResult, media_level_and_cost, normalize_resource_title
 
 ResourceLevel = Literal["normal", "featured", "official"]
 
@@ -617,6 +622,203 @@ class NetdiskResourceService:
             await _hide_resource_after_report_threshold(session, resource.id, int(config["report_hide_threshold"]))
         await session.refresh(item)
         return {"repair": _build_repair_payload(item, user.id)}
+
+    @staticmethod
+    async def list_my_feedbacks(session: AsyncSession, user: User) -> dict:
+        result = await session.execute(
+            select(NetdiskFeedback)
+            .where(NetdiskFeedback.user_id == user.id)
+            .order_by(NetdiskFeedback.created_at.desc())
+            .limit(100)
+        )
+        return {"feedbacks": [_build_feedback_payload(item, user.id) for item in result.scalars().all()]}
+
+    @staticmethod
+    async def create_feedback(
+        session: AsyncSession,
+        user: User,
+        feedback_type: str,
+        content: str,
+        contact: str = "",
+    ) -> dict:
+        clean_type = (feedback_type or "").strip()
+        clean_content = (content or "").strip()
+        clean_contact = (contact or "").strip()
+        if clean_type not in {"resource", "points", "feature"}:
+            raise ValueError("feedback type is invalid")
+        if not clean_content:
+            raise ValueError("content is required")
+
+        item = NetdiskFeedback(
+            user_id=user.id,
+            feedback_type=clean_type,
+            content=clean_content[:800],
+            contact=clean_contact[:120],
+            status="pending",
+            auto_reply="已收到，后台会尽快处理。",
+        )
+        session.add(item)
+        await session.flush()
+        await session.refresh(item)
+        return {"feedback": _build_feedback_payload(item, user.id)}
+
+    @staticmethod
+    async def list_admin_feedbacks(
+        session: AsyncSession,
+        status: str | None = None,
+        feedback_type: str | None = None,
+        feedback_id: str | None = None,
+        page: int = 1,
+        page_size: int = 50,
+    ) -> dict:
+        query = select(NetdiskFeedback)
+        if feedback_id:
+            try:
+                query = query.where(NetdiskFeedback.id == UUID(feedback_id))
+            except ValueError:
+                return _build_admin_list_payload("feedbacks", [], 0, page, page_size)
+        if status:
+            query = query.where(NetdiskFeedback.status == status)
+        if feedback_type:
+            query = query.where(NetdiskFeedback.feedback_type == feedback_type)
+
+        total = (await session.execute(select(func.count()).select_from(query.subquery()))).scalar() or 0
+        items = (
+            await session.execute(
+                query.order_by(NetdiskFeedback.created_at.desc())
+                .offset((page - 1) * page_size)
+                .limit(page_size)
+            )
+        ).scalars().all()
+        return _build_admin_list_payload("feedbacks", [_build_feedback_payload(item) for item in items], total, page, page_size)
+
+    @staticmethod
+    async def update_admin_feedback(
+        session: AsyncSession,
+        feedback_id: str,
+        status: str | None = None,
+        admin_reply: str = "",
+    ) -> dict:
+        try:
+            feedback_uuid = UUID(feedback_id)
+        except ValueError as exc:
+            raise ValueError("feedback not found") from exc
+
+        item = await session.get(NetdiskFeedback, feedback_uuid)
+        if not item:
+            raise ValueError("feedback not found")
+        if status:
+            clean_status = status.strip()
+            if clean_status not in {"pending", "processing", "resolved", "rejected"}:
+                raise ValueError("feedback status is invalid")
+            item.status = clean_status
+        if admin_reply:
+            item.admin_reply = admin_reply.strip()[:800]
+        item.updated_at = datetime.utcnow()
+        await session.flush()
+        await session.refresh(item)
+        return {"feedback": _build_feedback_payload(item)}
+
+    @staticmethod
+    async def list_admin_collected_resources(
+        session: AsyncSession,
+        status: str | None = "pending",
+        bucket: str | None = None,
+        keyword: str | None = None,
+        page: int = 1,
+        page_size: int = 50,
+    ) -> dict:
+        query = select(NetdiskCollectedResource)
+        if status and status != "all":
+            query = query.where(NetdiskCollectedResource.status == status)
+        clean_bucket = (bucket or "all").strip()
+        if clean_bucket == "low_confidence":
+            query = query.where(
+                or_(
+                    NetdiskCollectedResource.ingest_action == "review_required",
+                    NetdiskCollectedResource.confidence < 75,
+                )
+            )
+        elif clean_bucket == "duplicate":
+            query = query.where(NetdiskCollectedResource.duplicate_status.in_(["same_link", "same_title_same_pan"]))
+        elif clean_bucket == "supplement":
+            query = query.where(NetdiskCollectedResource.duplicate_status == "supplement_pan")
+        if keyword and keyword.strip():
+            kw = f"%{keyword.strip()}%"
+            query = query.where(
+                or_(
+                    NetdiskCollectedResource.title.ilike(kw),
+                    NetdiskCollectedResource.category.ilike(kw),
+                    NetdiskCollectedResource.pan.ilike(kw),
+                    NetdiskCollectedResource.normalized_title.ilike(kw),
+                )
+            )
+
+        total = (await session.execute(select(func.count()).select_from(query.subquery()))).scalar() or 0
+        items = (
+            await session.execute(
+                query.order_by(NetdiskCollectedResource.updated_at.desc(), NetdiskCollectedResource.created_at.desc())
+                .offset((page - 1) * page_size)
+                .limit(page_size)
+            )
+        ).scalars().all()
+        return _build_admin_list_payload("collected_resources", [_build_collected_payload(item) for item in items], total, page, page_size)
+
+    @staticmethod
+    async def handle_admin_collected_resource(
+        session: AsyncSession,
+        candidate_id: str,
+        action: Literal["approve", "skip", "merge"],
+        note: str = "",
+    ) -> dict:
+        try:
+            item_id = UUID(candidate_id)
+        except ValueError as exc:
+            raise ValueError("采集候选不存在") from exc
+
+        item = await session.get(NetdiskCollectedResource, item_id)
+        if not item:
+            raise ValueError("采集候选不存在")
+        if item.status not in {"pending", "skipped"} and action != "skip":
+            return {"candidate": _build_collected_payload(item), "resource": None, "message": "该候选已处理"}
+
+        if action == "skip":
+            item.status = "skipped"
+            item.ingest_action = "skip_duplicate" if item.duplicate_status != "none" else "manual_skip"
+            item.error = (note or "运营跳过").strip()[:300]
+            item.updated_at = datetime.utcnow()
+            await session.flush()
+            await session.refresh(item)
+            return {"candidate": _build_collected_payload(item), "resource": None, "message": "已跳过"}
+
+        same_link = await _get_resource_by_link(session, item.link)
+        if same_link:
+            item.status = "merged" if action == "merge" else "skipped"
+            item.ingest_action = "merge_existing_link" if action == "merge" else "skip_duplicate"
+            item.error = (note or "同链接资源已存在").strip()[:300]
+            item.updated_at = datetime.utcnow()
+            await session.flush()
+            await session.refresh(item)
+            return {"candidate": _build_collected_payload(item), "resource": _build_resource_payload(same_link), "message": "同链接已存在，未重复入库"}
+
+        if action == "approve" and item.duplicate_status in {"same_title_same_pan"}:
+            raise ValueError("同标题同网盘疑似重复，请跳过或合并")
+
+        classification = ClassificationResult(
+            category=item.category,
+            tags=_parse_json_list(item.tags),
+            confidence=int(item.confidence or 0),
+            used_deepseek=False,
+        )
+        resource = await _publish_collected_candidate(session, item, classification, action)
+        item.status = "merged" if action == "merge" else "published"
+        item.ingest_action = "manual_merge" if action == "merge" else "manual_publish"
+        item.error = (note or "").strip()[:300]
+        item.updated_at = datetime.utcnow()
+        await session.flush()
+        await session.refresh(item)
+        await session.refresh(resource)
+        return {"candidate": _build_collected_payload(item), "resource": _build_resource_payload(resource), "message": "已入库"}
 
     @staticmethod
     async def list_admin_uploads(
@@ -1216,6 +1418,10 @@ async def _ensure_resource_from_upload(
         resource.link = item.link
         resource.extract_code = item.extract_code
         resource.unzip_code = item.unzip_code
+        resource.tags = json.dumps([item.category, item.pan], ensure_ascii=False)
+        resource.source_type = "upload"
+        resource.source_ref = str(item.id)
+        resource.normalized_title = normalize_resource_title(item.title)
         resource.source_upload_id = str(item.id)
         resource.uploader_user_id = item.user_id
         resource.is_active = True
@@ -1238,6 +1444,10 @@ async def _ensure_resource_from_upload(
         link=item.link,
         extract_code=item.extract_code,
         unzip_code=item.unzip_code,
+        tags=json.dumps([item.category, item.pan], ensure_ascii=False),
+        source_type="upload",
+        source_ref=str(item.id),
+        normalized_title=normalize_resource_title(item.title),
         source_upload_id=str(item.id),
         uploader_user_id=item.user_id,
         is_active=True,
@@ -1979,6 +2189,10 @@ async def _ensure_seed_resources(session: AsyncSession) -> None:
             "link": resource.link,
             "extract_code": resource.extract_code,
             "unzip_code": resource.unzip_code,
+            "tags": "[]",
+            "source_type": "seed",
+            "source_ref": f"seed:{resource.id}",
+            "normalized_title": normalize_resource_title(resource.title),
             "is_active": True,
         }
         seed["quality_score"] = _calculate_resource_quality_score(
@@ -2076,8 +2290,154 @@ def _format_verified_at(value) -> str:
     return verified.strftime("%Y-%m-%d")
 
 
+def _format_published_at(value) -> str:
+    if not value:
+        return ""
+    if isinstance(value, str):
+        return value
+    now = datetime.utcnow()
+    created = value.replace(tzinfo=None) if getattr(value, "tzinfo", None) else value
+    if created.date() == now.date():
+        return "今天"
+    if created.date() == (now.date() - timedelta(days=1)):
+        return "昨天"
+    return created.strftime("%Y-%m-%d")
+
+
+def _resource_tags(resource: NetdiskResource | NetdiskResourceModel) -> list[str]:
+    raw = getattr(resource, "tags", "[]") or "[]"
+    if isinstance(raw, list):
+        return [str(tag) for tag in raw if str(tag).strip()]
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        parsed = []
+    if not isinstance(parsed, list):
+        return []
+    return [str(tag).strip()[:20] for tag in parsed if str(tag).strip()]
+
+
+def _parse_json_list(raw: str | list | None) -> list[str]:
+    if isinstance(raw, list):
+        return [str(item).strip()[:20] for item in raw if str(item).strip()]
+    try:
+        parsed = json.loads(raw or "[]")
+    except (TypeError, json.JSONDecodeError):
+        parsed = []
+    if not isinstance(parsed, list):
+        return []
+    return [str(item).strip()[:20] for item in parsed if str(item).strip()]
+
+
+def _build_collected_payload(item: NetdiskCollectedResource) -> dict:
+    return {
+        "id": str(item.id),
+        "title": item.title,
+        "category": item.category,
+        "pan": item.pan,
+        "link": item.link,
+        "extract_code": item.extract_code,
+        "tags": _parse_json_list(item.tags),
+        "normalized_title": item.normalized_title,
+        "source_type": item.source_type,
+        "source_ref": item.source_ref,
+        "source_url": item.source_url,
+        "confidence": int(item.confidence or 0),
+        "duplicate_status": item.duplicate_status,
+        "duplicate_text": _duplicate_status_text(item.duplicate_status),
+        "ingest_action": item.ingest_action,
+        "status": item.status,
+        "error": item.error,
+        "created_at": item.created_at,
+        "updated_at": item.updated_at,
+    }
+
+
+def _duplicate_status_text(value: str) -> str:
+    if value == "same_link":
+        return "同链接重复"
+    if value == "same_title_same_pan":
+        return "同标题同网盘"
+    if value == "supplement_pan":
+        return "新增网盘补充"
+    return "非重复"
+
+
+async def _get_resource_by_link(session: AsyncSession, link: str) -> NetdiskResourceModel | None:
+    clean_link = (link or "").strip()
+    if not clean_link:
+        return None
+    result = await session.execute(select(NetdiskResourceModel).where(NetdiskResourceModel.link == clean_link).limit(1))
+    return result.scalar_one_or_none()
+
+
+async def _publish_collected_candidate(
+    session: AsyncSession,
+    item: NetdiskCollectedResource,
+    classification: ClassificationResult,
+    action: str,
+) -> NetdiskResourceModel:
+    source_ref = item.source_ref or f"{item.source_type}:{item.id}"
+    existing = (
+        await session.execute(select(NetdiskResourceModel).where(NetdiskResourceModel.source_ref == source_ref).limit(1))
+    ).scalar_one_or_none()
+    level, cost_points, media_tags = media_level_and_cost(item.title) if item.category == "影视剧" else ("normal", 5, [])
+    tags = sorted(set([*classification.tags, *media_tags, item.pan]))
+    normalized_title = item.normalized_title or normalize_resource_title(item.title)
+    if existing:
+        resource = existing
+        resource.title = item.title[:120]
+        resource.category = item.category
+        resource.pan = item.pan[:32]
+        resource.level = level
+        resource.cost_points = cost_points
+        resource.description = _collected_resource_description(item, action)
+        resource.link = item.link
+        resource.extract_code = item.extract_code or ""
+        resource.tags = json.dumps(tags, ensure_ascii=False)
+        resource.source_type = item.source_type or "linuxdo"
+        resource.source_ref = source_ref
+        resource.normalized_title = normalized_title
+        resource.source_upload_id = f"{item.source_type}:{item.id}"
+        resource.is_active = True
+        resource.verified_at = datetime.utcnow()
+        resource.updated_at = datetime.utcnow()
+    else:
+        resource = NetdiskResourceModel(
+            id=f"{item.source_type or 'collect'}-{hashlib.sha1(source_ref.encode('utf-8')).hexdigest()[:20]}",
+            title=item.title[:120],
+            category=item.category,
+            pan=item.pan[:32],
+            level=level,
+            cost_points=cost_points,
+            downloads=0,
+            favorites=0,
+            description=_collected_resource_description(item, action),
+            link=item.link,
+            extract_code=item.extract_code or "",
+            unzip_code="",
+            tags=json.dumps(tags, ensure_ascii=False),
+            source_type=item.source_type or "linuxdo",
+            source_ref=source_ref,
+            normalized_title=normalized_title,
+            source_upload_id=f"{item.source_type}:{item.id}",
+            uploader_user_id=None,
+            is_active=True,
+            verified_at=datetime.utcnow(),
+        )
+        session.add(resource)
+    resource.quality_score = _calculate_resource_quality_score(resource)
+    return resource
+
+
+def _collected_resource_description(item: NetdiskCollectedResource, action: str) -> str:
+    action_text = "运营合并入库" if action == "merge" else "运营审核入库"
+    return f"{action_text}的采集资源，来源：{item.source_url or item.source_type}。"
+
+
 def _build_resource_payload(resource: NetdiskResource | NetdiskResourceModel) -> dict:
     valid_days = _resource_valid_days(resource) if isinstance(resource, NetdiskResourceModel) else 0
+    created_at = getattr(resource, "created_at", None)
     return {
         "id": resource.id,
         "title": resource.title,
@@ -2086,9 +2446,14 @@ def _build_resource_payload(resource: NetdiskResource | NetdiskResourceModel) ->
         "level": resource.level,
         "cost_points": resource.cost_points,
         "verified_at": _format_verified_at(resource.verified_at),
+        "created_at": created_at.isoformat() if created_at and hasattr(created_at, "isoformat") else "",
+        "published_at": _format_published_at(created_at),
         "downloads": resource.downloads,
         "favorites": resource.favorites,
         "description": resource.description,
+        "tags": _resource_tags(resource),
+        "source_type": getattr(resource, "source_type", "seed") or "seed",
+        "source_ref": getattr(resource, "source_ref", "") or "",
         "is_active": bool(getattr(resource, "is_active", True)),
         "source_upload_id": getattr(resource, "source_upload_id", ""),
         "quality_score": int(getattr(resource, "quality_score", 0) or 0),
@@ -2206,6 +2571,21 @@ def _build_repair_payload(item: NetdiskRepair, user_id=None) -> dict:
         "audit_note": item.audit_note,
         "note": item.note,
         "created_at": item.created_at,
+        "mine": bool(user_id and item.user_id == user_id),
+    }
+
+
+def _build_feedback_payload(item: NetdiskFeedback, user_id=None) -> dict:
+    return {
+        "id": str(item.id),
+        "feedback_type": item.feedback_type,
+        "content": item.content,
+        "contact": item.contact,
+        "status": item.status,
+        "auto_reply": item.auto_reply,
+        "admin_reply": item.admin_reply,
+        "created_at": item.created_at,
+        "updated_at": item.updated_at,
         "mine": bool(user_id and item.user_id == user_id),
     }
 
