@@ -130,6 +130,7 @@ async def create_points_order(
         package_id=str(package["id"]),
         product_id=str(package.get("product_id") or package["id"]),
         price=price,
+        buy_quantity=points,
     )
     return response(
         data={
@@ -311,6 +312,7 @@ def _build_virtual_pay_params(
     package_id: str,
     product_id: str,
     price: float,
+    buy_quantity: int = 1,
 ) -> dict:
     attach = json.dumps(
         {"order_id": str(order.id), "user_id": str(order.user_id), "package_id": package_id},
@@ -322,7 +324,7 @@ def _build_virtual_pay_params(
         virtual_config,
         out_trade_no=order.out_trade_no,
         attach=attach,
-        buy_quantity=1,
+        buy_quantity=buy_quantity,
         product_id=product_id,
         goods_price=goods_price,
     )
