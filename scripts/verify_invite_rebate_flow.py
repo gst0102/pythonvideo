@@ -278,7 +278,7 @@ async def verify() -> None:
             )
             fixed_reward_ledgers = list(fixed_reward_result.scalars().all())
             _assert_equal("points recharge grants fixed first recharge reward once", len(fixed_reward_ledgers), 1)
-            _assert_equal("fixed first recharge reward points", int(fixed_reward_ledgers[0].points), 20)
+            _assert_equal("fixed first recharge reward points", int(fixed_reward_ledgers[0].points_delta), 20)
 
             print("Invite rebate verification passed")
             print(
