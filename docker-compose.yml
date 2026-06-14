@@ -92,7 +92,6 @@ services:
         VCS_REF: ${VCS_REF:-local}
         BUILD_DATE: ${BUILD_DATE:-unknown}
     container_name: video-service-crawler-worker
-    pids_limit: ${CRAWLER_WORKER_PIDS_LIMIT:-256}
     shm_size: ${CRAWLER_WORKER_SHM_SIZE:-256m}
     expose:
       - "8010"
