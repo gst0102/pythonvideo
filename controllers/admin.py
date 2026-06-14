@@ -2109,6 +2109,7 @@ async def _build_netdisk_ops_trends(session: AsyncSession, today_start: datetime
 
 
 async def _build_point_source_distribution(session: AsyncSession, start_dt: datetime) -> list[dict]:
+    business_points_filter = or_(PointsLedger.source.is_(None), PointsLedger.source != "admin_adjust")
     rows = (
         await session.execute(
             select(
@@ -2117,7 +2118,7 @@ async def _build_point_source_distribution(session: AsyncSession, start_dt: date
                 func.coalesce(func.sum(PointsLedger.points_delta), 0),
                 func.count(),
             )
-            .where(PointsLedger.created_at >= start_dt, PointsLedger.points_delta != 0)
+            .where(PointsLedger.created_at >= start_dt, PointsLedger.points_delta != 0, business_points_filter)
             .group_by(PointsLedger.source, PointsLedger.change_type)
             .order_by(func.abs(func.coalesce(func.sum(PointsLedger.points_delta), 0)).desc())
             .limit(12)
