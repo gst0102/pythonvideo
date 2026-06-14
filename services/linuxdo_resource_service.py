@@ -231,7 +231,7 @@ async def crawl_linuxdo_assets(
 
     with browser_slot("linuxdo_resource_service.crawl_assets"):
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True, **chromium_launch_options())
+            browser = await p.chromium.launch(headless=True, timeout=45000, **chromium_launch_options())
             context = None
             page = None
             try:

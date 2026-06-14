@@ -360,6 +360,7 @@ class KDocsService:
             try:
                 browser = pw.chromium.launch(
                     headless=True,
+                    timeout=45000,
                     **chromium_launch_options("--disable-blink-features=AutomationControlled"),
                 )
                 context = browser.new_context(user_agent=UA, viewport={"width": 1280, "height": 720})
