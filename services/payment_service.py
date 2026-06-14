@@ -10,6 +10,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 from models.commission import CommissionRecord
 from models.order import Order
+from models.points_ledger import PointsLedger
 from models.user import User
 from services.config_service import ConfigService
 from services.invite_reward_service import InviteRewardService
@@ -39,6 +40,9 @@ class PaymentService:
 
         if order.status == "paid":
             return True
+        if order.status == "refunded":
+            logger.warning("[Payment] success callback ignored for refunded order: %s", out_trade_no)
+            return True
 
         amount_yuan = total_fee_in_fen / 100.0
         order.status = "paid"
@@ -60,6 +64,37 @@ class PaymentService:
             await _grant_vip_gift_points(session, order)
             await _calculate_commission(session, order)
 
+        return True
+
+    @staticmethod
+    async def handle_payment_refund(
+        session: AsyncSession,
+        out_trade_no: str,
+        refund_id: str = "",
+        refunded_at: str = "",
+    ) -> bool:
+        result = await session.execute(select(Order).where(Order.out_trade_no == out_trade_no))
+        order = result.scalar_one_or_none()
+        if not order:
+            logger.error("[Payment] refund order not found: %s", out_trade_no)
+            return False
+        if order.status == "refunded":
+            return True
+        if order.status != "paid":
+            logger.warning("[Payment] refund skipped for non-paid order: %s status=%s", out_trade_no, order.status)
+            return False
+
+        if _is_points_recharge_order(order):
+            await _revoke_recharge_points(session, order, refund_id)
+            await _revoke_first_recharge_reward(session, order, refund_id)
+        else:
+            await _revoke_vip_gift_points(session, order, refund_id)
+            await _cancel_commission_points(session, order, refund_id)
+            await _revoke_vip_duration(session, order)
+
+        order.status = "refunded"
+        order.updated_at = _parse_paid_at(refunded_at) if refunded_at else datetime.utcnow()
+        await session.flush()
         return True
 
 
@@ -154,6 +189,122 @@ async def _grant_recharge_points(session: AsyncSession, order: Order) -> None:
         related_id=str(order.id),
         remark=f"充值积分到账：{recharge_points}分",
     )
+
+
+async def _revoke_recharge_points(session: AsyncSession, order: Order, refund_id: str = "") -> None:
+    ledger = await PointsAccountService.get_ledger_by_idempotency_key(session, f"points_recharge:{order.id}")
+    if not ledger or int(ledger.points_delta) <= 0:
+        return
+
+    await PointsAccountService.clawback_points(
+        session=session,
+        user_id=order.user_id,
+        points=int(ledger.points_delta),
+        availability="consumable",
+        idempotency_key=f"refund:points_recharge:{order.id}",
+        related_type="order",
+        related_id=str(order.id),
+        source="refund",
+        change_type="points_recharge_refund",
+        remark=f"refund points recharge; refund_id={refund_id or order.out_trade_no}",
+    )
+
+
+async def _revoke_vip_gift_points(session: AsyncSession, order: Order, refund_id: str = "") -> None:
+    ledger = await PointsAccountService.get_ledger_by_idempotency_key(session, f"vip_gift:{order.id}")
+    if not ledger or int(ledger.points_delta) <= 0:
+        return
+
+    await PointsAccountService.clawback_points(
+        session=session,
+        user_id=order.user_id,
+        points=int(ledger.points_delta),
+        availability="withdrawable",
+        idempotency_key=f"refund:vip_gift:{order.id}",
+        related_type="order",
+        related_id=str(order.id),
+        source="refund",
+        change_type="vip_gift_refund",
+        remark=f"refund vip gift points; refund_id={refund_id or order.out_trade_no}",
+    )
+
+
+async def _revoke_first_recharge_reward(session: AsyncSession, order: Order, refund_id: str = "") -> None:
+    result = await session.execute(
+        select(PointsLedger).where(
+            PointsLedger.source == "invite",
+            PointsLedger.change_type == "invite_first_recharge",
+            PointsLedger.related_type == "invite_relation",
+            PointsLedger.remark.contains(str(order.id)),
+        )
+    )
+    ledger = result.scalar_one_or_none()
+    if not ledger or int(ledger.points_delta) <= 0:
+        return
+
+    await PointsAccountService.clawback_points(
+        session=session,
+        user_id=ledger.user_id,
+        points=int(ledger.points_delta),
+        availability="consumable",
+        idempotency_key=f"refund:invite_first_recharge:{order.id}:{ledger.user_id}",
+        related_type="order",
+        related_id=str(order.id),
+        source="refund",
+        change_type="invite_first_recharge_refund",
+        remark=f"refund invite first recharge reward; refund_id={refund_id or order.out_trade_no}",
+    )
+
+
+async def _cancel_commission_points(session: AsyncSession, order: Order, refund_id: str = "") -> None:
+    records_result = await session.execute(select(CommissionRecord).where(CommissionRecord.order_id == order.id))
+    records = list(records_result.scalars().all())
+    for record in records:
+        if record.status == "cancelled":
+            continue
+
+        ledger_result = await session.execute(
+            select(PointsLedger).where(
+                PointsLedger.source == "invite",
+                PointsLedger.change_type == "invite_rebate_frozen",
+                PointsLedger.related_type == "commission_record",
+                PointsLedger.related_id == str(record.id),
+            )
+        )
+        ledger = ledger_result.scalar_one_or_none()
+        if ledger and int(ledger.points_delta) > 0:
+            availability = "withdrawable" if record.status == "settled" else "frozen"
+            change_type = "invite_rebate_refund_settled" if record.status == "settled" else "invite_rebate_refund_frozen"
+            await PointsAccountService.clawback_points(
+                session=session,
+                user_id=record.user_id,
+                points=int(ledger.points_delta),
+                availability=availability,
+                idempotency_key=f"refund:invite_rebate:{order.id}:{record.id}",
+                related_type="commission_record",
+                related_id=str(record.id),
+                source="refund",
+                change_type=change_type,
+                remark=f"refund invite rebate; refund_id={refund_id or order.out_trade_no}",
+            )
+
+        record.status = "cancelled"
+    await session.flush()
+
+
+async def _revoke_vip_duration(session: AsyncSession, order: Order) -> None:
+    result = await session.execute(select(User).where(User.id == order.user_id))
+    user = result.scalar_one_or_none()
+    if not user or not user.vip_expire_at:
+        return
+
+    days = order.duration_days or PERIOD_DAYS.get(order.period, 30)
+    user.vip_expire_at = user.vip_expire_at - timedelta(days=days)
+    if user.vip_expire_at <= datetime.utcnow():
+        user.is_vip = False
+        user.vip_expire_at = None
+    user.updated_at = datetime.utcnow()
+    await session.flush()
 
 
 def _is_points_recharge_order(order: Order) -> bool:

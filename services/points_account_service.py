@@ -97,6 +97,59 @@ class PointsAccountService:
         return ledger, account, True
 
     @staticmethod
+    async def clawback_points(
+        session: AsyncSession,
+        user_id: UUID,
+        points: int,
+        availability: str,
+        idempotency_key: str,
+        related_type: str,
+        related_id: str,
+        remark: str | None = None,
+        *,
+        source: str = "refund",
+        change_type: str = "payment_refund_clawback",
+    ) -> Tuple[PointsLedger, UserAccount, bool]:
+        existing = await PointsAccountService.get_ledger_by_idempotency_key(session, idempotency_key)
+        account, _ = await PointsAccountService.ensure_user_account(session, user_id)
+        if existing:
+            return existing, account, False
+
+        delta = int(points)
+        if delta <= 0:
+            raise ValueError("points must be positive")
+
+        account.total_points -= delta
+        if availability == "withdrawable":
+            account.withdrawable_points -= delta
+        elif availability == "frozen":
+            account.frozen_points -= delta
+        elif availability == "consumable":
+            account.consumable_points -= delta
+        else:
+            raise ValueError(f"unsupported availability: {availability}")
+        account.updated_at = datetime.utcnow()
+
+        ledger = PointsLedger(
+            user_id=user_id,
+            account_id=account.id,
+            change_type=change_type,
+            source=source,
+            availability=availability,
+            points_delta=-delta,
+            balance_withdrawable_after=int(account.withdrawable_points),
+            balance_frozen_after=int(account.frozen_points),
+            balance_consumable_after=int(account.consumable_points),
+            related_type=related_type,
+            related_id=related_id,
+            idempotency_key=idempotency_key,
+            remark=remark,
+        )
+        session.add(ledger)
+        await session.flush()
+        return ledger, account, True
+
+    @staticmethod
     async def move_withdrawable_to_locked(
         session: AsyncSession,
         user_id: UUID,
