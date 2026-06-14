@@ -981,6 +981,7 @@ async def admin_netdisk_crawler_status(session: AsyncSession = Depends(get_sessi
             "note": "高置信自动入库，低置信进入待审核",
         },
     ]
+    worker_status = await _fetch_crawler_worker_status()
     return response(
         data={
             "crawlers": crawlers,
@@ -988,14 +989,77 @@ async def admin_netdisk_crawler_status(session: AsyncSession = Depends(get_sessi
                 "mode": "independent",
                 "url": os.getenv("CRAWLER_WORKER_URL", "http://crawler-worker:8010"),
                 "note": "浏览器采集运行在独立 worker，主 API 不安装 Chromium",
+                **worker_status,
             },
             "browser_guard": {
                 "concurrency": int(os.getenv("BROWSER_AUTOMATION_CONCURRENCY", "1")),
                 "force_cleanup": os.getenv("BROWSER_FORCE_CLEANUP", "true").lower() != "false",
+                "browser_processes": int(worker_status.get("browser_processes") or 0),
+                "browser_process_limit": int(worker_status.get("browser_process_limit") or 0),
             },
             "generated_at": datetime.utcnow().isoformat(),
         }
     )
+
+
+async def _fetch_crawler_worker_status() -> dict:
+    worker_url = os.getenv("CRAWLER_WORKER_URL", "http://crawler-worker:8010").rstrip("/")
+    try:
+        import httpx
+
+        async with httpx.AsyncClient(timeout=5) as client:
+            worker_resp = await client.get(f"{worker_url}/status")
+            worker_resp.raise_for_status()
+        payload = worker_resp.json()
+        return {
+            "reachable": True,
+            "status": payload.get("status", "ok"),
+            "service": payload.get("service", "crawler-worker"),
+            "chromium": payload.get("chromium", ""),
+            "browser_processes": payload.get("browser_processes", 0),
+            "browser_process_limit": payload.get("browser_process_limit", 0),
+            "auto_cleaned": payload.get("auto_cleaned", 0),
+            "task_timeout_seconds": payload.get("task_timeout_seconds", 0),
+            "failure_breaker_threshold": payload.get("failure_breaker_threshold", 0),
+            "failure_breaker_cooldown_seconds": payload.get("failure_breaker_cooldown_seconds", 0),
+            "running_tasks": payload.get("running_tasks", []),
+            "blocked_tasks": payload.get("blocked_tasks", []),
+            "tasks": payload.get("tasks", []),
+        }
+    except Exception as exc:
+        logger.warning("crawler worker status unavailable: %s", exc)
+        return {
+            "reachable": False,
+            "status": "offline",
+            "service": "crawler-worker",
+            "error": str(exc),
+            "browser_processes": 0,
+            "browser_process_limit": 0,
+            "tasks": [],
+            "running_tasks": [],
+            "blocked_tasks": [],
+        }
+
+
+@router.post("/netdisk/crawlers/maintenance/cleanup-browsers", summary="cleanup crawler worker browser processes")
+async def admin_cleanup_crawler_browsers(x_admin_role: str = Header("operator")):
+    if not _is_quality_supervisor(x_admin_role):
+        return response([], 403, "需要主管权限才能清理浏览器进程")
+
+    try:
+        import httpx
+
+        worker_url = os.getenv("CRAWLER_WORKER_URL", "http://crawler-worker:8010").rstrip("/")
+        async with httpx.AsyncClient(timeout=30) as client:
+            worker_resp = await client.post(f"{worker_url}/maintenance/cleanup-browsers")
+            worker_resp.raise_for_status()
+        worker_payload = worker_resp.json()
+        if worker_payload.get("code") not in {0, 200, None}:
+            return response(worker_payload.get("data", []), 500, worker_payload.get("msg") or "清理失败")
+        return response(data=worker_payload.get("data", worker_payload), msg=worker_payload.get("msg") or "浏览器进程清理完成")
+    except Exception as exc:
+        logger.error("crawler browser cleanup failed: %s", exc, exc_info=True)
+        return response([], 500, f"清理失败：{exc}")
 
 
 @router.post("/netdisk/crawlers/{crawler_key}/run", summary="run one netdisk crawler latest batch")
