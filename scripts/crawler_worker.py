@@ -75,10 +75,10 @@ async def run_crawler(crawler_key: str) -> dict:
     raise HTTPException(status_code=404, detail="未知采集任务")
 
 
-def _browser_status() -> dict:
+def _browser_status(*, auto_cleanup: bool = False) -> dict:
     count = browser_process_count()
     cleaned = 0
-    if BROWSER_PROCESS_LIMIT > 0 and count > BROWSER_PROCESS_LIMIT:
+    if auto_cleanup and BROWSER_PROCESS_LIMIT > 0 and count > BROWSER_PROCESS_LIMIT:
         cleaned = cleanup_all_browser_processes("crawler-worker browser process limit")
         count = browser_process_count()
     return {
@@ -124,7 +124,7 @@ async def _run_with_state(crawler_key: str, *, force: bool = False) -> dict:
         task["last_error"] = ""
 
     try:
-        _browser_status()
+        _browser_status(auto_cleanup=True)
         result = await asyncio.wait_for(run_crawler(crawler_key), timeout=TASK_TIMEOUT_SECONDS)
     except Exception as exc:
         async with _state_lock:
