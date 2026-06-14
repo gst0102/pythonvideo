@@ -1,23 +1,66 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { computed, ref } from "vue";
 import { onShow } from "@dcloudio/uni-app";
-import { categories, requests, userProfile } from "@/data/mock";
-import { getNetdiskResources, type NetdiskResource } from "@/utils/api";
+import { categories, requests } from "@/data/mock";
+import {
+  ensureWechatLogin,
+  favoriteNetdiskResource,
+  getNetdiskFavorites,
+  getNetdiskResources,
+  getUserProfile,
+  hasLoginToken,
+  type NetdiskResource
+} from "@/utils/api";
 
 const resources = ref<NetdiskResource[]>([]);
 const loading = ref(false);
+const userPoints = ref(0);
+const userCredit = ref(100);
+const userAvatar = ref("");
+const userNickname = ref("微信用户");
+const loggedIn = ref(false);
+const favoriteIds = ref<string[]>([]);
+const userInitial = computed(() => (userNickname.value || "我").slice(0, 1));
 
 const go = (url: string) => {
   uni.navigateTo({ url });
 };
 
 const levelText = (level?: string) => ({ normal: "普通", featured: "精选", official: "官方" }[level || ""] || level || "-");
+const uploaderInitial = (item: NetdiskResource) => (item.uploader_nickname || "官").slice(0, 1);
+const creditText = (score?: number) => `信用${Number(score || 100)}`;
+
+const loadProfile = async () => {
+  if (!hasLoginToken()) {
+    loggedIn.value = false;
+    userPoints.value = 0;
+    userCredit.value = 100;
+    userAvatar.value = "";
+    userNickname.value = "微信用户";
+    favoriteIds.value = [];
+    return;
+  }
+  try {
+    const profile = await getUserProfile();
+    loggedIn.value = true;
+    userPoints.value = profile.account?.consumable_points || 0;
+    userCredit.value = profile.credit_score || 100;
+    userAvatar.value = profile.avatar || "";
+    userNickname.value = profile.nickname || "微信用户";
+  } catch {
+    loggedIn.value = false;
+  }
+};
 
 const loadFeatured = async () => {
   loading.value = true;
   try {
     const data = await getNetdiskResources({ sort: "latest", page: 1, page_size: 3 });
     resources.value = data.resources || [];
+    if (hasLoginToken()) {
+      const favorites = await getNetdiskFavorites();
+      favoriteIds.value = favorites.favorites.map((item) => item.resource.id);
+    }
   } catch {
     resources.value = [];
   } finally {
@@ -25,7 +68,24 @@ const loadFeatured = async () => {
   }
 };
 
-onShow(loadFeatured);
+onShow(() => {
+  loadProfile();
+  loadFeatured();
+});
+
+const isFavorited = (id: string) => favoriteIds.value.includes(id);
+
+const quickFavorite = async (item: NetdiskResource) => {
+  try {
+    await ensureWechatLogin();
+    const data = await favoriteNetdiskResource(item.id);
+    if (!favoriteIds.value.includes(item.id)) favoriteIds.value = [...favoriteIds.value, item.id];
+    item.favorites = data.resource.favorites;
+    uni.showToast({ title: "已加入我的收藏", icon: "success" });
+  } catch (error: any) {
+    uni.showToast({ title: error?.message || "收藏失败", icon: "none" });
+  }
+};
 </script>
 
 <template>
@@ -35,9 +95,13 @@ onShow(loadFeatured);
         <view class="app-name">互助资源库</view>
         <view class="muted subtitle">网盘资料互助工具</view>
       </view>
-      <view class="point-pill" @click="uni.switchTab({ url: '/pages/earn/index' })">
-        <text class="points">{{ userProfile.points }}</text>
-        <text> 分</text>
+      <view class="user-pill" @click="uni.switchTab({ url: '/pages/mine/index' })">
+        <image v-if="userAvatar" class="user-avatar" :src="userAvatar" mode="aspectFill" />
+        <view v-else class="user-avatar fallback">{{ userInitial }}</view>
+        <view>
+          <view class="points">{{ loggedIn ? userPoints : "登录" }}</view>
+          <view class="pill-sub">{{ loggedIn ? `信用${userCredit}` : "查看积分" }}</view>
+        </view>
       </view>
     </view>
 
@@ -80,8 +144,20 @@ onShow(loadFeatured);
           <text class="tag">{{ item.pan }}</text>
           <text class="tag tag-warning">{{ levelText(item.level) }}</text>
           <text class="tag">{{ item.category }}</text>
+          <text class="tag tag-credit">{{ creditText(item.uploader_credit_score) }}</text>
         </view>
-        <view class="meta">已验证{{ item.verified_at }} · 获取{{ item.downloads }} · 收藏{{ item.favorites }}</view>
+        <view class="uploader-row">
+          <image v-if="item.uploader_avatar" class="uploader-avatar" :src="item.uploader_avatar" mode="aspectFill" />
+          <view v-else class="uploader-avatar fallback">{{ uploaderInitial(item) }}</view>
+          <text>{{ item.uploader_nickname || "平台精选" }}</text>
+          <text class="muted">上传者</text>
+        </view>
+        <view class="resource-foot">
+          <view class="meta">已验证{{ item.verified_at }} · 获取{{ item.downloads }} · 收藏{{ item.favorites }}</view>
+          <view class="favorite-btn" :class="{ active: isFavorited(item.id) }" @click.stop="quickFavorite(item)">
+            {{ isFavorited(item.id) ? "已收藏" : "收藏" }}
+          </view>
+        </view>
       </view>
       <view v-if="!loading && resources.length === 0" class="muted">暂无精选资源</view>
     </view>
@@ -119,14 +195,38 @@ onShow(loadFeatured);
   font-size: 24rpx;
 }
 
-.point-pill {
-  min-width: 132rpx;
-  height: 64rpx;
+.user-pill {
+  display: flex;
+  align-items: center;
+  gap: 12rpx;
+  min-width: 172rpx;
+  min-height: 72rpx;
   border-radius: 999rpx;
   background: #ffffff;
-  line-height: 64rpx;
+  padding: 8rpx 16rpx 8rpx 10rpx;
+}
+
+.user-avatar,
+.uploader-avatar {
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: $tag-bg;
+  color: $primary-dark;
+  font-weight: 800;
   text-align: center;
-  font-size: 26rpx;
+}
+
+.user-avatar {
+  width: 52rpx;
+  height: 52rpx;
+  font-size: 24rpx;
+  line-height: 52rpx;
+}
+
+.pill-sub {
+  margin-top: 2rpx;
+  color: $text-muted;
+  font-size: 20rpx;
 }
 
 .hero {
@@ -170,5 +270,57 @@ onShow(loadFeatured);
   gap: 10rpx;
   margin-top: 16rpx;
   flex-wrap: wrap;
+}
+
+.tag-credit {
+  background: #eef8f4;
+  color: $primary-dark;
+}
+
+.uploader-row {
+  display: flex;
+  align-items: center;
+  gap: 10rpx;
+  margin-top: 14rpx;
+  color: $text-main;
+  font-size: 24rpx;
+}
+
+.uploader-avatar {
+  width: 36rpx;
+  height: 36rpx;
+  font-size: 19rpx;
+  line-height: 36rpx;
+}
+
+.resource-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16rpx;
+  margin-top: 12rpx;
+}
+
+.resource-foot .meta {
+  flex: 1;
+  min-width: 0;
+}
+
+.favorite-btn {
+  flex: 0 0 auto;
+  min-width: 112rpx;
+  height: 52rpx;
+  border: 1rpx solid $border;
+  border-radius: 12rpx;
+  background: #ffffff;
+  color: $primary-dark;
+  font-size: 24rpx;
+  font-weight: 700;
+  line-height: 52rpx;
+  text-align: center;
+}
+
+.favorite-btn.active {
+  background: $tag-bg;
 }
 </style>

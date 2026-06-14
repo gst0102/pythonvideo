@@ -31,6 +31,8 @@ const favorited = ref(false);
 const reportPanelVisible = ref(false);
 const reportNote = ref("");
 const unlocked = computed(() => access.value.unlocked);
+const uploaderInitial = computed(() => (resource.value?.uploader_nickname || "官").slice(0, 1));
+const creditText = computed(() => `上传信用${Number(resource.value?.uploader_credit_score || 100)}分`);
 
 onLoad(async (query) => {
   if (typeof query?.id === "string") {
@@ -99,7 +101,19 @@ const toggleFavorite = async () => {
     const data = favorited.value ? await unfavoriteNetdiskResource(resource.value.id) : await favoriteNetdiskResource(resource.value.id);
     resource.value = data.resource;
     favorited.value = data.favorited;
-    uni.showToast({ title: favorited.value ? "已收藏" : "已取消收藏", icon: "none" });
+    if (favorited.value) {
+      uni.showModal({
+        title: "已加入我的收藏",
+        content: "可以在“我的-我的收藏”里查看这个资源。",
+        confirmText: "去查看",
+        cancelText: "继续浏览",
+        success: (res) => {
+          if (res.confirm) uni.navigateTo({ url: "/pages/favorites/index" });
+        }
+      });
+      return;
+    }
+    uni.showToast({ title: "已取消收藏", icon: "none" });
   } catch (error: any) {
     uni.showToast({ title: error?.message || "收藏失败", icon: "none" });
   }
@@ -146,6 +160,15 @@ const levelText = (level?: string) => ({ normal: "普通", featured: "精选", o
           <text class="tag">{{ resource.pan }}</text>
           <text class="tag tag-warning">{{ levelText(resource.level) }}</text>
           <text class="tag">{{ resource.category }}</text>
+          <text class="tag tag-credit">{{ creditText }}</text>
+        </view>
+        <view class="uploader-card">
+          <image v-if="resource.uploader_avatar" class="uploader-avatar" :src="resource.uploader_avatar" mode="aspectFill" />
+          <view v-else class="uploader-avatar fallback">{{ uploaderInitial }}</view>
+          <view>
+            <view class="uploader-name">{{ resource.uploader_nickname || "平台精选" }}</view>
+            <view class="muted">信用越高，资源推荐排序越靠前</view>
+          </view>
         </view>
         <view class="price"><text class="points">{{ resource.cost_points }}</text> 积分获取</view>
       </view>
@@ -203,6 +226,40 @@ const levelText = (level?: string) => ({ normal: "普通", featured: "精选", o
   gap: 10rpx;
   margin-top: 18rpx;
   flex-wrap: wrap;
+}
+
+.tag-credit {
+  background: #eef8f4;
+  color: $primary-dark;
+}
+
+.uploader-card {
+  display: flex;
+  align-items: center;
+  gap: 14rpx;
+  margin-top: 20rpx;
+  border-radius: 14rpx;
+  background: $tag-bg;
+  padding: 16rpx;
+}
+
+.uploader-avatar {
+  width: 52rpx;
+  height: 52rpx;
+  border-radius: 50%;
+  background: #ffffff;
+  color: $primary-dark;
+  font-size: 24rpx;
+  font-weight: 800;
+  line-height: 52rpx;
+  text-align: center;
+}
+
+.uploader-name {
+  margin-bottom: 4rpx;
+  color: $text-main;
+  font-size: 26rpx;
+  font-weight: 800;
 }
 
 .price {

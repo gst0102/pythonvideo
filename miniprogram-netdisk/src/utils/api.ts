@@ -1,4 +1,4 @@
-const API_BASE = "http://127.0.0.1:8000";
+const API_BASE = (import.meta.env.VITE_API_BASE_URL || "https://api.lifelove.top").replace(/\/$/, "");
 
 export interface UserAccount {
   total_points: number;
@@ -19,6 +19,14 @@ export interface NetdiskResource {
   favorites: number;
   description: string;
   is_active: boolean;
+  quality_score?: number;
+  uploader_credit_level?: string;
+  uploader_credit_score?: number;
+  uploader_nickname?: string;
+  uploader_avatar?: string;
+  valid_days?: number;
+  report_count?: number;
+  invalid_count?: number;
 }
 
 export interface ResourceListResponse {
@@ -79,6 +87,11 @@ export interface LoginResponse {
     nickname: string;
     avatar: string;
     account: UserAccount;
+    credit_score: number;
+    contribution_score: number;
+    credit_level: string;
+    risk_level: string;
+    credit_restore_tip: string;
   };
 }
 
@@ -89,6 +102,11 @@ export interface UserProfileResponse {
   avatar: string;
   invite_code: string;
   account: UserAccount;
+  credit_score: number;
+  contribution_score: number;
+  credit_level: string;
+  risk_level: string;
+  credit_restore_tip: string;
 }
 
 export interface FavoriteListResponse {
@@ -125,6 +143,8 @@ export interface UploadListResponse {
     pan: string;
     status: string;
     reward_points: number;
+    reward_released_points: number;
+    valid_days_rewarded: number;
     audit_note: string;
     created_at: string;
   }>;
@@ -145,9 +165,35 @@ export interface RepairListResponse {
   }>;
 }
 
+export interface PointsLedgerItem {
+  id: string;
+  change_type: string;
+  source: string;
+  availability: string;
+  points_delta: number;
+  balance_withdrawable_after: number;
+  balance_frozen_after: number;
+  balance_consumable_after: number;
+  related_type?: string;
+  related_id?: string;
+  remark?: string;
+  created_at: string;
+}
+
+export interface PointsLedgerResponse {
+  page: number;
+  page_size: number;
+  total: number;
+  has_more: boolean;
+  account: UserAccount;
+  items: PointsLedgerItem[];
+}
+
 const getToken = () => {
   return uni.getStorageSync("token") || uni.getStorageSync("access_token") || "";
 };
+
+export const hasLoginToken = () => Boolean(getToken());
 
 export const setToken = (token: string) => {
   uni.setStorageSync("token", token);
@@ -248,6 +294,14 @@ export const getMyNetdiskUploads = () => {
 
 export const getMyNetdiskRepairs = () => {
   return request<RepairListResponse>("/netdisk/repairs/mine");
+};
+
+export const getPointsLedger = (params: Record<string, string | number | undefined> = {}) => {
+  const query = Object.keys(params)
+    .filter((key) => params[key] !== undefined && params[key] !== "")
+    .map((key) => `${encodeURIComponent(key)}=${encodeURIComponent(String(params[key]))}`)
+    .join("&");
+  return request<PointsLedgerResponse>(`/points/ledger${query ? `?${query}` : ""}`);
 };
 
 export const favoriteNetdiskResource = (id: string) => {

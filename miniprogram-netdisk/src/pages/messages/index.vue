@@ -86,7 +86,7 @@ onShow(loadMessages);
         v-for="item in notifications"
         :key="item.id"
         class="card message-card"
-        :class="{ unread-card: item.status === 'unread' }"
+        :class="{ 'unread-card': item.status === 'unread' }"
         @click="readMessage(item)"
       >
         <view class="row between">

@@ -2,7 +2,14 @@
 import { ref } from "vue";
 import { onLoad, onReachBottom } from "@dcloudio/uni-app";
 import { categories, panFilters } from "@/data/mock";
-import { getNetdiskResources, type NetdiskResource } from "@/utils/api";
+import {
+  ensureWechatLogin,
+  favoriteNetdiskResource,
+  getNetdiskFavorites,
+  getNetdiskResources,
+  hasLoginToken,
+  type NetdiskResource
+} from "@/utils/api";
 
 const sorts = [
   { label: "最新", value: "latest" },
@@ -20,9 +27,19 @@ const keyword = ref("");
 const activeCategory = ref("全部分类");
 const activePan = ref("全部");
 const activeSort = ref("latest");
+const favoriteIds = ref<string[]>([]);
 
 const goDetail = (id: string) => uni.navigateTo({ url: `/pages/resources/detail?id=${id}` });
 const levelText = (level?: string) => ({ normal: "普通", featured: "精选", official: "官方" }[level || ""] || level || "-");
+const creditText = (level?: string) => ({ excellent: "优质上传者", good: "高信用", normal: "", watch: "待观察" }[level || ""] || "");
+const creditScoreText = (score?: number) => `上传信用${Number(score || 100)}分`;
+const uploaderInitial = (item: NetdiskResource) => (item.uploader_nickname || "官").slice(0, 1);
+const validText = (days?: number) => {
+  const value = Number(days || 0);
+  if (value >= 30) return "30天有效";
+  if (value >= 7) return "7天有效";
+  return "";
+};
 
 const loadResources = async (reset = false) => {
   if (loading.value) return;
@@ -41,6 +58,10 @@ const loadResources = async (reset = false) => {
     resources.value = reset ? data.resources : [...resources.value, ...data.resources];
     hasMore.value = data.has_more;
     page.value = data.page + 1;
+    if (hasLoginToken()) {
+      const favorites = await getNetdiskFavorites();
+      favoriteIds.value = favorites.favorites.map((item) => item.resource.id);
+    }
   } catch (error: any) {
     errorText.value = error?.message || "资源列表加载失败";
   } finally {
@@ -64,6 +85,19 @@ const chooseSort = (item: string) => {
 };
 
 const search = () => loadResources(true);
+const isFavorited = (id: string) => favoriteIds.value.includes(id);
+
+const quickFavorite = async (item: NetdiskResource) => {
+  try {
+    await ensureWechatLogin();
+    const data = await favoriteNetdiskResource(item.id);
+    if (!favoriteIds.value.includes(item.id)) favoriteIds.value = [...favoriteIds.value, item.id];
+    item.favorites = data.resource.favorites;
+    uni.showToast({ title: "已加入我的收藏", icon: "success" });
+  } catch (error: any) {
+    uni.showToast({ title: error?.message || "收藏失败", icon: "none" });
+  }
+};
 
 onLoad(() => loadResources(true));
 onReachBottom(() => {
@@ -133,6 +167,14 @@ onReachBottom(() => {
               <text class="tag tag-warning">{{ levelText(item.level) }}</text>
               <text class="tag">{{ item.pan }}</text>
               <text class="tag">{{ item.category }}</text>
+              <text class="tag tag-credit">{{ creditScoreText(item.uploader_credit_score) }}</text>
+              <text v-if="creditText(item.uploader_credit_level)" class="tag">{{ creditText(item.uploader_credit_level) }}</text>
+              <text v-if="validText(item.valid_days)" class="tag">{{ validText(item.valid_days) }}</text>
+            </view>
+            <view class="uploader-row">
+              <image v-if="item.uploader_avatar" class="uploader-avatar" :src="item.uploader_avatar" mode="aspectFill" />
+              <view v-else class="uploader-avatar fallback">{{ uploaderInitial(item) }}</view>
+              <text>{{ item.uploader_nickname || "平台精选" }}</text>
             </view>
           </view>
           <view class="cost">
@@ -140,7 +182,12 @@ onReachBottom(() => {
             <view class="muted">积分</view>
           </view>
         </view>
-        <view class="meta">已验证{{ item.verified_at }} · 获取{{ item.downloads }} · 收藏{{ item.favorites }}</view>
+        <view class="resource-foot">
+          <view class="meta">已验证{{ item.verified_at }} · 获取{{ item.downloads }} · 收藏{{ item.favorites }} · 质量{{ item.quality_score || 0 }}</view>
+          <view class="favorite-btn" :class="{ active: isFavorited(item.id) }" @click.stop="quickFavorite(item)">
+            {{ isFavorited(item.id) ? "已收藏" : "收藏" }}
+          </view>
+        </view>
       </view>
       <view v-if="!loading && resources.length === 0" class="empty">暂无符合条件的资源</view>
       <view v-if="loading" class="load-tip">加载中...</view>
@@ -222,9 +269,66 @@ onReachBottom(() => {
   flex-wrap: wrap;
 }
 
+.tag-credit {
+  background: #eef8f4;
+  color: $primary-dark;
+}
+
+.uploader-row {
+  display: flex;
+  align-items: center;
+  gap: 10rpx;
+  margin-top: 14rpx;
+  color: $text-muted;
+  font-size: 24rpx;
+}
+
+.uploader-avatar {
+  width: 36rpx;
+  height: 36rpx;
+  border-radius: 50%;
+  background: $tag-bg;
+  color: $primary-dark;
+  font-size: 19rpx;
+  font-weight: 800;
+  line-height: 36rpx;
+  text-align: center;
+}
+
 .cost {
   width: 96rpx;
   text-align: right;
+}
+
+.resource-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16rpx;
+  margin-top: 14rpx;
+}
+
+.resource-foot .meta {
+  flex: 1;
+  min-width: 0;
+}
+
+.favorite-btn {
+  flex: 0 0 auto;
+  min-width: 112rpx;
+  height: 52rpx;
+  border: 1rpx solid $border;
+  border-radius: 12rpx;
+  background: #ffffff;
+  color: $primary-dark;
+  font-size: 24rpx;
+  font-weight: 700;
+  line-height: 52rpx;
+  text-align: center;
+}
+
+.favorite-btn.active {
+  background: $tag-bg;
 }
 
 .empty,

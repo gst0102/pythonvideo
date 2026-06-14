@@ -57,6 +57,24 @@
       }
     },
     {
+      "path": "pages/uploads/mine",
+      "style": {
+        "navigationBarTitleText": "我的上传"
+      }
+    },
+    {
+      "path": "pages/favorites/index",
+      "style": {
+        "navigationBarTitleText": "我的收藏"
+      }
+    },
+    {
+      "path": "pages/points/ledger",
+      "style": {
+        "navigationBarTitleText": "积分明细"
+      }
+    },
+    {
       "path": "pages/mine/index",
       "style": {
         "navigationBarTitleText": "我的"
