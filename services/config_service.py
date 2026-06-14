@@ -119,6 +119,26 @@ DEFAULT_CONFIGS: Dict[str, Dict[str, Any]] = {
         "points_per_reward": 5.0,
         "cash_per_reward": 0.05,
     },
+    "stage2_points_config": {
+        "display_unit": "积分",
+        "exchange_rate": 100,
+        "checkin_base_points_normal": 1,
+        "checkin_base_points_member": 2,
+        "checkin_ad_bonus_min": 1,
+        "checkin_ad_bonus_max": 3,
+        "checkin_ad_bonus_points": 3,
+        "game_base_points_min": -2,
+        "game_base_points_max": 4,
+        "game_rps_win_points": 4,
+        "game_rps_lose_points": -2,
+        "game_ad_multiplier": 2,
+    },
+    "stage2_task_config": {
+        "daily_game_task_limit_normal": 10,
+        "daily_game_task_limit_member_month": 100,
+        "daily_game_task_limit_member_quarter": 150,
+        "daily_game_task_limit_member_year": 200,
+    },
     "stage2_game_bonus_ad_config": {
         "scene": "game_bonus",
         "instances": [
