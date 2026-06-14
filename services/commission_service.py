@@ -12,6 +12,7 @@ import logging
 from typing import List, Tuple
 from uuid import UUID
 
+from sqlalchemy import String, cast
 from sqlmodel import select, func
 from sqlmodel.ext.asyncio.session import AsyncSession
 
@@ -114,16 +115,36 @@ class CommissionService:
         user = await session.get(User, user_id)
         if not user:
             return {}
+        account, _ = await PointsAccountService.ensure_user_account(session, user_id)
+        reward_summary = await _build_invite_reward_summary(session, user_id)
+        member_count = (
+            await session.execute(
+                select(func.count())
+                .select_from(User)
+                .where(User.parent_id == user_id, User.is_vip == True)  # noqa: E712
+            )
+        ).scalar() or 0
 
         return {
             "invite_code": user.invite_code,
             "direct_count": user.invite_count,
             "indirect_count": user.indirect_count,
             "team_count": user.team_count,
+            "member_count": int(member_count),
             "total_income": float(user.total_income),
             "balance": float(user.balance),
             "total_withdrawn": float(user.total_withdrawn),
             "frozen_balance": float(user.frozen_balance),
+            "total_reward_points": int(reward_summary["total_reward_points"]),
+            "frozen_reward_points": int(reward_summary["frozen_reward_points"]),
+            "available_reward_points": int(reward_summary["available_reward_points"]),
+            "latest_reward": reward_summary["latest_reward"],
+            "account": {
+                "total_points": int(account.total_points),
+                "withdrawable_points": int(account.withdrawable_points),
+                "frozen_points": int(account.frozen_points),
+                "consumable_points": int(account.consumable_points),
+            },
         }
 
     @staticmethod
@@ -162,3 +183,87 @@ class CommissionService:
         } for u in invitees]
 
         return enriched, total
+
+
+async def _build_invite_reward_summary(session: AsyncSession, user_id: UUID) -> dict:
+    total_reward_points = (
+        await session.execute(
+            select(func.coalesce(func.sum(PointsLedger.points_delta), 0)).where(
+                PointsLedger.user_id == user_id,
+                PointsLedger.source == "invite",
+                PointsLedger.points_delta > 0,
+            )
+        )
+    ).scalar() or 0
+    frozen_reward_points = (
+        await session.execute(
+            select(func.coalesce(func.sum(PointsLedger.points_delta), 0))
+            .select_from(PointsLedger)
+            .join(CommissionRecord, PointsLedger.related_id == cast(CommissionRecord.id, String))
+            .where(
+                PointsLedger.user_id == user_id,
+                PointsLedger.source == "invite",
+                PointsLedger.change_type == "invite_rebate_frozen",
+                PointsLedger.related_type == "commission_record",
+                PointsLedger.points_delta > 0,
+                CommissionRecord.status == "pending",
+            )
+        )
+    ).scalar() or 0
+    latest_reward = await _get_latest_invite_reward(session, user_id)
+    return {
+        "total_reward_points": int(total_reward_points),
+        "frozen_reward_points": int(frozen_reward_points),
+        "available_reward_points": max(int(total_reward_points) - int(frozen_reward_points), 0),
+        "latest_reward": latest_reward,
+    }
+
+
+async def _get_latest_invite_reward(session: AsyncSession, user_id: UUID) -> dict | None:
+    result = await session.execute(
+        select(PointsLedger)
+        .where(
+            PointsLedger.user_id == user_id,
+            PointsLedger.source == "invite",
+            PointsLedger.points_delta > 0,
+        )
+        .order_by(PointsLedger.created_at.desc(), PointsLedger.id.desc())
+        .limit(1)
+    )
+    ledger = result.scalar_one_or_none()
+    if not ledger:
+        return None
+
+    title = _invite_reward_title(ledger.change_type)
+    from_user_nickname = ""
+    level = None
+    if ledger.related_type == "commission_record" and ledger.related_id:
+        try:
+            record = await session.get(CommissionRecord, UUID(str(ledger.related_id)))
+        except ValueError:
+            record = None
+        if record:
+            level = int(record.level)
+            from_user = await session.get(User, record.from_user_id)
+            from_user_nickname = from_user.nickname if from_user else ""
+            title = "好友开通会员奖励" if level == 1 else "团队会员奖励"
+
+    return {
+        "id": str(ledger.id),
+        "title": title,
+        "points": int(ledger.points_delta),
+        "availability": ledger.availability,
+        "level": level,
+        "from_user_nickname": from_user_nickname,
+        "created_at": ledger.created_at.isoformat() if ledger.created_at else None,
+    }
+
+
+def _invite_reward_title(change_type: str) -> str:
+    mapping = {
+        "invite_register": "好友注册奖励",
+        "invite_first_resource": "好友首次获取资源奖励",
+        "invite_first_recharge": "好友首次充值奖励",
+        "invite_rebate_frozen": "好友开通会员奖励",
+    }
+    return mapping.get(change_type, "邀请奖励")
