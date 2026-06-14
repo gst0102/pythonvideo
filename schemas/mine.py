@@ -19,6 +19,8 @@ class MinePointsWallet(BaseModel):
     exchange_rate: int = 100
     total_points: int = 0
     today_estimated_points: int = 0
+    today_earned_points: int = 0
+    today_earn_cap: int = 60
     yesterday_settled_points: int = 0
     withdrawable_points: int = 0
     frozen_points: int = 0
@@ -47,6 +49,8 @@ class MineNetdiskStats(BaseModel):
     upload_count: int = 0
     repair_count: int = 0
     today_can_earn: int = 0
+    today_earned_points: int = 0
+    today_earn_cap: int = 60
 
 
 class MineAssetsResponse(BaseModel):

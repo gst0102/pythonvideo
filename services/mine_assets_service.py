@@ -47,6 +47,8 @@ class MineAssetsService:
                 "exchange_rate": exchange_rate,
                 "total_points": int(account_model.total_points),
                 "today_estimated_points": int(summary["today_estimated_points"]),
+                "today_earned_points": int(summary["today_earned_points"]),
+                "today_earn_cap": int(summary["today_earn_cap"]),
                 "yesterday_settled_points": int(summary["yesterday_settled_points"]),
                 "withdrawable_points": withdrawable_points,
                 "frozen_points": int(account_model.frozen_points),
@@ -62,7 +64,7 @@ class MineAssetsService:
                 "indirect_count": int(user.indirect_count),
                 "team_count": int(user.team_count),
             },
-            "netdisk_stats": await _build_netdisk_stats(session, user, overview),
+            "netdisk_stats": await _build_netdisk_stats(session, user, summary),
             "quick_actions": [
                 {
                     "code": "withdrawal",
@@ -88,33 +90,23 @@ class MineAssetsService:
         }
 
 
-async def _build_netdisk_stats(session, user: User, overview: Dict[str, Any]) -> Dict[str, int]:
+async def _build_netdisk_stats(session, user: User, summary: Dict[str, Any]) -> Dict[str, int]:
     favorite_count = await _count_rows(session, NetdiskFavorite, NetdiskFavorite.user_id == user.id)
     upload_count = await _count_rows(session, NetdiskUpload, NetdiskUpload.user_id == user.id)
     repair_count = await _count_rows(session, NetdiskRepair, NetdiskRepair.user_id == user.id)
-    game_task = overview.get("game_task") or {}
-    today_remaining = int(game_task.get("today_remaining") or 0)
-    max_points = _resolve_max_game_points(game_task)
+    today_earn_cap = int(summary.get("today_earn_cap") or 60)
+    today_earned_points = min(max(int(summary.get("today_earned_points") or 0), 0), today_earn_cap)
 
     return {
         "favorite_count": favorite_count,
         "upload_count": upload_count,
         "repair_count": repair_count,
-        "today_can_earn": max(today_remaining * max_points, 0),
+        "today_earned_points": today_earned_points,
+        "today_earn_cap": today_earn_cap,
+        "today_can_earn": max(today_earn_cap - today_earned_points, 0),
     }
 
 
 async def _count_rows(session, model, condition) -> int:
     result = await session.execute(select(func.count()).select_from(model).where(condition))
     return int(result.scalar_one() or 0)
-
-
-def _resolve_max_game_points(game_task: Dict[str, Any]) -> int:
-    games = game_task.get("games") or []
-    if not games:
-        return 2
-    points_range = str(games[0].get("points_range") or "1-2")
-    try:
-        return max(int(part) for part in points_range.split("-") if part.strip().isdigit())
-    except ValueError:
-        return 2

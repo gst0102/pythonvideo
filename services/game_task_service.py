@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import secrets
 from datetime import datetime
 from typing import Any, Dict, Tuple
 
@@ -22,6 +23,7 @@ from services.points_account_service import PointsAccountService
 
 VALID_GAME_CODES = {"rps"}
 VALID_RESULTS = {"win", "lose", "draw"}
+VALID_RPS_CHOICES = {"rock", "scissors", "paper"}
 DEFAULT_TASK_CONFIG = {
     "daily_game_task_limit_normal": 20,
     "daily_game_task_limit_member_month": 100,
@@ -29,8 +31,10 @@ DEFAULT_TASK_CONFIG = {
     "daily_game_task_limit_member_year": 300,
 }
 DEFAULT_POINTS_CONFIG = {
-    "game_base_points_min": 1,
-    "game_base_points_max": 2,
+    "game_base_points_min": -2,
+    "game_base_points_max": 4,
+    "game_rps_win_points": 4,
+    "game_rps_lose_points": -2,
     "game_ad_multiplier": 2,
 }
 
@@ -53,7 +57,7 @@ class GameTaskService:
             "today_limit": int(stat.game_tasks_limit),
             "today_remaining": max(int(stat.game_tasks_limit) - int(stat.game_tasks_used), 0),
             "member_bonus_enabled": bool(user.is_vip),
-            "reward_notice": "小游戏积分为预估积分，完整观看广告后领取，次日下午结算。",
+            "reward_notice": "猜拳赢了可领4分，平局0分，输了扣2分；赢局完整观看广告后记录积分。",
             "account": _build_account_summary(account),
             "games": [
                 {
@@ -72,17 +76,24 @@ class GameTaskService:
         *,
         game_code: str,
         round_id: str,
-        result: str,
+        result: str | None = None,
+        user_choice: str | None = None,
         ad_event_id: str | None = None,
     ) -> Tuple[Dict[str, Any], bool]:
         normalized_game_code = game_code.strip().lower()
-        normalized_result = result.strip().lower()
         if normalized_game_code not in VALID_GAME_CODES:
             raise ValueError("unsupported game code")
-        if normalized_result not in VALID_RESULTS:
-            raise ValueError("unsupported game result")
         if ad_event_id and ad_event_id.strip():
             raise ValueError("ad bonus must be claimed separately")
+
+        normalized_choice = (user_choice or "").strip().lower()
+        system_choice: str | None = None
+        if normalized_choice:
+            normalized_result, system_choice = _resolve_rps_round(normalized_choice)
+        else:
+            normalized_result = (result or "").strip().lower()
+            if normalized_result not in VALID_RESULTS:
+                raise ValueError("unsupported game result")
 
         today = datetime.utcnow().date()
         existing = await _get_game_round(session, round_id)
@@ -122,8 +133,35 @@ class GameTaskService:
         stat.game_tasks_used += 1
         stat.updated_at = datetime.utcnow()
 
+        ledger = None
+        if base_points < 0:
+            ledger, account, created = await PointsAccountService.add_points(
+                session=session,
+                user_id=user.id,
+                points=base_points,
+                source="game",
+                change_type="game_penalty",
+                availability="consumable",
+                idempotency_key=f"game_task_penalty:{user.id}:{round_id}",
+                related_type="game_round",
+                related_id=round_record.round_id,
+                remark=f"{round_record.game_code} lose penalty",
+            )
+            if created:
+                round_record.total_points = base_points
+                round_record.ledger_id = ledger.id
+                round_record.status = "penalty_applied"
+                round_record.updated_at = datetime.utcnow()
+
         await session.flush()
-        return _build_round_payload(account=account, stat=stat, round_record=round_record, ledger=None), True
+        return _build_round_payload(
+            account=account,
+            stat=stat,
+            round_record=round_record,
+            ledger=ledger,
+            user_choice=normalized_choice or None,
+            system_choice=system_choice,
+        ), True
 
     @staticmethod
     async def claim_round_ad_bonus(
@@ -359,13 +397,26 @@ async def _resolve_vip_period(session: AsyncSession, user_id) -> str:
 
 
 def _resolve_base_points(config: Dict[str, Any], result: str) -> int:
-    min_points = int(config["game_base_points_min"])
-    max_points = int(config["game_base_points_max"])
     if result == "win":
-        return max_points
-    if result == "draw":
-        return min_points
+        return int(config.get("game_rps_win_points") or config.get("game_base_points_max") or 4)
+    if result == "lose":
+        return int(config.get("game_rps_lose_points") or config.get("game_base_points_min") or -2)
     return 0
+
+
+def _resolve_rps_round(user_choice: str) -> tuple[str, str]:
+    if user_choice not in VALID_RPS_CHOICES:
+        raise ValueError("unsupported rps choice")
+    system_choice = secrets.choice(("rock", "scissors", "paper"))
+    if user_choice == system_choice:
+        return "draw", system_choice
+    if (
+        (user_choice == "rock" and system_choice == "scissors")
+        or (user_choice == "scissors" and system_choice == "paper")
+        or (user_choice == "paper" and system_choice == "rock")
+    ):
+        return "win", system_choice
+    return "lose", system_choice
 
 
 async def _get_today_estimated_points(session: AsyncSession, user_id, today) -> int:
@@ -391,7 +442,9 @@ def _build_ad_bonus_idempotency_key(user_id, round_id: str, ad_event_id: str) ->
 
 
 def _build_points_range(config: Dict[str, Any]) -> str:
-    return f"{int(config['game_base_points_min'])}-{int(config['game_base_points_max'])}"
+    win_points = int(config.get("game_rps_win_points") or config.get("game_base_points_max") or 4)
+    lose_points = int(config.get("game_rps_lose_points") or config.get("game_base_points_min") or -2)
+    return f"赢+{win_points} / 平0 / 输{lose_points}"
 
 
 def _build_account_summary(account: UserAccount) -> Dict[str, int]:
@@ -409,6 +462,8 @@ def _build_round_payload(
     stat: DailyTaskStat,
     round_record: GameRound,
     ledger: PointsLedger | None,
+    user_choice: str | None = None,
+    system_choice: str | None = None,
 ) -> Dict[str, Any]:
     remaining = max(int(stat.game_tasks_limit) - int(stat.game_tasks_used), 0)
     estimated_points = int(round_record.base_points)
@@ -418,6 +473,8 @@ def _build_round_payload(
         "game_code": round_record.game_code,
         "round_id": round_record.round_id,
         "result": round_record.result,
+        "user_choice": user_choice,
+        "system_choice": system_choice,
         "points_added": int(ledger.points_delta) if ledger else int(round_record.total_points),
         "base_points": estimated_points,
         "bonus_points": int(round_record.bonus_points),

@@ -73,6 +73,7 @@ async def complete_game_round(
             game_code=req.game_code,
             round_id=req.round_id,
             result=req.result,
+            user_choice=req.user_choice,
             ad_event_id=req.ad_event_id,
         )
     except ValueError as exc:

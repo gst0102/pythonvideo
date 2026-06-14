@@ -2,7 +2,7 @@
 
 from datetime import date, datetime
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from schemas.checkin import CheckinAccountSummary
 
@@ -41,15 +41,24 @@ class GameAdSlotResponse(BaseModel):
 class GameRoundCompleteRequest(BaseModel):
     game_code: str
     round_id: str
-    result: str
+    result: str | None = None
+    user_choice: str | None = None
     ad_event_id: str | None = None
 
-    @field_validator("game_code", "round_id", "result", mode="before")
+    @field_validator("game_code", "round_id", "result", "user_choice", mode="before")
     @classmethod
     def validate_required_str(cls, value: object) -> object:
+        if value is None:
+            return value
         if not isinstance(value, str) or not value.strip():
             raise ValueError("field is required")
         return value.strip()
+
+    @model_validator(mode="after")
+    def validate_round_input(self) -> "GameRoundCompleteRequest":
+        if not self.result and not self.user_choice:
+            raise ValueError("result or user_choice is required")
+        return self
 
 
 class GameRoundCompleteResponse(BaseModel):
@@ -57,6 +66,8 @@ class GameRoundCompleteResponse(BaseModel):
     game_code: str
     round_id: str
     result: str
+    user_choice: str | None = None
+    system_choice: str | None = None
     points_added: int
     base_points: int
     bonus_points: int = 0

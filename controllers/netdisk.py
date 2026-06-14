@@ -14,6 +14,9 @@ from models.user import User
 from schemas.netdisk import (
     NetdiskFavoriteListResponse,
     NetdiskFavoriteResponse,
+    NetdiskFeedbackCreate,
+    NetdiskFeedbackListResponse,
+    NetdiskFeedbackResponse,
     NetdiskNotificationListResponse,
     NetdiskRepairCreate,
     NetdiskRepairListResponse,
@@ -291,6 +294,43 @@ async def create_netdisk_repair(
         return response([], 400, str(exc))
 
     return response(data=NetdiskRepairResponse(**result).model_dump(mode="json"), msg="repair created")
+
+
+@router.get("/feedbacks/mine", summary="list current user's netdisk feedback tickets")
+async def list_my_netdisk_feedbacks(
+    openid: str = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    user = await _get_user_by_openid(session, openid)
+    if not user:
+        return response([], 404, "user not found")
+
+    payload = await NetdiskResourceService.list_my_feedbacks(session, user)
+    return response(data=NetdiskFeedbackListResponse(**payload).model_dump(mode="json"))
+
+
+@router.post("/feedbacks", summary="create netdisk feedback ticket")
+async def create_netdisk_feedback(
+    payload: NetdiskFeedbackCreate,
+    openid: str = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    user = await _get_user_by_openid(session, openid)
+    if not user:
+        return response([], 404, "user not found")
+
+    try:
+        result = await NetdiskResourceService.create_feedback(
+            session=session,
+            user=user,
+            feedback_type=payload.feedback_type,
+            content=payload.content,
+            contact=payload.contact,
+        )
+    except ValueError as exc:
+        return response([], 400, str(exc))
+
+    return response(data=NetdiskFeedbackResponse(**result).model_dump(mode="json"), msg="feedback created")
 
 
 @router.get("/resources/{resource_id}", summary="get netdisk resource detail")

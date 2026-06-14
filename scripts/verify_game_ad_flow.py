@@ -33,7 +33,7 @@ from models.user import User  # noqa: E402
 from services.ad_analytics_service import now_keys  # noqa: E402
 from services.config_service import ConfigService  # noqa: E402
 from services.game_ad_service import GameAdService  # noqa: E402
-from services.game_task_service import GameTaskService  # noqa: E402
+from services.game_task_service import GameTaskService, _resolve_base_points, _resolve_rps_round  # noqa: E402
 
 
 REQUIRED_TABLES = {
@@ -121,9 +121,10 @@ async def verify() -> None:
 
             await _verify_slot_rotation(session, user, marker)
             await _verify_ad_bonus_idempotency(session, bonus_user, marker)
+            _verify_rps_reward_rules()
 
             print("Game ad flow verification passed")
-            print("checks=rotation, exhaustion, ad_event_id idempotency, round idempotency")
+            print("checks=rotation, exhaustion, ad_event_id idempotency, round idempotency, rps reward rule")
         finally:
             await session.rollback()
 
@@ -140,7 +141,7 @@ async def _verify_slot_rotation(session, user: User, marker: str) -> None:
     first_ad_unit = str(slot_one["ad_unit_id"])
     await _consume_limit(session, user, first_ad_unit, event_id=f"{marker}-limit-a")
 
-    await GameTaskService.complete_round(session, user, game_code="rps", round_id=round_two, result="draw")
+    await GameTaskService.complete_round(session, user, game_code="rps", round_id=round_two, result="win")
     slot_two = await GameAdService.select_available_slot(session, user, round_id=round_two)
     _assert_true("second slot should be available", bool(slot_two["available"]))
     _assert_true(
@@ -156,7 +157,7 @@ async def _verify_slot_rotation(session, user: User, marker: str) -> None:
 
     await _consume_limit(session, user, str(slot_two["ad_unit_id"]), event_id=f"{marker}-limit-b")
 
-    await GameTaskService.complete_round(session, user, game_code="rps", round_id=round_three, result="lose")
+    await GameTaskService.complete_round(session, user, game_code="rps", round_id=round_three, result="win")
     slot_three = await GameAdService.select_available_slot(session, user, round_id=round_three)
     _assert_equal("all saturated available", bool(slot_three["available"]), False)
     _assert_true(
@@ -188,6 +189,7 @@ async def _verify_ad_bonus_idempotency(session, user: User, marker: str) -> None
     )
     _assert_equal("first bonus rewarded", first_rewarded, True)
     first_bonus = int(first_payload["points_added"])
+    _assert_equal("win bonus points", first_bonus, 4)
 
     second_payload, second_rewarded = await GameTaskService.claim_round_ad_bonus(
         session,
@@ -233,6 +235,16 @@ async def _verify_ad_bonus_idempotency(session, user: User, marker: str) -> None
     _assert_equal("ad bonus ledger count", len(ledgers), 1)
     _assert_equal("ad bonus ledger points", int(ledgers[0].points_delta), first_bonus)
     _assert_equal("ad bonus ledger availability", str(ledgers[0].availability), "consumable")
+
+
+def _verify_rps_reward_rules() -> None:
+    config = {"game_rps_win_points": 4, "game_rps_lose_points": -2, "game_base_points_min": -2, "game_base_points_max": 4}
+    _assert_equal("win base points", _resolve_base_points(config, "win"), 4)
+    _assert_equal("draw base points", _resolve_base_points(config, "draw"), 0)
+    _assert_equal("lose base points", _resolve_base_points(config, "lose"), -2)
+    result, system_choice = _resolve_rps_round("rock")
+    _assert_true("system choice valid", system_choice in {"rock", "scissors", "paper"})
+    _assert_true("result valid", result in {"win", "draw", "lose"})
 
 
 async def _consume_limit(session, user: User, ad_unit_id: str, *, event_id: str) -> None:

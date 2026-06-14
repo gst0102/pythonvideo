@@ -15,9 +15,14 @@ class NetdiskResourceSummary(BaseModel):
     level: str
     cost_points: int
     verified_at: str
+    created_at: str = ""
+    published_at: str = ""
     downloads: int
     favorites: int
     description: str
+    tags: list[str] = []
+    source_type: str = "seed"
+    source_ref: str = ""
     is_active: bool = True
     quality_score: int = 0
     uploader_credit_level: str = "normal"
@@ -234,6 +239,33 @@ class NetdiskNotificationItem(BaseModel):
 class NetdiskNotificationListResponse(BaseModel):
     notifications: list[NetdiskNotificationItem]
     unread_count: int
+
+
+class NetdiskFeedbackCreate(BaseModel):
+    feedback_type: str
+    content: str
+    contact: str = ""
+
+
+class NetdiskFeedbackItem(BaseModel):
+    id: str
+    feedback_type: str
+    content: str
+    contact: str = ""
+    status: str
+    auto_reply: str = ""
+    admin_reply: str = ""
+    created_at: datetime
+    updated_at: datetime | None = None
+    mine: bool = False
+
+
+class NetdiskFeedbackListResponse(BaseModel):
+    feedbacks: list[NetdiskFeedbackItem]
+
+
+class NetdiskFeedbackResponse(BaseModel):
+    feedback: NetdiskFeedbackItem
 
 
 class NetdiskAdminAuditRequest(BaseModel):
