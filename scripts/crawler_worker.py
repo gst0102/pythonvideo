@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
 
+from core.browser_guard import browser_process_count, cleanup_all_browser_processes
 from models.base import close_db
 
 logger = logging.getLogger("crawler_worker")
@@ -36,6 +37,9 @@ async def run_crawler(crawler_key: str) -> dict:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     schedulers = []
+    cleaned = cleanup_all_browser_processes("crawler-worker startup")
+    if cleaned:
+        logger.warning("[crawler-worker] cleaned %s stale browser processes on startup", cleaned)
     try:
         from services.sync_service import create_scheduler
 
@@ -63,6 +67,7 @@ async def lifespan(app: FastAPI):
 
     for scheduler in getattr(app.state, "schedulers", []):
         scheduler.shutdown(wait=False)
+    cleanup_all_browser_processes("crawler-worker shutdown")
     await close_db()
 
 
@@ -75,6 +80,7 @@ def health_check():
         "status": "ok",
         "service": "crawler-worker",
         "chromium": os.getenv("PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH", ""),
+        "browser_processes": browser_process_count(),
     }
 
 
@@ -87,4 +93,6 @@ async def run_one_crawler(crawler_key: str):
     except Exception as exc:
         logger.error("[crawler-worker] manual run failed: %s", exc, exc_info=True)
         return {"code": 500, "msg": f"采集失败：{exc}", "data": {"error": str(exc)}}
+    finally:
+        cleanup_all_browser_processes(f"crawler-worker run {crawler_key}")
     return {"code": 200, "msg": "采集任务已完成", "data": result}

@@ -511,6 +511,26 @@ async def admin_restore_netdisk_resource(
     return response(data=jsonable_encoder(payload), msg="netdisk resource restored")
 
 
+@router.post("/netdisk/resources/restore-hidden-kdocs", summary="admin restore hidden kdocs resources")
+async def admin_restore_hidden_kdocs_resources(
+    req: NetdiskAdminAuditRequest,
+    x_admin_role: str = Header("operator"),
+    session: AsyncSession = Depends(get_session),
+):
+    if not _is_quality_supervisor(x_admin_role):
+        return response([], 403, "仅主管可批量恢复资源")
+    payload = await NetdiskResourceService.restore_hidden_kdocs_resources(session, req.note)
+    await _record_netdisk_audit_log(
+        session,
+        "resource_bulk_restore_kdocs",
+        "netdisk_resource",
+        "kdocs:hidden",
+        "批量恢复 KDocs 历史资源",
+        f"{req.note}；恢复 {payload.get('restored_count', 0)} 条",
+    )
+    return response(data=jsonable_encoder(payload), msg="hidden kdocs resources restored")
+
+
 @router.post("/netdisk/resources/{resource_id}/confirm-invalid", summary="admin confirm invalid netdisk resource")
 async def admin_confirm_netdisk_resource_invalid(
     resource_id: str,

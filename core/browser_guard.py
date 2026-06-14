@@ -45,6 +45,20 @@ def browser_slot(label: str) -> Iterator[None]:
         logger.info("[BrowserGuard] released slot: %s", label)
 
 
+def browser_process_count() -> int:
+    return len(_browser_pids())
+
+
+def cleanup_all_browser_processes(label: str) -> int:
+    pids = sorted(_browser_pids())
+    if not pids:
+        return 0
+
+    logger.warning("[BrowserGuard] cleaning all browser leftovers for %s: %s", label, pids)
+    _terminate_browser_pids(pids, label)
+    return len(pids)
+
+
 def chromium_launch_args(*extra_args: str) -> list[str]:
     args = [
         "--no-sandbox",
@@ -75,6 +89,10 @@ def chromium_launch_options(*extra_args: str) -> dict:
 
 
 def _browser_pids() -> set[int]:
+    pids = _browser_pids_from_proc()
+    if pids:
+        return pids
+
     try:
         result = subprocess.run(
             ["pgrep", "-f", "chromium|chrome|ms-playwright"],
@@ -97,12 +115,43 @@ def _browser_pids() -> set[int]:
     return pids
 
 
+def _browser_pids_from_proc() -> set[int]:
+    pids: set[int] = set()
+    proc_root = "/proc"
+    try:
+        entries = os.listdir(proc_root)
+    except Exception:
+        return pids
+
+    patterns = ("chromium", "chrome", "ms-playwright")
+    current_pid = os.getpid()
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        pid = int(entry)
+        if pid == current_pid:
+            continue
+        try:
+            with open(os.path.join(proc_root, entry, "cmdline"), "rb") as file:
+                cmdline = file.read().replace(b"\x00", b" ").decode("utf-8", errors="ignore").lower()
+        except Exception:
+            continue
+        if any(pattern in cmdline for pattern in patterns):
+            pids.add(pid)
+    return pids
+
+
 def _cleanup_new_browser_processes(before_pids: set[int], label: str) -> None:
     leftovers = sorted(_browser_pids() - before_pids)
     if not leftovers:
         return
 
     logger.warning("[BrowserGuard] cleaning browser leftovers after %s: %s", label, leftovers)
+    _terminate_browser_pids(leftovers, label)
+
+
+def _terminate_browser_pids(pids: list[int], label: str) -> None:
+    leftovers = list(pids)
     for sig in (signal.SIGTERM, signal.SIGKILL):
         for pid in leftovers:
             try:
@@ -110,7 +159,7 @@ def _cleanup_new_browser_processes(before_pids: set[int], label: str) -> None:
             except ProcessLookupError:
                 pass
             except PermissionError:
-                logger.warning("[BrowserGuard] no permission to kill pid=%s", pid)
+                logger.warning("[BrowserGuard] no permission to kill pid=%s for %s", pid, label)
         if sig == signal.SIGTERM:
             time.sleep(1)
             leftovers = sorted(pid for pid in leftovers if pid in _browser_pids())

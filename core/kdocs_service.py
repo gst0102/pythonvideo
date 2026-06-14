@@ -15,6 +15,7 @@ import logging
 import os
 import re
 import time
+from contextlib import suppress
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Iterator
@@ -23,7 +24,7 @@ from urllib.parse import urlparse
 import httpx
 from playwright.sync_api import sync_playwright
 
-from core.browser_guard import browser_slot, chromium_launch_options
+from core.browser_guard import browser_slot, chromium_launch_options, cleanup_all_browser_processes
 
 logger = logging.getLogger(__name__)
 
@@ -320,13 +321,9 @@ class KDocsService:
     def fetch_params_via_playwright(share_url: str) -> dict | None:
         logger.info("[KDocs] Playwright 获取参数: %s", share_url)
         with browser_slot("kdocs_service.fetch_params"), sync_playwright() as pw:
-            browser = pw.chromium.launch(
-                headless=True,
-                **chromium_launch_options("--disable-blink-features=AutomationControlled"),
-            )
-            context = browser.new_context(user_agent=UA, viewport={"width": 1280, "height": 720})
-            page = context.new_page()
-
+            browser = None
+            context = None
+            page = None
             captured_params = {}
 
             def on_response(resp):
@@ -360,9 +357,15 @@ class KDocsService:
                     except Exception:
                         pass
 
-            page.on("response", on_response)
-
             try:
+                browser = pw.chromium.launch(
+                    headless=True,
+                    **chromium_launch_options("--disable-blink-features=AutomationControlled"),
+                )
+                context = browser.new_context(user_agent=UA, viewport={"width": 1280, "height": 720})
+                page = context.new_page()
+                page.on("response", on_response)
+
                 page.goto(share_url, wait_until="domcontentloaded", timeout=60000)
                 for _ in range(15):
                     page.wait_for_timeout(1000)
@@ -404,7 +407,16 @@ class KDocsService:
                 return captured_params
 
             finally:
-                browser.close()
+                if page:
+                    with suppress(Exception):
+                        page.close()
+                if context:
+                    with suppress(Exception):
+                        context.close()
+                if browser:
+                    with suppress(Exception):
+                        browser.close()
+                cleanup_all_browser_processes("kdocs_service.fetch_params")
 
     @staticmethod
     def fetch_doc_via_api(share_code: str, file_id: str, share_url: str,

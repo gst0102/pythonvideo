@@ -285,24 +285,11 @@ async def sync_anime_from_kdocs(types: list[str] | None = None) -> dict:
                 exec_result = await session.execute(stmt)
                 result["inactive"] = exec_result.rowcount or 0
 
-            if active_netdisk_ids:
-                netdisk_stmt = (
-                    sql_update(NetdiskResourceModel)
-                    .where(
-                        NetdiskResourceModel.source_upload_id.like("kdocs:%"),
-                        NetdiskResourceModel.is_active == True,  # noqa: E712
-                        NetdiskResourceModel.id.not_in(active_netdisk_ids),
-                        or_(
-                            *[
-                                NetdiskResourceModel.source_upload_id.like(f"kdocs:{category}:%")
-                                for category in types
-                            ]
-                        ),
-                    )
-                    .values(is_active=False, updated_at=datetime.utcnow())
-                )
-                netdisk_result = await session.execute(netdisk_stmt)
-                result["netdisk_inactive"] = netdisk_result.rowcount or 0
+            # KDocs sync only fetches the latest rows from each source. Missing
+            # rows are historical resources, not deletions, so never hide old
+            # netdisk resources during routine sync.
+            result["netdisk_inactive"] = 0
+
 
             await session.commit()
             logger.info(

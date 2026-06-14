@@ -9,7 +9,7 @@ from datetime import datetime, time, timedelta
 from typing import Literal
 from uuid import UUID
 
-from sqlalchemy import and_, func, or_
+from sqlalchemy import and_, func, or_, text, update as sql_update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -1100,6 +1100,88 @@ class NetdiskResourceService:
         await session.flush()
         await session.refresh(resource)
         return {"resource": _build_resource_payload(resource), "note": note.strip()}
+
+    @staticmethod
+    async def restore_hidden_kdocs_resources(session: AsyncSession, note: str = "") -> dict:
+        before = (
+            await session.execute(
+                text(
+                    """
+                    SELECT
+                        count(*) AS total,
+                        count(*) FILTER (WHERE is_active) AS active,
+                        count(DISTINCT lower(coalesce(nullif(link, ''), id))) AS unique_links
+                    FROM netdisk_resources
+                    WHERE source_type = 'kdocs' OR source_upload_id LIKE 'kdocs:%'
+                    """
+                )
+            )
+        ).mappings().one()
+
+        result = await session.execute(
+            text(
+                """
+                WITH ranked AS (
+                    SELECT
+                        id,
+                        row_number() OVER (
+                            PARTITION BY lower(coalesce(nullif(link, ''), id))
+                            ORDER BY
+                                is_active DESC,
+                                (source_type = 'kdocs') DESC,
+                                verified_at DESC NULLS LAST,
+                                updated_at DESC NULLS LAST,
+                                created_at DESC NULLS LAST,
+                                id ASC
+                        ) AS rn
+                    FROM netdisk_resources
+                    WHERE source_type = 'kdocs' OR source_upload_id LIKE 'kdocs:%'
+                ),
+                updated AS (
+                    UPDATE netdisk_resources AS resource
+                    SET
+                        is_active = (ranked.rn = 1),
+                        source_type = 'kdocs',
+                        updated_at = now()
+                    FROM ranked
+                    WHERE resource.id = ranked.id
+                      AND (
+                        resource.is_active IS DISTINCT FROM (ranked.rn = 1)
+                        OR resource.source_type IS DISTINCT FROM 'kdocs'
+                      )
+                    RETURNING resource.id
+                )
+                SELECT count(*) AS updated_count FROM updated
+                """
+            )
+        )
+        updated_count = int(result.scalar_one() or 0)
+        await session.flush()
+        after = (
+            await session.execute(
+                text(
+                    """
+                    SELECT
+                        count(*) AS total,
+                        count(*) FILTER (WHERE is_active) AS active,
+                        count(*) FILTER (WHERE NOT is_active) AS hidden_duplicates,
+                        count(DISTINCT lower(coalesce(nullif(link, ''), id))) AS unique_links
+                    FROM netdisk_resources
+                    WHERE source_type = 'kdocs' OR source_upload_id LIKE 'kdocs:%'
+                    """
+                )
+            )
+        ).mappings().one()
+        return {
+            "candidate_count": int(before["total"] or 0),
+            "active_before": int(before["active"] or 0),
+            "unique_link_count": int(after["unique_links"] or 0),
+            "active_after": int(after["active"] or 0),
+            "hidden_duplicate_count": int(after["hidden_duplicates"] or 0),
+            "updated_count": updated_count,
+            "restored_count": max(0, int(after["active"] or 0) - int(before["active"] or 0)),
+            "note": note.strip(),
+        }
 
     @staticmethod
     async def confirm_resource_invalid(session: AsyncSession, resource_id: str, note: str = "") -> dict:

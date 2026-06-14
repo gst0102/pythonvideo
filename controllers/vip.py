@@ -36,6 +36,7 @@ router = APIRouter(prefix="/vip", tags=["VIP"])
 
 PERIOD_DAYS = {"month": 30, "quarter": 90, "year": 365}
 POINT_RECHARGE_PACKAGES = [
+    {"id": "points_10", "title": "10积分", "points": 10, "price": 1.0, "desc": "1元测试充值，适合支付链路验证"},
     {"id": "points_100", "title": "100积分", "points": 100, "price": 10.0, "desc": "适合轻度解锁资源"},
     {"id": "points_300", "title": "300积分", "points": 300, "price": 30.0, "desc": "适合持续找资源"},
     {"id": "points_680", "title": "680积分", "points": 680, "price": 68.0, "desc": "适合高频资源需求"},
