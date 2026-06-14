@@ -1488,7 +1488,7 @@ class NetdiskResourceService:
                 .limit(page_size)
             )
         ).scalars().all()
-        return _build_admin_list_payload("resources", [_build_resource_payload(item) for item in items], total, page, page_size)
+        return _build_admin_list_payload("resources", [_build_admin_resource_payload(item) for item in items], total, page, page_size)
 
     @staticmethod
     async def list_risk_records(
@@ -2681,6 +2681,18 @@ def _build_resource_payload(resource: NetdiskResource | NetdiskResourceModel) ->
         "report_count": int(getattr(resource, "report_count", 0) or 0),
         "invalid_count": int(getattr(resource, "invalid_count", 0) or 0),
     }
+
+
+def _build_admin_resource_payload(resource: NetdiskResourceModel) -> dict:
+    payload = _build_resource_payload(resource)
+    payload.update(
+        {
+            "link": resource.link or "",
+            "extract_code": resource.extract_code or "",
+            "unzip_code": resource.unzip_code or "",
+        }
+    )
+    return payload
 
 
 def _build_favorite_payload(favorite: NetdiskFavorite, resource: NetdiskResourceModel) -> dict:
