@@ -1,4 +1,5 @@
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -6,13 +7,15 @@ import random
 import string
 import time
 import xml.etree.ElementTree as ET
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 
+import httpx
 from fastapi import APIRouter, Depends, Query, Request
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from core.databaseApi import RedisClient, get_access_token, get_redis
 from core.response import response
 from core.virtual_pay import (
     VirtualPayConfig,
@@ -48,6 +51,37 @@ POINT_RECHARGE_TEST_PACKAGE = {
     "price": 0.01,
     "desc": "仅用于支付链路测试，测试完成后关闭",
 }
+
+
+async def sync_recent_pending_virtual_pay_orders(
+    session: AsyncSession,
+    redis: RedisClient | None = None,
+    *,
+    lookback_minutes: int = 120,
+    limit: int = 50,
+) -> dict:
+    since = datetime.utcnow() - timedelta(minutes=max(int(lookback_minutes), 1))
+    stmt = (
+        select(Order, User)
+        .join(User, User.id == Order.user_id)
+        .where(
+            Order.status == "pending",
+            Order.period.startswith("points_"),
+            Order.created_at >= since,
+        )
+        .order_by(Order.created_at.desc())
+        .limit(max(int(limit), 1))
+    )
+    rows = (await session.execute(stmt)).all()
+    checked = 0
+    paid = 0
+    for order, user in rows:
+        checked += 1
+        before = order.status
+        await _sync_virtual_pay_order(session, redis, user, order)
+        if before != "paid" and order.status == "paid":
+            paid += 1
+    return {"checked": checked, "paid": paid}
 
 
 @router.get("/packages", summary="get vip packages")
@@ -157,6 +191,7 @@ async def get_order_status(
     out_trade_no: str,
     claims: dict = Depends(get_current_claims),
     session: AsyncSession = Depends(get_session),
+    redis: RedisClient = Depends(get_redis),
 ):
     user = await _get_user_by_claims(session, claims)
     if not user:
@@ -168,6 +203,8 @@ async def get_order_status(
     order = result.scalar_one_or_none()
     if not order:
         return response([], 404, "order not found")
+    if order.status == "pending":
+        await _sync_virtual_pay_order(session, redis, user, order)
 
     return response(
         data={
@@ -180,6 +217,86 @@ async def get_order_status(
             "paid_at": order.paid_at.isoformat() if order.paid_at else None,
         }
     )
+
+
+async def _sync_virtual_pay_order(
+    session: AsyncSession,
+    redis: RedisClient,
+    user: User,
+    order: Order,
+) -> None:
+    config = await ConfigService.get_vip_packages(session)
+    virtual_config, config_error = _resolve_virtual_pay_config(config)
+    if config_error:
+        return
+
+    query_result = await _query_virtual_pay_order(redis, virtual_config, user.openid, order.out_trade_no)
+    if not query_result.get("paid"):
+        return
+
+    ok = await PaymentService.handle_payment_success(
+        session,
+        out_trade_no=order.out_trade_no,
+        transaction_id=str(query_result.get("transaction_id") or order.out_trade_no),
+        total_fee_in_fen=int(query_result.get("paid_fee") or query_result.get("order_fee") or order.amount * 100),
+        paid_at=str(query_result.get("paid_at") or datetime.utcnow().isoformat()),
+    )
+    if ok:
+        logger.info("[VIP] synced virtual payment order: %s", order.out_trade_no)
+
+
+async def _query_virtual_pay_order(
+    redis: RedisClient,
+    virtual_config: VirtualPayConfig,
+    openid: str,
+    out_trade_no: str,
+) -> dict:
+    token_result = await get_access_token(redis_client=redis)
+    access_token = token_result.get("token")
+    if not access_token:
+        logger.warning("[VIP] query virtual order skipped: access_token missing")
+        return {"paid": False}
+
+    body = {
+        "openid": openid,
+        "env": int(virtual_config.env),
+        "order_id": out_trade_no,
+    }
+    body_json = dumps_sign_data(body)
+    pay_sig = _create_virtual_pay_api_sig("/xpay/query_order", body_json, virtual_config.app_key)
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.post(
+            "https://api.weixin.qq.com/xpay/query_order",
+            params={"access_token": access_token, "pay_sig": pay_sig},
+            content=body_json,
+            headers={"Content-Type": "application/json"},
+        )
+    try:
+        data = resp.json()
+    except Exception:
+        logger.warning("[VIP] query virtual order invalid response: %s", resp.text[:300])
+        return {"paid": False}
+    if int(data.get("errcode") or 0) != 0:
+        logger.warning("[VIP] query virtual order failed: %s", data)
+        return {"paid": False, "raw": data}
+
+    order_info = data.get("order") or {}
+    status = int(order_info.get("status") or 0)
+    paid = status in {2, 3, 4}
+    paid_time = order_info.get("paid_time") or order_info.get("update_time") or 0
+    paid_at = datetime.fromtimestamp(int(paid_time)).isoformat() if paid_time else datetime.utcnow().isoformat()
+    return {
+        "paid": paid,
+        "status": status,
+        "order_fee": int(order_info.get("order_fee") or 0),
+        "paid_fee": int(order_info.get("paid_fee") or order_info.get("order_fee") or 0),
+        "transaction_id": order_info.get("wx_order_id")
+        or order_info.get("wxpay_order_id")
+        or order_info.get("channel_order_id")
+        or out_trade_no,
+        "paid_at": paid_at,
+        "raw": data,
+    }
 
 
 @router.post("/order", summary="create vip virtual payment order")
@@ -350,6 +467,14 @@ def _verify_notify_signature(sig: str, timestamp: str, nonce: str, body: str) ->
         return False
     expected = hashlib.sha1("".join(sorted([token, timestamp, nonce, body])).encode("utf-8")).hexdigest()
     return expected == sig
+
+
+def _create_virtual_pay_api_sig(uri: str, body_json: str, app_key: str) -> str:
+    return hmac.new(
+        app_key.encode("utf-8"),
+        f"{uri}&{body_json}".encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
 
 
 def _build_runtime_virtual_config(config: dict, env_config: VirtualPayConfig) -> VirtualPayConfig:

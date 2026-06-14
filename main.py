@@ -72,6 +72,7 @@ async def lifespan(app: FastAPI):
         from apscheduler.schedulers.asyncio import AsyncIOScheduler
         from services.netdisk_quality_stat_service import QUALITY_STATS_ENABLED, refresh_netdisk_quality_daily_stats
         from services.netdisk_resource_service import NetdiskResourceService
+        from controllers.vip import sync_recent_pending_virtual_pay_orders
 
         if QUALITY_STATS_ENABLED:
             quality_scheduler = AsyncIOScheduler(timezone=os.getenv("TZ", "Asia/Shanghai"))
@@ -110,9 +111,35 @@ async def lifespan(app: FastAPI):
                 id="netdisk_valid_7d_upload_rewards",
                 replace_existing=True,
             )
+
+            async def reconcile_virtual_pay_orders_job():
+                from models.base import get_session_ctx
+
+                async with get_session_ctx() as session:
+                    result = await sync_recent_pending_virtual_pay_orders(
+                        session,
+                        redis=None,
+                        lookback_minutes=int(os.getenv("VIRTUAL_PAY_RECONCILE_LOOKBACK_MINUTES", "120")),
+                        limit=int(os.getenv("VIRTUAL_PAY_RECONCILE_LIMIT", "50")),
+                    )
+                    if result.get("checked") or result.get("paid"):
+                        print(
+                            "✅ 虚拟支付订单补单已执行："
+                            f"检查 {result.get('checked', 0)} 单，补到账 {result.get('paid', 0)} 单"
+                        )
+
+            quality_scheduler.add_job(
+                reconcile_virtual_pay_orders_job,
+                "interval",
+                seconds=int(os.getenv("VIRTUAL_PAY_RECONCILE_INTERVAL_SECONDS", "120")),
+                id="virtual_pay_reconcile_pending_orders",
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+            )
             quality_scheduler.start()
             app.state.netdisk_quality_scheduler = quality_scheduler
-            print("✅ 网盘资源质量统计定时任务已启动")
+            print("✅ 网盘资源质量统计与虚拟支付补单定时任务已启动")
         else:
             print("⏸️ 网盘资源质量统计定时任务已关闭（NETDISK_QUALITY_STATS_ENABLED=false）")
     except Exception as e:

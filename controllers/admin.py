@@ -27,6 +27,7 @@ from models.netdisk_resource import NetdiskResource as NetdiskResourceModel
 from models.netdisk_risk_record import NetdiskRiskRecord
 from models.netdisk_upload import NetdiskUpload
 from models.netdisk_user_notification import NetdiskUserNotification
+from models.order import Order
 from models.points_ledger import PointsLedger
 from models.user import User
 from models.user_account import UserAccount
@@ -42,6 +43,7 @@ from services.netdisk_quality_stat_service import build_resource_quality_day_sta
 from services.netdisk_resource_service import NetdiskResourceService
 from services.points_account_service import PointsAccountService
 from services.withdrawal_service import WithdrawalService
+from controllers.vip import sync_recent_pending_virtual_pay_orders
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -51,6 +53,11 @@ class AdminPointsAdjustRequest(BaseModel):
     action: str = Field(pattern="^(add|consume)$")
     points: int = Field(gt=0, le=10000000)
     note: str = Field(default="", max_length=300)
+
+
+class AdminPaymentReconcileRequest(BaseModel):
+    lookback_minutes: int = Field(default=180, ge=1, le=1440)
+    limit: int = Field(default=50, ge=1, le=200)
 
 
 @router.get("/dashboard", summary="dashboard")
@@ -105,6 +112,65 @@ async def get_dashboard(session: AsyncSession = Depends(get_session)):
             "pending_withdrawal_amount": float(pending_amount),
         }
     )
+
+
+@router.get("/payments/orders", summary="payment order list")
+async def admin_payment_orders(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    status: Optional[str] = Query(None, pattern="^(pending|paid|closed|refunded)$"),
+    keyword: Optional[str] = Query(None),
+    session: AsyncSession = Depends(get_session),
+):
+    query = select(Order).where(Order.period.startswith("points_"))
+    if status:
+        query = query.where(Order.status == status)
+    if keyword and keyword.strip():
+        kw = keyword.strip()
+        user_sq = select(User.id).where((User.openid.ilike(f"%{kw}%")) | (User.nickname.ilike(f"%{kw}%")))
+        query = query.where((Order.out_trade_no.ilike(f"%{kw}%")) | (Order.user_id.in_(user_sq)))
+
+    total = (await session.execute(select(func.count()).select_from(query.subquery()))).scalar() or 0
+    orders = (
+        await session.execute(query.order_by(Order.created_at.desc()).offset((page - 1) * page_size).limit(page_size))
+    ).scalars().all()
+    user_map = await _get_user_map(session, [item.user_id for item in orders])
+    ledger_map = await _get_recharge_ledger_map(session, [item.id for item in orders])
+    items = [_payment_order_to_dict(item, user_map.get(item.user_id), ledger_map.get(str(item.id))) for item in orders]
+    return response(
+        data=PaginatedResponse(
+            list=items,
+            total=total,
+            page=page,
+            page_size=page_size,
+            has_more=((page - 1) * page_size + len(items)) < total,
+        ).model_dump()
+    )
+
+
+@router.post("/payments/reconcile", summary="reconcile pending virtual payment orders")
+async def admin_reconcile_payment_orders(
+    req: AdminPaymentReconcileRequest,
+    x_admin_role: str = Header("operator"),
+    session: AsyncSession = Depends(get_session),
+):
+    if not _is_quality_supervisor(x_admin_role):
+        return response([], 403, "仅主管可执行支付补单")
+    result = await sync_recent_pending_virtual_pay_orders(
+        session,
+        redis=None,
+        lookback_minutes=req.lookback_minutes,
+        limit=req.limit,
+    )
+    await _record_netdisk_audit_log(
+        session,
+        "payment_reconcile",
+        "payment",
+        "virtual_pay",
+        "虚拟支付补单",
+        f"检查 {result.get('checked', 0)} 单，补到账 {result.get('paid', 0)} 单",
+    )
+    return response(data=result, msg="支付补单完成")
 
 
 @router.get("/users", summary="user list")
@@ -2983,6 +3049,49 @@ async def _get_user_account_map(session: AsyncSession, user_ids: list[UUID]) -> 
         await session.execute(select(UserAccount).where(UserAccount.user_id.in_(user_ids)))
     ).scalars().all()
     return {account.user_id: account for account in accounts}
+
+
+async def _get_user_map(session: AsyncSession, user_ids: list[UUID]) -> dict[UUID, User]:
+    if not user_ids:
+        return {}
+    users = (await session.execute(select(User).where(User.id.in_(user_ids)))).scalars().all()
+    return {user.id: user for user in users}
+
+
+async def _get_recharge_ledger_map(session: AsyncSession, order_ids: list[UUID]) -> dict[str, PointsLedger]:
+    if not order_ids:
+        return {}
+    order_id_texts = [str(item) for item in order_ids]
+    ledgers = (
+        await session.execute(
+            select(PointsLedger).where(
+                PointsLedger.change_type == "points_recharge",
+                PointsLedger.related_id.in_(order_id_texts),
+            )
+        )
+    ).scalars().all()
+    return {str(item.related_id): item for item in ledgers}
+
+
+def _payment_order_to_dict(order: Order, user: Optional[User], ledger: Optional[PointsLedger]) -> dict:
+    return {
+        "id": str(order.id),
+        "user_id": str(order.user_id),
+        "openid": user.openid if user else "",
+        "nickname": user.nickname if user else "",
+        "avatar": user.avatar if user else "",
+        "out_trade_no": order.out_trade_no,
+        "transaction_id": order.transaction_id,
+        "status": order.status,
+        "amount": float(order.amount),
+        "period": order.period,
+        "description": order.description,
+        "paid_at": order.paid_at.isoformat() if order.paid_at else None,
+        "created_at": order.created_at.isoformat() if order.created_at else None,
+        "updated_at": order.updated_at.isoformat() if order.updated_at else None,
+        "ledger": _points_ledger_to_dict(ledger) if ledger else None,
+        "points_arrived": bool(ledger),
+    }
 
 
 def _account_to_dict(account: Optional[UserAccount]) -> dict:
