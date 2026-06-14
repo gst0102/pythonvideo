@@ -26,7 +26,7 @@ class PointsSummaryService:
         yesterday = current_day - timedelta(days=1)
         today_start, today_end = bj_day_bounds_utc(current_day)
 
-        today_estimated_points = await _sum_positive_ledger_points(
+        today_estimated_points = await _sum_ledger_points(
             session,
             user_id,
             start=today_start,
@@ -34,13 +34,14 @@ class PointsSummaryService:
             source="game",
             availability="consumable",
         )
-        today_earned_points = await _sum_positive_ledger_points(
+        today_earned_points = await _sum_ledger_points(
             session,
             user_id,
             start=today_start,
             end=today_end,
             availability="consumable",
             exclude_sources=DAILY_EARN_EXCLUDED_SOURCES,
+            positive_only=True,
         )
         yesterday_settled_points = await _sum_positive_points(
             session=session,
@@ -70,7 +71,7 @@ async def _sum_positive_points(
     return int(settlement_result.scalar_one() or 0)
 
 
-async def _sum_positive_ledger_points(
+async def _sum_ledger_points(
     session: AsyncSession,
     user_id,
     *,
@@ -80,14 +81,16 @@ async def _sum_positive_ledger_points(
     source: str | None = None,
     exclude_source: str | None = None,
     exclude_sources: set[str] | None = None,
+    positive_only: bool = False,
 ) -> int:
     filters = [
         PointsLedger.user_id == user_id,
         PointsLedger.availability == availability,
-        PointsLedger.points_delta > 0,
         PointsLedger.created_at >= start,
         PointsLedger.created_at < end,
     ]
+    if positive_only:
+        filters.append(PointsLedger.points_delta > 0)
     if source:
         filters.append(PointsLedger.source == source)
     if exclude_source:
