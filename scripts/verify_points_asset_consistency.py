@@ -28,6 +28,7 @@ from models.order import Order  # noqa: E402
 from models.points_ledger import PointsLedger  # noqa: E402
 from models.user import User  # noqa: E402
 from models.withdrawal import WithdrawalRecord  # noqa: E402
+from core.timezone import today_bj  # noqa: E402
 from services.checkin_service import CheckinService  # noqa: E402
 from services.config_service import ConfigService  # noqa: E402
 from services.game_task_service import GameTaskService  # noqa: E402
@@ -152,7 +153,7 @@ async def verify() -> None:
                 paid_at=datetime.now(timezone.utc).isoformat(),
             )
 
-            settlement_day = datetime.now(timezone.utc).date() - timedelta(days=1)
+            settlement_day = today_bj() - timedelta(days=1)
             settlement_batch = GameSettlementBatch(
                 settlement_date=settlement_day,
                 status="settled",
