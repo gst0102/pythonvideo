@@ -1206,7 +1206,7 @@ class NetdiskResourceService:
                 WHERE f.resource_id = h.id
             )
             OR EXISTS (
-                SELECT 1 FROM points_ledgers l
+                SELECT 1 FROM points_ledger l
                 WHERE l.related_type = 'netdisk_resource'
                   AND l.related_id = h.id
             )
