@@ -14,6 +14,7 @@ from sqlalchemy import or_
 from sqlmodel import and_, func, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from core.timezone import bj_day_bounds_utc, today_bj
 from core.response import response
 from models.base import get_session
 from models.chat import ChatMessage
@@ -73,7 +74,7 @@ async def get_dashboard(session: AsyncSession = Depends(get_session)):
             )
         )
     ).scalar() or 0
-    today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    today_start, _ = bj_day_bounds_utc()
     today_new = (
         await session.execute(select(func.count()).select_from(User).where(User.created_at >= today_start))
     ).scalar() or 0
@@ -960,7 +961,7 @@ async def admin_netdisk_ops_dashboard(
     quality_range: str = Query("7d", pattern="^(today|7d|all)$"),
     session: AsyncSession = Depends(get_session),
 ):
-    today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    today_start, _ = bj_day_bounds_utc()
     point_source_start = today_start - timedelta(days=6) if points_range == "7d" else today_start
 
     total_users = (await session.execute(select(func.count()).select_from(User))).scalar() or 0
@@ -2195,7 +2196,7 @@ async def _build_resource_quality_rankings_from_stats(
     limit: int,
     thresholds: dict,
 ) -> list[dict]:
-    today = datetime.utcnow().date()
+    today = today_bj()
     if range_mode == "today":
         start_day = today
     elif range_mode == "all":
@@ -2513,7 +2514,7 @@ async def _build_resource_quality_stat(session: AsyncSession, resource: NetdiskR
 
 
 async def _build_resource_quality_trends(session: AsyncSession, resource_id: str) -> list[dict]:
-    today = datetime.utcnow().date()
+    today = today_bj()
     start_day = today - timedelta(days=6)
     stats = (
         await session.execute(

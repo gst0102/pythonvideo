@@ -14,6 +14,7 @@ from models.daily_task_stat import DailyTaskStat
 from models.points_ledger import PointsLedger
 from models.user import User
 from models.user_account import UserAccount
+from core.timezone import today_bj
 from services.config_service import ConfigService
 from services.points_account_service import PointsAccountService
 
@@ -23,7 +24,7 @@ class CheckinService:
 
     @staticmethod
     async def get_status(session: AsyncSession, user: User) -> Dict[str, Any]:
-        today = datetime.utcnow().date()
+        today = today_bj()
         account, _ = await PointsAccountService.ensure_user_account(session, user.id)
         record = await _get_checkin_record(session, user.id, today)
         config = await _get_points_config(session)
@@ -55,7 +56,7 @@ class CheckinService:
         session: AsyncSession,
         user: User,
     ) -> Tuple[Dict[str, Any], bool]:
-        today = datetime.utcnow().date()
+        today = today_bj()
         existing = await _get_checkin_record(session, user.id, today)
         account, _ = await PointsAccountService.ensure_user_account(session, user.id)
         config = await _get_points_config(session)
@@ -112,7 +113,7 @@ class CheckinService:
         user: User,
         ad_event_id: str,
     ) -> Tuple[Dict[str, Any], bool, str | None]:
-        today = datetime.utcnow().date()
+        today = today_bj()
         clean_event_id = (ad_event_id or "").strip()
         if not clean_event_id:
             return {}, False, "ad_event_id is required"

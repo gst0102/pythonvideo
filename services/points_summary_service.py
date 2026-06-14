@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, time, timedelta
+from datetime import date, timedelta
 from typing import Any, Dict
 
 from sqlalchemy import and_, func
@@ -11,6 +11,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 from models.game_user_settlement import GameUserSettlement
 from models.points_ledger import PointsLedger
+from core.timezone import bj_day_bounds_utc, today_bj
 
 DAILY_EARN_CAP = 60
 DAILY_EARN_EXCLUDED_SOURCES = {"signup", "recharge", "vip", "withdraw", "dev", "admin"}
@@ -21,22 +22,23 @@ class PointsSummaryService:
 
     @staticmethod
     async def build_summary(session: AsyncSession, user_id, *, today: date | None = None) -> Dict[str, Any]:
-        current_day = today or datetime.utcnow().date()
+        current_day = today or today_bj()
         yesterday = current_day - timedelta(days=1)
+        today_start, today_end = bj_day_bounds_utc(current_day)
 
         today_estimated_points = await _sum_positive_ledger_points(
             session,
             user_id,
-            start=_start_of_day(current_day),
-            end=_end_of_day(current_day),
+            start=today_start,
+            end=today_end,
             source="game",
             availability="consumable",
         )
         today_earned_points = await _sum_positive_ledger_points(
             session,
             user_id,
-            start=_start_of_day(current_day),
-            end=_end_of_day(current_day),
+            start=today_start,
+            end=today_end,
             availability="consumable",
             exclude_sources=DAILY_EARN_EXCLUDED_SOURCES,
         )
@@ -52,14 +54,6 @@ class PointsSummaryService:
             "today_earn_cap": DAILY_EARN_CAP,
             "yesterday_settled_points": int(yesterday_settled_points),
         }
-
-
-def _start_of_day(day: date) -> datetime:
-    return datetime.combine(day, time.min)
-
-
-def _end_of_day(day: date) -> datetime:
-    return datetime.combine(day, time.max)
 
 
 async def _sum_positive_points(
@@ -92,7 +86,7 @@ async def _sum_positive_ledger_points(
         PointsLedger.availability == availability,
         PointsLedger.points_delta > 0,
         PointsLedger.created_at >= start,
-        PointsLedger.created_at <= end,
+        PointsLedger.created_at < end,
     ]
     if source:
         filters.append(PointsLedger.source == source)

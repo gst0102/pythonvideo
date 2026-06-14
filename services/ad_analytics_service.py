@@ -5,7 +5,7 @@ from __future__ import annotations
 import html
 import io
 import zipfile
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy import case, func
@@ -14,6 +14,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 from models.ad_event import AdEventRecord
 from models.user import User
+from core.timezone import bj_date_key, bj_day_bounds_utc, today_bj
 from services.config_service import ConfigService
 
 DEFAULT_REVENUE_CONFIG = {"default_ecpm": 30.0, "items": []}
@@ -21,9 +22,7 @@ DEFAULT_REWARD_CONFIG = {"points_per_reward": 5.0, "cash_per_reward": 0.05}
 
 
 def now_keys(now: datetime | None = None) -> tuple[str, str, str]:
-    current = now or datetime.utcnow()
-    iso = current.isocalendar()
-    return current.strftime("%Y-%m-%d"), f"{iso.year}-{iso.week:02d}", current.strftime("%Y-%m")
+    return bj_date_key(now)
 
 
 def scene_location(scene: str) -> tuple[str, str]:
@@ -90,14 +89,16 @@ def date_range(period: str, start_date: str | None = None, end_date: str | None 
         end = datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)
         return start, end
 
-    today = date.today()
+    today = today_bj()
     if period == "week":
         start_day = today - timedelta(days=today.weekday())
     elif period == "month":
         start_day = today.replace(day=1)
     else:
         start_day = today
-    return datetime.combine(start_day, datetime.min.time()), datetime.combine(today + timedelta(days=1), datetime.min.time())
+    start, _ = bj_day_bounds_utc(start_day)
+    _, end = bj_day_bounds_utc(today)
+    return start, end
 
 
 def period_bounds() -> dict[str, tuple[datetime, datetime]]:

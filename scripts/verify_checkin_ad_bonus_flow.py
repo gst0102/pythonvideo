@@ -26,6 +26,7 @@ from models.checkin_record import CheckinRecord  # noqa: E402
 from models.daily_task_stat import DailyTaskStat  # noqa: E402
 from models.points_ledger import PointsLedger  # noqa: E402
 from models.user import User  # noqa: E402
+from core.timezone import today_bj  # noqa: E402
 from services.checkin_service import CheckinService  # noqa: E402
 from services.config_service import ConfigService  # noqa: E402
 from services.points_account_service import PointsAccountService  # noqa: E402
@@ -48,7 +49,7 @@ def _assert_equal(label: str, actual, expected) -> None:
 
 async def verify() -> None:
     marker = f"stage2-checkin-ad-{uuid.uuid4().hex[:10]}"
-    today = datetime.utcnow().date()
+    today = today_bj()
 
     async with async_session_factory() as session:
         try:

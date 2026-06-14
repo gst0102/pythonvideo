@@ -18,6 +18,7 @@ from models.order import Order
 from models.points_ledger import PointsLedger
 from models.user import User
 from models.user_account import UserAccount
+from core.timezone import bj_day_bounds_utc, today_bj
 from services.config_service import ConfigService
 from services.points_account_service import PointsAccountService
 
@@ -25,10 +26,10 @@ VALID_GAME_CODES = {"rps"}
 VALID_RESULTS = {"win", "lose", "draw"}
 VALID_RPS_CHOICES = {"rock", "scissors", "paper"}
 DEFAULT_TASK_CONFIG = {
-    "daily_game_task_limit_normal": 20,
+    "daily_game_task_limit_normal": 10,
     "daily_game_task_limit_member_month": 100,
-    "daily_game_task_limit_member_quarter": 200,
-    "daily_game_task_limit_member_year": 300,
+    "daily_game_task_limit_member_quarter": 150,
+    "daily_game_task_limit_member_year": 200,
 }
 DEFAULT_POINTS_CONFIG = {
     "game_base_points_min": -2,
@@ -44,7 +45,7 @@ class GameTaskService:
 
     @staticmethod
     async def get_status(session: AsyncSession, user: User) -> Dict[str, Any]:
-        today = datetime.utcnow().date()
+        today = today_bj()
         account, _ = await PointsAccountService.ensure_user_account(session, user.id)
         stat = await _get_or_create_daily_task_stat(session, user, today)
         today_estimated_points = await _get_today_estimated_points(session, user.id, today)
@@ -95,7 +96,7 @@ class GameTaskService:
             if normalized_result not in VALID_RESULTS:
                 raise ValueError("unsupported game result")
 
-        today = datetime.utcnow().date()
+        today = today_bj()
         existing = await _get_game_round(session, round_id)
         account, _ = await PointsAccountService.ensure_user_account(session, user.id)
         stat = await _get_or_create_daily_task_stat(session, user, today)
@@ -184,7 +185,7 @@ class GameTaskService:
         if not round_record or round_record.user_id != user.id:
             raise RuntimeError("game round not found")
 
-        stat = await _get_or_create_daily_task_stat(session, user, datetime.utcnow().date())
+        stat = await _get_or_create_daily_task_stat(session, user, today_bj())
         account, _ = await PointsAccountService.ensure_user_account(session, user.id)
 
         existing_ledger = await PointsAccountService.get_ledger_by_idempotency_key(
@@ -420,15 +421,14 @@ def _resolve_rps_round(user_choice: str) -> tuple[str, str]:
 
 
 async def _get_today_estimated_points(session: AsyncSession, user_id, today) -> int:
-    start_at = datetime.combine(today, datetime.min.time())
-    end_at = datetime.combine(today, datetime.max.time())
+    start_at, end_at = bj_day_bounds_utc(today)
     stmt = select(PointsLedger).where(
         PointsLedger.user_id == user_id,
         PointsLedger.source == "game",
         PointsLedger.availability == "consumable",
         PointsLedger.related_type == "game_round",
         PointsLedger.created_at >= start_at,
-        PointsLedger.created_at <= end_at,
+        PointsLedger.created_at < end_at,
     )
     result = await session.execute(stmt)
     rows = result.scalars().all()

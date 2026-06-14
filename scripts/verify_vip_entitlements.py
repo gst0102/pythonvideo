@@ -41,8 +41,8 @@ from services.withdrawal_service import WithdrawalService  # noqa: E402
 
 PERIOD_EXPECTATIONS = {
     "month": {"gift_points": 199, "game_limit": 100, "duration_days": 30, "amount": 9.90},
-    "quarter": {"gift_points": 599, "game_limit": 200, "duration_days": 90, "amount": 26.90},
-    "year": {"gift_points": 1299, "game_limit": 300, "duration_days": 365, "amount": 88.80},
+    "quarter": {"gift_points": 599, "game_limit": 150, "duration_days": 90, "amount": 26.90},
+    "year": {"gift_points": 1299, "game_limit": 200, "duration_days": 365, "amount": 88.80},
 }
 REQUIRED_TABLES = {
     "daily_task_stats",
