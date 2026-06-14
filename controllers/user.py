@@ -61,20 +61,7 @@ async def login(req: UserLoginRequest, request: Request, session: AsyncSession =
         }
     )
 
-    account, _ = await PointsAccountService.ensure_user_account(session, user.id)
-    if is_new:
-        _, account, _ = await PointsAccountService.add_points(
-            session=session,
-            user_id=user.id,
-            points=100,
-            source="signup",
-            change_type="signup_seed_points",
-            availability="consumable",
-            idempotency_key=f"signup_seed_points:{user.id}",
-            related_type="user",
-            related_id=str(user.id),
-            remark="新用户注册赠送100积分",
-        )
+    account = await _ensure_signup_seed_points(session, user, "新用户注册赠送100积分")
     profile = await _build_profile(session, user, account)
     return response(
         data=UserLoginResponse(
@@ -135,7 +122,7 @@ async def get_profile(
     if not user:
         return response([], 404, "user not found")
 
-    account, _ = await PointsAccountService.ensure_user_account(session, user.id)
+    account = await _ensure_signup_seed_points(session, user, "新用户注册赠送100积分")
     return response(data=(await _build_profile(session, user, account)).model_dump(mode="json"))
 
 
@@ -284,6 +271,22 @@ async def _build_profile(session: AsyncSession, user: User, account: UserAccount
         risk_level=quality_profile.risk_level,
         credit_restore_tip=_credit_restore_tip(quality_profile),
     )
+
+
+async def _ensure_signup_seed_points(session: AsyncSession, user: User, remark: str) -> UserAccount:
+    _, account, _ = await PointsAccountService.add_points(
+        session=session,
+        user_id=user.id,
+        points=100,
+        source="signup",
+        change_type="signup_seed_points",
+        availability="consumable",
+        idempotency_key=f"signup_seed_points:{user.id}",
+        related_type="user",
+        related_id=str(user.id),
+        remark=remark,
+    )
+    return account
 
 
 async def _get_or_create_quality_profile(session: AsyncSession, user: User) -> UserQualityProfile:

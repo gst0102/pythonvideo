@@ -287,6 +287,7 @@ async def ingest_linuxdo_rows(session, rows: Iterable[LinuxDoAssetRow | dict]) -
     result = {
         "synced": 0,
         "auto_published": 0,
+        "updated_existing": 0,
         "review_required": 0,
         "skipped": 0,
         "failed": 0,
@@ -309,7 +310,12 @@ async def ingest_linuxdo_rows(session, rows: Iterable[LinuxDoAssetRow | dict]) -
             normalized_title = normalize_resource_title(row.title)
             duplicate_status = await _duplicate_status(session, normalized_title, row.netdisk, row.link, classification.category)
             source_ref = _source_ref(row)
-            if duplicate_status in {"same_link", "same_title_same_pan"}:
+            if duplicate_status == "same_link" and classification.confidence >= 75:
+                await _publish_resource(session, row, classification, normalized_title, duplicate_status, source_ref)
+                result["updated_existing"] += 1
+                result["synced"] += 1
+                continue
+            if duplicate_status == "same_title_same_pan":
                 await _upsert_candidate(session, row, classification, normalized_title, duplicate_status, "skip_duplicate", "skipped")
                 result["skipped"] += 1
                 continue
@@ -535,7 +541,7 @@ async def _duplicate_status(session, normalized_title: str, pan: str, link: str,
 
 
 async def _publish_resource(session, row: LinuxDoAssetRow, classification, normalized_title: str, duplicate_status: str, source_ref: str) -> None:
-    existing = await _get_resource_by_source_ref(session, source_ref)
+    existing = await _get_resource_by_source_ref_or_link(session, source_ref, row.link)
     level, cost, media_tags = media_level_and_cost(row.title) if classification.category == "影视剧" else ("normal", 5, [])
     tags = sorted(set([*classification.tags, *media_tags, row.netdisk]))
     if existing:
@@ -549,8 +555,13 @@ async def _publish_resource(session, row: LinuxDoAssetRow, classification, norma
         resource.level = level
         resource.cost_points = cost
         resource.normalized_title = normalized_title
+        if not resource.source_ref:
+            resource.source_ref = source_ref
+        resource.source_upload_id = f"{row.source_type}:{row.source_id or row.topic_id}"
+        resource.description = f"系统从{_source_type_text(row.source_type)}导入的资源，来源：{row.topic_url}"
         resource.updated_at = datetime.utcnow()
         resource.is_active = True
+        resource.verified_at = datetime.utcnow()
     else:
         resource = NetdiskResourceModel(
             id=f"{row.source_type}-{hashlib.sha1(source_ref.encode('utf-8')).hexdigest()[:20]}",
@@ -576,12 +587,25 @@ async def _publish_resource(session, row: LinuxDoAssetRow, classification, norma
         )
         session.add(resource)
     resource.quality_score = _calculate_resource_quality_score(resource)
-    await _upsert_candidate(session, row, classification, normalized_title, duplicate_status, "auto_publish", "published")
+    ingest_action = "update_existing_link" if duplicate_status == "same_link" else "auto_publish"
+    await _upsert_candidate(session, row, classification, normalized_title, duplicate_status, ingest_action, "published")
 
 
-async def _get_resource_by_source_ref(session, source_ref: str) -> NetdiskResourceModel | None:
+async def _get_resource_by_source_ref_or_link(session, source_ref: str, link: str) -> NetdiskResourceModel | None:
     result = await session.execute(select(NetdiskResourceModel).where(NetdiskResourceModel.source_ref == source_ref).limit(1))
-    return result.scalar_one_or_none()
+    existing = result.scalar_one_or_none()
+    if existing:
+        return existing
+    clean_link = (link or "").strip()
+    if not clean_link:
+        return None
+    link_result = await session.execute(
+        select(NetdiskResourceModel)
+        .where(NetdiskResourceModel.link == clean_link)
+        .order_by(NetdiskResourceModel.is_active.desc(), NetdiskResourceModel.updated_at.desc())
+        .limit(1)
+    )
+    return link_result.scalar_one_or_none()
 
 
 async def _upsert_candidate(session, row: LinuxDoAssetRow, classification, normalized_title: str, duplicate_status: str, ingest_action: str, status: str) -> None:

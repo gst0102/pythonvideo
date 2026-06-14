@@ -1184,6 +1184,140 @@ class NetdiskResourceService:
         }
 
     @staticmethod
+    async def cleanup_hidden_duplicate_resources(session: AsyncSession, execute: bool = False, note: str = "") -> dict:
+        duplicate_where = """
+            h.is_active = false
+            AND nullif(trim(h.link), '') IS NOT NULL
+            AND EXISTS (
+                SELECT 1
+                FROM netdisk_resources a
+                WHERE a.is_active = true
+                  AND a.id <> h.id
+                  AND lower(trim(a.link)) = lower(trim(h.link))
+            )
+        """
+        protected_where = """
+            h.downloads > 0
+            OR h.favorites > 0
+            OR h.report_count > 0
+            OR h.invalid_count > 0
+            OR EXISTS (
+                SELECT 1 FROM netdisk_favorites f
+                WHERE f.resource_id = h.id
+            )
+            OR EXISTS (
+                SELECT 1 FROM points_ledgers l
+                WHERE l.related_type = 'netdisk_resource'
+                  AND l.related_id = h.id
+            )
+            OR EXISTS (
+                SELECT 1 FROM netdisk_repairs r
+                WHERE r.resource_id = h.id
+            )
+            OR EXISTS (
+                SELECT 1 FROM netdisk_quality_alerts qa
+                WHERE qa.resource_id = h.id
+            )
+            OR EXISTS (
+                SELECT 1 FROM netdisk_quality_daily_stats qs
+                WHERE qs.resource_id = h.id
+            )
+        """
+        overview = (
+            await session.execute(
+                text(
+                    f"""
+                    SELECT
+                        count(*) AS duplicate_count,
+                        count(*) FILTER (WHERE NOT ({protected_where})) AS deletable_count,
+                        count(*) FILTER (WHERE ({protected_where})) AS protected_count,
+                        count(DISTINCT lower(trim(h.link))) AS duplicate_link_count
+                    FROM netdisk_resources h
+                    WHERE {duplicate_where}
+                    """
+                )
+            )
+        ).mappings().one()
+
+        samples = (
+            await session.execute(
+                text(
+                    f"""
+                    SELECT
+                        h.id,
+                        h.title,
+                        h.pan,
+                        h.link,
+                        h.updated_at,
+                        (
+                            SELECT a.id
+                            FROM netdisk_resources a
+                            WHERE a.is_active = true
+                              AND a.id <> h.id
+                              AND lower(trim(a.link)) = lower(trim(h.link))
+                            ORDER BY a.updated_at DESC NULLS LAST, a.created_at DESC NULLS LAST, a.id ASC
+                            LIMIT 1
+                        ) AS active_resource_id
+                    FROM netdisk_resources h
+                    WHERE {duplicate_where}
+                      AND NOT ({protected_where})
+                    ORDER BY h.updated_at DESC NULLS LAST, h.created_at DESC NULLS LAST
+                    LIMIT 10
+                    """
+                )
+            )
+        ).mappings().all()
+
+        deleted_count = 0
+        if execute:
+            deleted_count = int(
+                (
+                    await session.execute(
+                        text(
+                            f"""
+                            WITH deletable AS (
+                                SELECT h.id
+                                FROM netdisk_resources h
+                                WHERE {duplicate_where}
+                                  AND NOT ({protected_where})
+                            ),
+                            deleted AS (
+                                DELETE FROM netdisk_resources r
+                                USING deletable d
+                                WHERE r.id = d.id
+                                RETURNING r.id
+                            )
+                            SELECT count(*) FROM deleted
+                            """
+                        )
+                    )
+                ).scalar_one()
+                or 0
+            )
+            await session.flush()
+
+        return {
+            "duplicate_count": int(overview["duplicate_count"] or 0),
+            "duplicate_link_count": int(overview["duplicate_link_count"] or 0),
+            "deletable_count": int(overview["deletable_count"] or 0),
+            "protected_count": int(overview["protected_count"] or 0),
+            "deleted_count": deleted_count,
+            "execute": bool(execute),
+            "note": note.strip(),
+            "samples": [
+                {
+                    "id": row["id"],
+                    "title": row["title"],
+                    "pan": row["pan"],
+                    "link": row["link"],
+                    "active_resource_id": row["active_resource_id"],
+                    "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
+                }
+                for row in samples
+            ],
+        }
+
+    @staticmethod
     async def confirm_resource_invalid(session: AsyncSession, resource_id: str, note: str = "") -> dict:
         result = await session.execute(select(NetdiskResourceModel).where(NetdiskResourceModel.id == resource_id))
         resource = result.scalar_one_or_none()

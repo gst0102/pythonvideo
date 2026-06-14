@@ -188,9 +188,17 @@ async def _upsert_netdisk_resources(session: AsyncSession, item: dict) -> list[s
         source_key = _netdisk_source_key(item)
         source_ref = _netdisk_source_ref(item, pan, link)
         tags = sorted(set([*media_tags, pan]))
-        active_ids.append(resource_id)
         resource = await session.get(NetdiskResourceModel, resource_id)
+        if not resource:
+            link_result = await session.execute(
+                select(NetdiskResourceModel)
+                .where(NetdiskResourceModel.link == link)
+                .order_by(NetdiskResourceModel.is_active.desc(), NetdiskResourceModel.updated_at.desc())
+                .limit(1)
+            )
+            resource = link_result.scalar_one_or_none()
         if resource:
+            active_ids.append(resource.id)
             resource.title = title
             resource.category = "影视剧"
             resource.pan = pan
@@ -212,6 +220,7 @@ async def _upsert_netdisk_resources(session: AsyncSession, item: dict) -> list[s
             session.add(resource)
             continue
 
+        active_ids.append(resource_id)
         resource = NetdiskResourceModel(
             id=resource_id,
             title=title,

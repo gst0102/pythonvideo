@@ -9,6 +9,7 @@ from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, File, Header, Query, Response, UploadFile
 from fastapi.encoders import jsonable_encoder
+from pydantic import BaseModel, Field
 from sqlalchemy import or_
 from sqlmodel import and_, func, select
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -44,6 +45,12 @@ from services.withdrawal_service import WithdrawalService
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin", tags=["admin"])
+
+
+class AdminPointsAdjustRequest(BaseModel):
+    action: str = Field(pattern="^(add|consume)$")
+    points: int = Field(gt=0, le=10000000)
+    note: str = Field(default="", max_length=300)
 
 
 @router.get("/dashboard", summary="dashboard")
@@ -124,7 +131,8 @@ async def get_users(
         await session.execute(query.order_by(User.created_at.desc()).offset((page - 1) * page_size).limit(page_size))
     ).scalars().all()
 
-    items = [_user_to_dict(user) for user in users]
+    account_map = await _get_user_account_map(session, [user.id for user in users])
+    items = [_user_to_dict(user, account_map.get(user.id)) for user in users]
     return response(
         data=PaginatedResponse(
             list=items,
@@ -154,11 +162,88 @@ async def get_user_detail(user_id: str, session: AsyncSession = Depends(get_sess
             .limit(50)
         )
     ).scalars().all()
+    account, _ = await PointsAccountService.ensure_user_account(session, user.id)
+    ledgers = (
+        await session.execute(
+            select(PointsLedger)
+            .where(PointsLedger.user_id == uid)
+            .order_by(PointsLedger.created_at.desc(), PointsLedger.id.desc())
+            .limit(50)
+        )
+    ).scalars().all()
     return response(
         data={
-            **_user_to_dict(user),
+            **_user_to_dict(user, account),
             "withdrawals": [_withdrawal_to_dict(record, user) for record in withdrawals],
+            "points_ledger": [_points_ledger_to_dict(item) for item in ledgers],
         }
+    )
+
+
+@router.post("/users/{user_id}/points-adjust", summary="adjust user points")
+async def adjust_user_points(
+    user_id: str,
+    req: AdminPointsAdjustRequest,
+    x_admin_role: str = Header("operator"),
+    session: AsyncSession = Depends(get_session),
+):
+    if not _is_quality_supervisor(x_admin_role):
+        return response([], 403, "仅主管可调整用户积分")
+    try:
+        uid = UUID(user_id)
+    except ValueError:
+        return response([], 400, "invalid user id")
+
+    user = await session.get(User, uid)
+    if not user:
+        return response([], 404, "user not found")
+
+    safe_note = (req.note or "").strip() or ("后台增加积分" if req.action == "add" else "后台消耗积分")
+    idempotency_key = f"admin_points_adjust:{req.action}:{user.id}:{uuid4()}"
+    try:
+        if req.action == "add":
+            ledger, account, _ = await PointsAccountService.add_points(
+                session=session,
+                user_id=user.id,
+                points=int(req.points),
+                source="admin_adjust",
+                change_type="admin_points_adjust",
+                availability="consumable",
+                idempotency_key=idempotency_key,
+                related_type="admin_user_points",
+                related_id=str(user.id),
+                remark=safe_note,
+            )
+        else:
+            ledger, account, _ = await PointsAccountService.consume_consumable_points(
+                session=session,
+                user_id=user.id,
+                points=int(req.points),
+                source="admin_adjust",
+                change_type="admin_points_adjust",
+                idempotency_key=idempotency_key,
+                related_type="admin_user_points",
+                related_id=str(user.id),
+                remark=safe_note,
+            )
+    except ValueError as exc:
+        return response([], 400, str(exc))
+
+    await _record_netdisk_audit_log(
+        session,
+        f"user_points_{req.action}",
+        "user",
+        str(user.id),
+        user.nickname or user.openid,
+        safe_note,
+    )
+    return response(
+        data={
+            "user": _user_to_dict(user, account),
+            "account": _account_to_dict(account),
+            "ledger": _points_ledger_to_dict(ledger),
+        },
+        msg="用户积分已调整",
     )
 
 
@@ -484,6 +569,22 @@ async def admin_list_netdisk_resources(
         page=page,
         page_size=page_size,
     )
+    total_all = (await session.execute(select(func.count()).select_from(NetdiskResourceModel))).scalar() or 0
+    active_total = (
+        await session.execute(
+            select(func.count()).select_from(NetdiskResourceModel).where(NetdiskResourceModel.is_active == True)  # noqa: E712
+        )
+    ).scalar() or 0
+    hidden_total = (
+        await session.execute(
+            select(func.count()).select_from(NetdiskResourceModel).where(NetdiskResourceModel.is_active == False)  # noqa: E712
+        )
+    ).scalar() or 0
+    payload["stats"] = {
+        "total": int(total_all),
+        "active": int(active_total),
+        "hidden": int(hidden_total),
+    }
     return response(data=jsonable_encoder(payload))
 
 
@@ -529,6 +630,34 @@ async def admin_restore_hidden_kdocs_resources(
         f"{req.note}；恢复 {payload.get('restored_count', 0)} 条",
     )
     return response(data=jsonable_encoder(payload), msg="hidden kdocs resources restored")
+
+
+@router.get("/netdisk/resources/cleanup-hidden-duplicates/preview", summary="preview hidden duplicate resource cleanup")
+async def admin_preview_hidden_duplicate_cleanup(
+    session: AsyncSession = Depends(get_session),
+):
+    payload = await NetdiskResourceService.cleanup_hidden_duplicate_resources(session, execute=False)
+    return response(data=jsonable_encoder(payload))
+
+
+@router.post("/netdisk/resources/cleanup-hidden-duplicates", summary="cleanup hidden duplicate resources")
+async def admin_cleanup_hidden_duplicate_resources(
+    req: NetdiskAdminAuditRequest,
+    x_admin_role: str = Header("operator"),
+    session: AsyncSession = Depends(get_session),
+):
+    if not _is_quality_supervisor(x_admin_role):
+        return response([], 403, "仅主管可清理隐藏重复资源")
+    payload = await NetdiskResourceService.cleanup_hidden_duplicate_resources(session, execute=True, note=req.note)
+    await _record_netdisk_audit_log(
+        session,
+        "resource_cleanup_hidden_duplicates",
+        "netdisk_resource",
+        "hidden:duplicates",
+        "清理隐藏重复资源",
+        f"{req.note}；删除 {payload.get('deleted_count', 0)} 条，保护 {payload.get('protected_count', 0)} 条",
+    )
+    return response(data=jsonable_encoder(payload), msg="hidden duplicate resources cleaned")
 
 
 @router.post("/netdisk/resources/{resource_id}/confirm-invalid", summary="admin confirm invalid netdisk resource")
@@ -773,12 +902,13 @@ async def admin_netdisk_ops_dashboard(
         await session.execute(select(func.count()).select_from(User).where(User.created_at >= today_start))
     ).scalar() or 0
 
+    business_points_filter = or_(PointsLedger.source.is_(None), PointsLedger.source != "admin_adjust")
     points_gain = (
         await session.execute(
             select(
                 func.count(func.distinct(PointsLedger.user_id)),
                 func.coalesce(func.sum(PointsLedger.points_delta), 0),
-            ).where(PointsLedger.created_at >= today_start, PointsLedger.points_delta > 0)
+            ).where(PointsLedger.created_at >= today_start, PointsLedger.points_delta > 0, business_points_filter)
         )
     ).one()
     points_spend = (
@@ -786,7 +916,31 @@ async def admin_netdisk_ops_dashboard(
             select(
                 func.count(func.distinct(PointsLedger.user_id)),
                 func.coalesce(func.sum(PointsLedger.points_delta), 0),
-            ).where(PointsLedger.created_at >= today_start, PointsLedger.points_delta < 0)
+            ).where(PointsLedger.created_at >= today_start, PointsLedger.points_delta < 0, business_points_filter)
+        )
+    ).one()
+    admin_adjust_gain = (
+        await session.execute(
+            select(
+                func.count(func.distinct(PointsLedger.user_id)),
+                func.coalesce(func.sum(PointsLedger.points_delta), 0),
+            ).where(
+                PointsLedger.created_at >= today_start,
+                PointsLedger.points_delta > 0,
+                PointsLedger.source == "admin_adjust",
+            )
+        )
+    ).one()
+    admin_adjust_spend = (
+        await session.execute(
+            select(
+                func.count(func.distinct(PointsLedger.user_id)),
+                func.coalesce(func.sum(PointsLedger.points_delta), 0),
+            ).where(
+                PointsLedger.created_at >= today_start,
+                PointsLedger.points_delta < 0,
+                PointsLedger.source == "admin_adjust",
+            )
         )
     ).one()
 
@@ -880,6 +1034,10 @@ async def admin_netdisk_ops_dashboard(
                 "today_gain_points": int(points_gain[1] or 0),
                 "today_spend_users": int(points_spend[0] or 0),
                 "today_spend_points": abs(int(points_spend[1] or 0)),
+                "admin_adjust_gain_users": int(admin_adjust_gain[0] or 0),
+                "admin_adjust_gain_points": int(admin_adjust_gain[1] or 0),
+                "admin_adjust_spend_users": int(admin_adjust_spend[0] or 0),
+                "admin_adjust_spend_points": abs(int(admin_adjust_spend[1] or 0)),
                 "consumable_total": int(account_totals[0] or 0),
                 "frozen_total": int(account_totals[1] or 0),
                 "risk_due_total": int(risk_totals[1] or 0),
@@ -1936,6 +2094,7 @@ async def _record_netdisk_audit_log(
 
 async def _build_netdisk_ops_trends(session: AsyncSession, today_start: datetime) -> list[dict]:
     start_day = today_start - timedelta(days=6)
+    business_points_filter = or_(PointsLedger.source.is_(None), PointsLedger.source != "admin_adjust")
     trends: list[dict] = []
     for index in range(7):
         day_start = start_day + timedelta(days=index)
@@ -1958,6 +2117,7 @@ async def _build_netdisk_ops_trends(session: AsyncSession, today_start: datetime
                     PointsLedger.created_at >= day_start,
                     PointsLedger.created_at < day_end,
                     PointsLedger.points_delta > 0,
+                    business_points_filter,
                 )
             )
         ).one()
@@ -1970,6 +2130,7 @@ async def _build_netdisk_ops_trends(session: AsyncSession, today_start: datetime
                     PointsLedger.created_at >= day_start,
                     PointsLedger.created_at < day_end,
                     PointsLedger.points_delta < 0,
+                    business_points_filter,
                 )
             )
         ).one()
@@ -2815,7 +2976,57 @@ def _netdisk_user_notification_to_dict(item: NetdiskUserNotification) -> dict:
     }
 
 
-def _user_to_dict(user: User) -> dict:
+async def _get_user_account_map(session: AsyncSession, user_ids: list[UUID]) -> dict[UUID, UserAccount]:
+    if not user_ids:
+        return {}
+    accounts = (
+        await session.execute(select(UserAccount).where(UserAccount.user_id.in_(user_ids)))
+    ).scalars().all()
+    return {account.user_id: account for account in accounts}
+
+
+def _account_to_dict(account: Optional[UserAccount]) -> dict:
+    if not account:
+        return {
+            "total_points": 0,
+            "withdrawable_points": 0,
+            "frozen_points": 0,
+            "consumable_points": 0,
+            "consumed_points": 0,
+            "locked_withdraw_points": 0,
+            "withdrawn_points": 0,
+        }
+    return {
+        "total_points": int(account.total_points),
+        "withdrawable_points": int(account.withdrawable_points),
+        "frozen_points": int(account.frozen_points),
+        "consumable_points": int(account.consumable_points),
+        "consumed_points": int(account.consumed_points),
+        "locked_withdraw_points": int(account.locked_withdraw_points),
+        "withdrawn_points": int(account.withdrawn_points),
+    }
+
+
+def _points_ledger_to_dict(item: PointsLedger) -> dict:
+    return {
+        "id": str(item.id),
+        "user_id": str(item.user_id),
+        "change_type": item.change_type,
+        "source": item.source,
+        "availability": item.availability,
+        "points_delta": int(item.points_delta),
+        "balance_withdrawable_after": int(item.balance_withdrawable_after),
+        "balance_frozen_after": int(item.balance_frozen_after),
+        "balance_consumable_after": int(item.balance_consumable_after),
+        "related_type": item.related_type,
+        "related_id": item.related_id,
+        "idempotency_key": item.idempotency_key,
+        "remark": item.remark,
+        "created_at": item.created_at.isoformat() if item.created_at else None,
+    }
+
+
+def _user_to_dict(user: User, account: Optional[UserAccount] = None) -> dict:
     return {
         "id": str(user.id),
         "openid": user.openid,
@@ -2830,6 +3041,7 @@ def _user_to_dict(user: User) -> dict:
         "total_withdrawn": float(user.total_withdrawn),
         "invite_count": user.invite_count,
         "team_count": user.team_count,
+        "account": _account_to_dict(account),
         "created_at": user.created_at.isoformat() if user.created_at else None,
     }
 
