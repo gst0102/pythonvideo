@@ -50,16 +50,16 @@ class PaymentService:
 
         if _is_points_recharge_order(order):
             await _grant_recharge_points(session, order)
+            await InviteRewardService.grant_first_recharge_reward(
+                session,
+                invitee_id=order.user_id,
+                order_id=str(order.id),
+            )
         else:
             await _activate_vip(session, order.user_id, order.period, order.duration_days)
             await _grant_vip_gift_points(session, order)
             await _calculate_commission(session, order)
 
-        await InviteRewardService.grant_first_recharge_reward(
-            session,
-            invitee_id=order.user_id,
-            order_id=str(order.id),
-        )
         return True
 
 

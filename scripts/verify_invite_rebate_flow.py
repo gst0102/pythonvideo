@@ -22,6 +22,7 @@ if str(BACKEND_DIR) not in sys.path:
 
 from models.base import async_session_factory  # noqa: E402
 from models.commission import CommissionRecord  # noqa: E402
+from models.invite_relation import InviteRelation  # noqa: E402
 from models.order import Order  # noqa: E402
 from models.points_ledger import PointsLedger  # noqa: E402
 from models.user import User  # noqa: E402
@@ -33,6 +34,7 @@ from services.points_account_service import PointsAccountService  # noqa: E402
 REQUIRED_TABLES = {
     "users",
     "orders",
+    "invite_relations",
     "commission_records",
     "user_accounts",
     "points_ledger",
@@ -90,6 +92,15 @@ async def verify() -> None:
             session.add(parent)
             session.add(buyer)
             await session.flush()
+            session.add(
+                InviteRelation(
+                    inviter_id=parent.id,
+                    invitee_id=buyer.id,
+                    invite_code=parent.invite_code,
+                    source="test",
+                )
+            )
+            await session.flush()
 
             order = Order(
                 user_id=buyer.id,
@@ -145,6 +156,7 @@ async def verify() -> None:
 
             ledger_result = await session.execute(
                 select(PointsLedger).where(
+                    PointsLedger.user_id.in_([parent.id, grandparent.id]),
                     PointsLedger.source == "invite",
                     PointsLedger.change_type == "invite_rebate_frozen",
                     PointsLedger.related_type == "commission_record",
@@ -152,6 +164,16 @@ async def verify() -> None:
             )
             frozen_ledgers = list(ledger_result.scalars().all())
             _assert_equal("frozen rebate ledger count", len(frozen_ledgers), 2)
+
+            vip_first_recharge_result = await session.execute(
+                select(PointsLedger).where(
+                    PointsLedger.user_id == parent.id,
+                    PointsLedger.change_type == "invite_first_recharge",
+                    PointsLedger.related_type == "invite_relation",
+                )
+            )
+            vip_first_recharge_ledgers = list(vip_first_recharge_result.scalars().all())
+            _assert_equal("vip order should not grant fixed first recharge reward", len(vip_first_recharge_ledgers), 0)
 
             released_level1, level1_released = await CommissionService.release_commission_points(session, level1.id)
             _assert_equal("level1 release created", level1_released, True)
@@ -207,10 +229,62 @@ async def verify() -> None:
             records_after_replay = list(records_after_replay_result.scalars().all())
             _assert_equal("commission record count after duplicate callback", len(records_after_replay), 2)
 
+            points_buyer = User(
+                openid=f"{marker}-points-buyer",
+                nickname="Points Buyer",
+                avatar="",
+                invite_code=f"{marker}pb"[-10:],
+                parent_id=parent.id,
+                grand_parent_id=grandparent.id,
+            )
+            session.add(points_buyer)
+            await session.flush()
+            session.add(
+                InviteRelation(
+                    inviter_id=parent.id,
+                    invitee_id=points_buyer.id,
+                    invite_code=parent.invite_code,
+                    source="test",
+                )
+            )
+            await session.flush()
+
+            points_order = Order(
+                user_id=points_buyer.id,
+                amount=1.00,
+                period="points_10",
+                duration_days=0,
+                description="Stage2 invite fixed first recharge verification",
+                out_trade_no=f"{marker}-points-order",
+                status="pending",
+            )
+            session.add(points_order)
+            await session.flush()
+            points_ok = await PaymentService.handle_payment_success(
+                session=session,
+                out_trade_no=points_order.out_trade_no,
+                transaction_id=f"{marker}-points-tx",
+                total_fee_in_fen=100,
+                paid_at=datetime.now(timezone.utc).isoformat(),
+            )
+            _assert_equal("points recharge payment success", points_ok, True)
+
+            fixed_reward_result = await session.execute(
+                select(PointsLedger).where(
+                    PointsLedger.user_id == parent.id,
+                    PointsLedger.change_type == "invite_first_recharge",
+                    PointsLedger.related_type == "invite_relation",
+                )
+            )
+            fixed_reward_ledgers = list(fixed_reward_result.scalars().all())
+            _assert_equal("points recharge grants fixed first recharge reward once", len(fixed_reward_ledgers), 1)
+            _assert_equal("fixed first recharge reward points", int(fixed_reward_ledgers[0].points), 20)
+
             print("Invite rebate verification passed")
             print(
                 "checks=level1 50%, level2 5%, frozen points, duplicate callback idempotency, "
-                "level1 unfreeze idempotency, level2 unfreeze idempotency"
+                "level1 unfreeze idempotency, level2 unfreeze idempotency, "
+                "vip order does not grant fixed recharge reward, points recharge does grant fixed reward"
             )
         finally:
             await session.rollback()
