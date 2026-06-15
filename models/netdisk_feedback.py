@@ -3,7 +3,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Column, ForeignKey, String, Text
+from sqlalchemy import BigInteger, Column, ForeignKey, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlmodel import DateTime, Field, SQLModel, func
 
@@ -29,6 +29,8 @@ class NetdiskFeedback(SQLModel, table=True):
     status: str = Field(default="pending", sa_column=Column(String(32), nullable=False, server_default="pending", index=True))
     auto_reply: str = Field(default="", sa_column=Column(Text, nullable=False, server_default=""))
     admin_reply: str = Field(default="", sa_column=Column(Text, nullable=False, server_default=""))
+    reward_points: int = Field(default=0, sa_column=Column(BigInteger, nullable=False, server_default="0"))
+    reward_ledger_id: uuid.UUID | None = Field(default=None, sa_column=Column(UUID(as_uuid=True), nullable=True))
     created_at: datetime = Field(
         default_factory=datetime.utcnow,
         sa_column=Column(DateTime(timezone=True), server_default=func.now(), index=True),

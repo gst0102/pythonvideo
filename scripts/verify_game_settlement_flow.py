@@ -142,11 +142,9 @@ async def verify() -> None:
             normal_account, _ = await PointsAccountService.ensure_user_account(session, normal_user.id)
             vip_account, _ = await PointsAccountService.ensure_user_account(session, vip_user.id)
 
-            _assert_equal("first normal settled points", int(normal_account.withdrawable_points), 6)
-            _assert_equal("first normal consumable points", int(normal_account.consumable_points), 0)
+            _assert_equal("first normal consumable settled points", int(normal_account.consumable_points), 6)
             _assert_equal("first normal total points", int(normal_account.total_points), 6)
-            _assert_equal("first vip settled points", int(vip_account.withdrawable_points), 12)
-            _assert_equal("first vip consumable points", int(vip_account.consumable_points), 0)
+            _assert_equal("first vip consumable settled points", int(vip_account.consumable_points), 12)
             _assert_equal("first vip total points", int(vip_account.total_points), 12)
             _assert_equal("first batch status", first_result["batch"]["status"], "adjusted")
 
@@ -185,9 +183,9 @@ async def verify() -> None:
             normal_account, _ = await PointsAccountService.ensure_user_account(session, normal_user.id)
             vip_account, _ = await PointsAccountService.ensure_user_account(session, vip_user.id)
 
-            _assert_equal("rerun normal settled points", int(normal_account.withdrawable_points), 4)
+            _assert_equal("rerun normal consumable settled points", int(normal_account.consumable_points), 4)
             _assert_equal("rerun normal total points", int(normal_account.total_points), 4)
-            _assert_equal("rerun vip settled points", int(vip_account.withdrawable_points), 8)
+            _assert_equal("rerun vip consumable settled points", int(vip_account.consumable_points), 8)
             _assert_equal("rerun vip total points", int(vip_account.total_points), 8)
             _assert_equal("rerun batch status", second_result["batch"]["status"], "adjusted")
 
@@ -300,8 +298,8 @@ async def _verify_d2_fallback_flow(session, marker: str) -> None:
 
     normal_account, _ = await PointsAccountService.ensure_user_account(session, normal_user.id)
     vip_account, _ = await PointsAccountService.ensure_user_account(session, vip_user.id)
-    _assert_equal("fallback normal settled points", int(normal_account.withdrawable_points), 4)
-    _assert_equal("fallback vip settled points", int(vip_account.withdrawable_points), 8)
+    _assert_equal("fallback normal consumable settled points", int(normal_account.consumable_points), 4)
+    _assert_equal("fallback vip consumable settled points", int(vip_account.consumable_points), 8)
 
     normal_ledger_count = await _count_game_settlement_ledgers(session, normal_user.id)
     vip_ledger_count = await _count_game_settlement_ledgers(session, vip_user.id)
@@ -331,8 +329,8 @@ async def _verify_d2_fallback_flow(session, marker: str) -> None:
         force_recalculate=True,
     )
     _assert_equal("fallback adjusted ecpm source", adjusted_result["batch"]["ecpm_source"], "manual")
-    _assert_equal("fallback adjusted normal points", int((await PointsAccountService.ensure_user_account(session, normal_user.id))[0].withdrawable_points), 6)
-    _assert_equal("fallback adjusted vip points", int((await PointsAccountService.ensure_user_account(session, vip_user.id))[0].withdrawable_points), 12)
+    _assert_equal("fallback adjusted normal consumable points", int((await PointsAccountService.ensure_user_account(session, normal_user.id))[0].consumable_points), 6)
+    _assert_equal("fallback adjusted vip consumable points", int((await PointsAccountService.ensure_user_account(session, vip_user.id))[0].consumable_points), 12)
 
     normal_detail = await _get_user_settlement(session, fallback_day, normal_user.id)
     vip_detail = await _get_user_settlement(session, fallback_day, vip_user.id)

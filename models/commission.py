@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Optional
 
 from sqlmodel import Column, DateTime, Field, Relationship, SQLModel, func
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy import String, Numeric, SmallInteger, ForeignKey
+from sqlalchemy import String, Numeric, SmallInteger, ForeignKey, UniqueConstraint
 
 if TYPE_CHECKING:
     from models.user import User
@@ -25,6 +25,9 @@ if TYPE_CHECKING:
 
 class CommissionRecord(SQLModel, table=True):
     __tablename__ = "commission_records"
+    __table_args__ = (
+        UniqueConstraint("user_id", "from_user_id", "order_id", "level", name="uq_commission_order_inviter_level"),
+    )
 
     # ── 主键 ──
     id: uuid.UUID = Field(

@@ -9,6 +9,7 @@ MVC 架构中的 Service 层，处理分销佣金记录查询。
 """
 
 import logging
+from datetime import datetime
 from typing import List, Tuple
 from uuid import UUID
 
@@ -96,7 +97,7 @@ class CommissionService:
         if not frozen_ledger:
             raise RuntimeError("commission frozen points ledger not found")
 
-        await PointsAccountService.release_frozen_points(
+        await PointsAccountService.move_frozen_to_consumable(
             session=session,
             user_id=record.user_id,
             points=int(frozen_ledger.points_delta),
@@ -104,6 +105,8 @@ class CommissionService:
             related_type="commission_record",
             related_id=str(record.id),
             remark=f"release level {record.level} vip rebate points",
+            source="invite",
+            change_type="invite_rebate_unfreeze",
         )
         record.status = "settled"
         await session.flush()
@@ -124,6 +127,31 @@ class CommissionService:
                 .where(User.parent_id == user_id, User.is_vip == True)  # noqa: E712
             )
         ).scalar() or 0
+        month_start = datetime.utcnow().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        equity_total = (
+            await session.execute(
+                select(func.coalesce(func.sum(CommissionRecord.commission_amount), 0)).where(
+                    CommissionRecord.user_id == user_id,
+                    CommissionRecord.level == 1,
+                    CommissionRecord.status != "cancelled",
+                )
+            )
+        ).scalar() or 0
+        month_equity = (
+            await session.execute(
+                select(func.coalesce(func.sum(CommissionRecord.commission_amount), 0)).where(
+                    CommissionRecord.user_id == user_id,
+                    CommissionRecord.level == 1,
+                    CommissionRecord.status != "cancelled",
+                    CommissionRecord.created_at >= month_start,
+                )
+            )
+        ).scalar() or 0
+        equity_total_value = round(float(equity_total), 2)
+        equity_withdrawn = round(min(float(user.total_withdrawn), equity_total_value), 2)
+        equity_remaining = round(max(equity_total_value - equity_withdrawn, 0.0), 2)
+        equity_frozen = round(min(float(user.frozen_balance), equity_remaining), 2)
+        equity_balance = round(min(max(float(user.balance) - float(user.frozen_balance), 0.0), max(equity_remaining - equity_frozen, 0.0)), 2)
 
         return {
             "invite_code": user.invite_code,
@@ -135,6 +163,11 @@ class CommissionService:
             "balance": float(user.balance),
             "total_withdrawn": float(user.total_withdrawn),
             "frozen_balance": float(user.frozen_balance),
+            "equity_total_income": equity_total_value,
+            "equity_balance": equity_balance,
+            "equity_frozen": equity_frozen,
+            "equity_withdrawn": equity_withdrawn,
+            "equity_month_income": round(float(month_equity), 2),
             "total_reward_points": int(reward_summary["total_reward_points"]),
             "frozen_reward_points": int(reward_summary["frozen_reward_points"]),
             "available_reward_points": int(reward_summary["available_reward_points"]),

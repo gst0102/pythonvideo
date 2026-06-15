@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 
 import httpx
+from sqlalchemy import or_
 from fastapi import APIRouter, Depends, Query, Request
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -39,7 +40,7 @@ router = APIRouter(prefix="/vip", tags=["VIP"])
 
 PERIOD_DAYS = {"month": 30, "quarter": 90, "year": 365}
 POINT_RECHARGE_PACKAGES = [
-    {"id": "points_10", "title": "10积分", "points": 10, "price": 1.0, "desc": "1元测试充值，适合支付链路验证"},
+    {"id": "points_10", "title": "1元迷你充值", "points": 10, "price": 1.0, "desc": "小额补积分，临时解锁更方便"},
     {"id": "points_100", "title": "100积分", "points": 100, "price": 10.0, "desc": "适合轻度解锁资源"},
     {"id": "points_300", "title": "300积分", "points": 300, "price": 30.0, "desc": "适合持续找资源"},
     {"id": "points_680", "title": "680积分", "points": 680, "price": 68.0, "desc": "适合高频资源需求"},
@@ -51,6 +52,26 @@ POINT_RECHARGE_TEST_PACKAGE = {
     "price": 0.01,
     "desc": "仅用于支付链路测试，测试完成后关闭",
 }
+BENEFIT_CARD_PACKAGES = [
+    {
+        "id": "card_month_10",
+        "title": "10元月卡",
+        "price": 10.0,
+        "points": 300,
+        "duration_days": 30,
+        "daily_points_text": "等效每天10积分",
+        "desc": "立即到账300积分，30天免获取网盘广告",
+    },
+    {
+        "id": "card_month_20",
+        "title": "20元月卡",
+        "price": 20.0,
+        "points": 900,
+        "duration_days": 30,
+        "daily_points_text": "等效每天30积分",
+        "desc": "立即到账900积分，30天免获取网盘广告",
+    },
+]
 
 
 async def sync_recent_pending_virtual_pay_orders(
@@ -66,7 +87,10 @@ async def sync_recent_pending_virtual_pay_orders(
         .join(User, User.id == Order.user_id)
         .where(
             Order.status == "pending",
-            Order.period.startswith("points_"),
+            or_(
+                Order.period.in_([item["id"] for item in BENEFIT_CARD_PACKAGES]),
+                Order.period.startswith("points_"),
+            ),
             Order.created_at >= since,
         )
         .order_by(Order.created_at.desc())
@@ -100,22 +124,33 @@ async def get_status(
         return response([], 404, "user not found")
 
     days_remaining = 0
+    display_until = None
     if user.is_vip and user.vip_expire_at:
         delta = user.vip_expire_at - datetime.utcnow()
         days_remaining = max(0, delta.days)
+        if delta.total_seconds() > 0:
+            display_until = (user.vip_expire_at - timedelta(days=1)).date().isoformat()
 
     return response(
         data=VipStatusResponse(
             is_vip=user.is_vip,
             vip_expire_at=user.vip_expire_at,
             days_remaining=days_remaining,
-        ).model_dump(mode="json")
+        ).model_dump(mode="json") | {
+            "ad_free_netdisk": bool(user.is_vip and user.vip_expire_at and user.vip_expire_at > datetime.utcnow()),
+            "display_until": display_until,
+        }
     )
 
 
 @router.get("/points-packages", summary="get points recharge packages")
 async def get_points_packages():
     return response(data={"packages": _get_point_recharge_packages()})
+
+
+@router.get("/card-packages", summary="get benefit card packages")
+async def get_card_packages():
+    return response(data={"packages": [dict(item) for item in BENEFIT_CARD_PACKAGES]})
 
 
 @router.post("/points-order", summary="create points virtual payment order")
@@ -173,6 +208,67 @@ async def create_points_order(
             "out_trade_no": out_trade_no,
             "status": order.status,
             "points": points,
+            "pay_params": pay_params,
+        },
+        msg="order created",
+    )
+
+
+@router.post("/card-order", summary="create benefit card virtual payment order")
+async def create_card_order(
+    req: CreateOrderRequest,
+    request: Request,
+    claims: dict = Depends(get_current_claims),
+    session: AsyncSession = Depends(get_session),
+):
+    user = await _get_user_by_claims(session, claims)
+    if not user:
+        return response([], 404, "user not found")
+
+    package = next((item for item in BENEFIT_CARD_PACKAGES if item.get("id") == req.package_id), None)
+    if not package:
+        return response([], 400, "package not found")
+
+    config = await ConfigService.get_vip_packages(session)
+    virtual_config, config_error = _resolve_virtual_pay_config(config)
+    if config_error:
+        return config_error
+    session_key = await get_session_key(request, user.openid)
+    if not session_key:
+        return response([], 401, "登录状态已过期，请重新登录后再试")
+
+    price = float(package["price"])
+    points = int(package["points"])
+    duration_days = int(package.get("duration_days") or 30)
+    out_trade_no = _generate_out_trade_no()
+    order = Order(
+        user_id=user.id,
+        amount=price,
+        period=str(package["id"]),
+        duration_days=duration_days,
+        description=f"{package['title']}：立即到账{points}积分",
+        out_trade_no=out_trade_no,
+        status="pending",
+    )
+    session.add(order)
+    await session.flush()
+
+    pay_params = _build_virtual_pay_params(
+        virtual_config,
+        session_key=session_key,
+        order=order,
+        package_id=str(package["id"]),
+        product_id=str(package.get("product_id") or package["id"]),
+        price=price,
+        buy_quantity=1,
+    )
+    return response(
+        data={
+            "order_id": str(order.id),
+            "out_trade_no": out_trade_no,
+            "status": order.status,
+            "points": points,
+            "duration_days": duration_days,
             "pay_params": pay_params,
         },
         msg="order created",

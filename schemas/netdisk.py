@@ -17,6 +17,7 @@ class NetdiskResourceSummary(BaseModel):
     verified_at: str
     created_at: str = ""
     published_at: str = ""
+    published_at_precise: str = ""
     downloads: int
     favorites: int
     description: str
@@ -37,6 +38,7 @@ class NetdiskResourceSummary(BaseModel):
 class NetdiskResourceListResponse(BaseModel):
     resources: list[NetdiskResourceSummary]
     total: int
+    today_total: int = 0
     page: int
     page_size: int
     has_more: bool
@@ -87,6 +89,18 @@ class NetdiskResourceUnlockResponse(BaseModel):
     platform_recovered_points: int = 0
 
 
+class NetdiskShareUnlockCreate(BaseModel):
+    share_token: str
+
+
+class NetdiskShareTokenResponse(BaseModel):
+    share_token: str
+
+
+class NetdiskShareUnlockResponse(NetdiskResourceUnlockResponse):
+    share_token: str = ""
+
+
 class NetdiskResourceAccessResponse(BaseModel):
     resource: NetdiskResourceSummary
     access: NetdiskAccessData
@@ -112,6 +126,23 @@ class NetdiskFavoriteResponse(BaseModel):
 class NetdiskUnfavoriteResponse(BaseModel):
     resource: NetdiskResourceSummary
     favorited: bool = False
+
+
+class NetdiskUnlockHistoryItem(BaseModel):
+    ledger_id: str
+    resource: NetdiskResourceSummary
+    unlocked_at: datetime
+    points_delta: int = 0
+    hidden: bool = False
+
+
+class NetdiskUnlockHistoryListResponse(BaseModel):
+    histories: list[NetdiskUnlockHistoryItem]
+
+
+class NetdiskUnlockHistoryHideResponse(BaseModel):
+    ledger_id: str
+    hidden: bool = True
 
 
 class NetdiskRequestCreate(BaseModel):
@@ -223,6 +254,7 @@ class NetdiskRepairListResponse(BaseModel):
 
 class NetdiskRepairResponse(BaseModel):
     repair: NetdiskRepairItem
+    auto_action: dict | None = None
 
 
 class NetdiskNotificationItem(BaseModel):
@@ -241,6 +273,28 @@ class NetdiskNotificationListResponse(BaseModel):
     unread_count: int
 
 
+class NetdiskResourceSubscribeCreate(BaseModel):
+    wx_subscribe_status: str = "unknown"
+    template_id: str = ""
+
+
+class NetdiskResourceSubscriptionResponse(BaseModel):
+    subscribed: bool
+    wx_subscribe_status: str = ""
+    subscribe_count: int = 0
+    last_subscribed_at: datetime | None = None
+
+
+class NetdiskCollectedBulkActionRequest(BaseModel):
+    action: str
+    ids: list[str] = []
+    all_matching: bool = False
+    status: str = "pending"
+    bucket: str = "all"
+    keyword: str = ""
+    note: str = ""
+
+
 class NetdiskFeedbackCreate(BaseModel):
     feedback_type: str
     content: str
@@ -255,6 +309,8 @@ class NetdiskFeedbackItem(BaseModel):
     status: str
     auto_reply: str = ""
     admin_reply: str = ""
+    reward_points: int = 0
+    reward_ledger_id: str = ""
     created_at: datetime
     updated_at: datetime | None = None
     mine: bool = False
@@ -273,3 +329,4 @@ class NetdiskAdminAuditRequest(BaseModel):
     result_action: str | None = None
     resource_level: str | None = None
     cost_points: int | None = None
+    reward_points: int | None = None

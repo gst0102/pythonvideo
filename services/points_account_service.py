@@ -806,3 +806,50 @@ class PointsAccountService:
         session.add(ledger)
         await session.flush()
         return ledger, account, True
+
+    @staticmethod
+    async def adjust_consumable_points(
+        session: AsyncSession,
+        user_id: UUID,
+        points_delta: int,
+        idempotency_key: str,
+        related_type: str,
+        related_id: str,
+        remark: str | None = None,
+        *,
+        source: str = "game",
+        change_type: str = "game_adjustment",
+    ) -> Tuple[PointsLedger, UserAccount, bool]:
+        existing = await PointsAccountService.get_ledger_by_idempotency_key(session, idempotency_key)
+        account, _ = await PointsAccountService.ensure_user_account(session, user_id)
+        if existing:
+            return existing, account, False
+
+        delta = int(points_delta)
+        if delta == 0:
+            raise ValueError("points_delta must not be zero")
+        if delta < 0 and int(account.consumable_points) < abs(delta):
+            raise ValueError("insufficient consumable points")
+
+        account.total_points += delta
+        account.consumable_points += delta
+        account.updated_at = datetime.utcnow()
+
+        ledger = PointsLedger(
+            user_id=user_id,
+            account_id=account.id,
+            change_type=change_type,
+            source=source,
+            availability="consumable",
+            points_delta=delta,
+            balance_withdrawable_after=int(account.withdrawable_points),
+            balance_frozen_after=int(account.frozen_points),
+            balance_consumable_after=int(account.consumable_points),
+            related_type=related_type,
+            related_id=related_id,
+            idempotency_key=idempotency_key,
+            remark=remark,
+        )
+        session.add(ledger)
+        await session.flush()
+        return ledger, account, True

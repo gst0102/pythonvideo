@@ -26,6 +26,7 @@ from models.points_ledger import PointsLedger
 from models.user import User
 from models.withdrawal import WithdrawalRecord
 from services.config_service import ConfigService
+from services.equity_ledger_service import EquityLedgerService
 from services.points_account_service import PointsAccountService
 
 load_dotenv()
@@ -254,54 +255,50 @@ class WithdrawalService:
             .limit(1)
         )
         pending = pending_result.scalar_one_or_none()
-
-        is_retry = False
         if pending:
-            if abs(float(pending.amount) - amount) < 0.001:
-                record = pending
-                is_retry = True
-            else:
-                user.balance = round(float(user.balance) + float(pending.amount), 2)
-                user.frozen_balance = round(float(user.frozen_balance) - float(pending.amount), 2)
-                pending.status = "failed"
-                pending.fail_reason = "amount_changed_by_user"
-                pending.updated_at = datetime.utcnow()
-                await session.flush()
+            return None, "existing withdrawal is processing"
 
-        if not is_retry:
-            available = round(float(user.balance) - float(user.frozen_balance), 2)
-            if amount > available:
-                return None, f"insufficient available balance: {available:.2f}"
+        available = round(float(user.balance) - float(user.frozen_balance), 2)
+        if amount > available:
+            return None, f"insufficient available balance: {available:.2f}"
 
-            user.balance = round(float(user.balance) - amount, 2)
-            user.frozen_balance = round(float(user.frozen_balance) + amount, 2)
-            user.updated_at = datetime.utcnow()
+        user.balance = round(float(user.balance) - amount, 2)
+        user.frozen_balance = round(float(user.frozen_balance) + amount, 2)
+        user.updated_at = datetime.utcnow()
 
-            record = WithdrawalRecord(
-                user_id=user_id,
-                amount=amount,
-                status="processing",
-                batch_no=_generate_batch_no(),
-                ip=ip,
-            )
-            session.add(record)
-            await session.flush()
+        record = WithdrawalRecord(
+            user_id=user_id,
+            amount=amount,
+            status="processing",
+            batch_no=_generate_batch_no(),
+            ip=ip,
+        )
+        session.add(record)
+        await session.flush()
+        await EquityLedgerService.record(
+            session,
+            user_id=user.id,
+            change_type="withdraw_freeze",
+            amount_delta=-amount,
+            frozen_delta=amount,
+            related_type="withdraw_record",
+            related_id=str(record.id),
+            idempotency_key=f"equity:withdraw_freeze:{record.id}",
+            remark=f"withdrawal apply {amount:.2f}",
+        )
 
         target_openid = openid or user.openid
         if not target_openid:
-            if not is_retry:
-                await _rollback_balance(session, user, record, amount, "missing_openid")
+            await _rollback_balance(session, user, record, amount, "missing_openid")
             return None, "missing openid"
 
         submitted_record, error = await WithdrawalService.submit_processing_withdrawal(
             session,
             record.id,
             openid=target_openid,
-            allow_existing_submission=is_retry,
         )
         if error:
-            if not is_retry:
-                await _rollback_balance(session, user, record, amount, error)
+            await _rollback_balance(session, user, record, amount, error)
             return None, error
         return submitted_record, None
 
@@ -393,6 +390,18 @@ class WithdrawalService:
                 user.frozen_balance = round(float(user.frozen_balance) - amount, 2)
             user.total_withdrawn = round(float(user.total_withdrawn) + amount, 2)
             user.updated_at = datetime.utcnow()
+            if not points_amount:
+                await EquityLedgerService.record(
+                    session,
+                    user_id=record.user_id,
+                    change_type="withdraw_success",
+                    frozen_delta=-amount,
+                    total_withdrawn_delta=amount,
+                    related_type="withdraw_record",
+                    related_id=str(record.id),
+                    idempotency_key=f"equity:withdraw_success:{record.id}",
+                    remark=f"withdrawal success {amount:.2f}; transfer_bill_no={transfer_bill_no}",
+                )
         return True
 
     @staticmethod
@@ -431,6 +440,18 @@ class WithdrawalService:
                 user.balance = round(float(user.balance) + amount, 2)
                 user.frozen_balance = round(float(user.frozen_balance) - amount, 2)
             user.updated_at = datetime.utcnow()
+            if not points_amount:
+                await EquityLedgerService.record(
+                    session,
+                    user_id=record.user_id,
+                    change_type="withdraw_failed_return",
+                    amount_delta=amount,
+                    frozen_delta=-amount,
+                    related_type="withdraw_record",
+                    related_id=str(record.id),
+                    idempotency_key=f"equity:withdraw_failed_return:{record.id}",
+                    remark=f"withdrawal returned: {reason}",
+                )
         return True
 
     @staticmethod
@@ -477,6 +498,17 @@ class WithdrawalService:
                 else:
                     user.balance = round(float(user.balance) + amount, 2)
                     user.frozen_balance = round(float(user.frozen_balance) - amount, 2)
+                    await EquityLedgerService.record(
+                        session,
+                        user_id=record.user_id,
+                        change_type="withdraw_failed_return",
+                        amount_delta=amount,
+                        frozen_delta=-amount,
+                        related_type="withdraw_record",
+                        related_id=str(record.id),
+                        idempotency_key=f"equity:withdraw_failed_return:{record.id}",
+                        remark="withdrawal returned: timeout_auto_release",
+                    )
                 record.status = "failed"
                 record.fail_reason = "timeout_auto_release"
                 record.completed_at = datetime.utcnow()
@@ -545,6 +577,17 @@ async def _rollback_balance(
     record.completed_at = datetime.utcnow()
     record.updated_at = datetime.utcnow()
 
+    await EquityLedgerService.record(
+        session,
+        user_id=record.user_id,
+        change_type="withdraw_failed_return",
+        amount_delta=amount,
+        frozen_delta=-amount,
+        related_type="withdraw_record",
+        related_id=str(record.id),
+        idempotency_key=f"equity:withdraw_failed_return:{record.id}",
+        remark=f"withdrawal returned: {reason}",
+    )
     await session.flush()
 
 

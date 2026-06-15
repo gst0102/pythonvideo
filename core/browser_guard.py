@@ -49,10 +49,29 @@ def browser_process_count() -> int:
     return len(_browser_pids())
 
 
-def cleanup_all_browser_processes(label: str) -> int:
+def cleanup_all_browser_processes(label: str, min_age_seconds: int = 0) -> int:
     pids = sorted(_browser_pids())
     if not pids:
         return 0
+    if min_age_seconds > 0:
+        stale_pids = []
+        skipped_pids = []
+        for pid in pids:
+            age_seconds = _pid_age_seconds(pid)
+            if age_seconds is not None and age_seconds >= min_age_seconds:
+                stale_pids.append(pid)
+            else:
+                skipped_pids.append(pid)
+        if skipped_pids:
+            logger.info(
+                "[BrowserGuard] skip active browser processes for %s under %ss: %s",
+                label,
+                min_age_seconds,
+                skipped_pids,
+            )
+        pids = stale_pids
+        if not pids:
+            return 0
 
     logger.warning("[BrowserGuard] cleaning all browser leftovers for %s: %s", label, pids)
     _terminate_browser_pids(pids, label)
@@ -139,6 +158,19 @@ def _browser_pids_from_proc() -> set[int]:
         if any(pattern in cmdline for pattern in patterns):
             pids.add(pid)
     return pids
+
+
+def _pid_age_seconds(pid: int) -> float | None:
+    try:
+        with open("/proc/uptime", "r", encoding="utf-8") as file:
+            uptime_seconds = float(file.read().split()[0])
+        with open(f"/proc/{pid}/stat", "r", encoding="utf-8") as file:
+            fields = file.read().split()
+        start_ticks = int(fields[21])
+        ticks_per_second = os.sysconf(os.sysconf_names["SC_CLK_TCK"])
+        return max(0.0, uptime_seconds - (start_ticks / ticks_per_second))
+    except Exception:
+        return None
 
 
 def _cleanup_new_browser_processes(before_pids: set[int], label: str) -> None:

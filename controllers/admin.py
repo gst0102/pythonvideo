@@ -6,6 +6,7 @@ import os
 from datetime import datetime, timedelta
 from typing import Optional
 from uuid import UUID, uuid4
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, File, Header, Query, Response, UploadFile
 from fastapi.encoders import jsonable_encoder
@@ -18,23 +19,27 @@ from core.timezone import bj_day_bounds_utc, today_bj
 from core.response import response
 from models.base import get_session
 from models.chat import ChatMessage
+from models.equity_ledger import EquityLedger
 from models.netdisk_audit_log import NetdiskAuditLog
+from models.netdisk_crawler_run import NetdiskCrawlerRun
 from models.netdisk_collected_resource import NetdiskCollectedResource
 from models.netdisk_import_batch import NetdiskImportBatch
 from models.netdisk_quality_alert import NetdiskQualityAlert
 from models.netdisk_quality_daily_stat import NetdiskQualityDailyStat
 from models.netdisk_repair import NetdiskRepair
+from models.netdisk_request import NetdiskRequest
 from models.netdisk_resource import NetdiskResource as NetdiskResourceModel
 from models.netdisk_risk_record import NetdiskRiskRecord
 from models.netdisk_upload import NetdiskUpload
 from models.netdisk_user_notification import NetdiskUserNotification
+from models.invite_relation import InviteRelation
 from models.order import Order
 from models.points_ledger import PointsLedger
 from models.user import User
 from models.user_account import UserAccount
 from models.withdrawal import WithdrawalRecord
 from schemas.admin_settlement import AdminGameSettlementTriggerRequest, AdminGameSettlementUpsertRequest
-from schemas.netdisk import NetdiskAdminAuditRequest
+from schemas.netdisk import NetdiskAdminAuditRequest, NetdiskCollectedBulkActionRequest
 from schemas.user import AdminReplyRequest, AdminUserVipUpdateRequest, ConfigUpdateRequest, PaginatedResponse
 from services.chat_service import ChatService
 from services.config_service import ConfigService
@@ -493,6 +498,90 @@ async def reject_withdrawal(
     return response(msg="withdrawal rejected")
 
 
+@router.get("/equity-ledger", summary="admin equity cash ledger")
+async def admin_equity_ledger(
+    keyword: Optional[str] = Query(None),
+    change_type: Optional[str] = Query(None),
+    related_type: Optional[str] = Query(None),
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    session: AsyncSession = Depends(get_session),
+):
+    query = select(EquityLedger)
+    if change_type:
+        query = query.where(EquityLedger.change_type == change_type)
+    if related_type:
+        query = query.where(EquityLedger.related_type == related_type)
+
+    start_dt = _parse_admin_datetime(start_date, end_of_day=False)
+    end_dt = _parse_admin_datetime(end_date, end_of_day=True)
+    if start_dt:
+        query = query.where(EquityLedger.created_at >= start_dt)
+    if end_dt:
+        query = query.where(EquityLedger.created_at <= end_dt)
+
+    if keyword and keyword.strip():
+        kw = keyword.strip()
+        user_sq = select(User.id).where(
+            (User.openid.ilike(f"%{kw}%"))
+            | (User.nickname.ilike(f"%{kw}%"))
+            | (User.invite_code.ilike(f"%{kw}%"))
+        )
+        keyword_filters = [
+            EquityLedger.related_id.ilike(f"%{kw}%"),
+            EquityLedger.idempotency_key.ilike(f"%{kw}%"),
+            EquityLedger.remark.ilike(f"%{kw}%"),
+            EquityLedger.user_id.in_(user_sq),
+        ]
+        try:
+            keyword_filters.append(EquityLedger.id == UUID(kw))
+        except ValueError:
+            pass
+        query = query.where(or_(*keyword_filters))
+
+    stats_sq = query.subquery()
+    total = (await session.execute(select(func.count()).select_from(stats_sq))).scalar() or 0
+    amount_in = (
+        await session.execute(
+            select(func.coalesce(func.sum(stats_sq.c.amount_delta), 0.0)).select_from(stats_sq).where(stats_sq.c.amount_delta > 0)
+        )
+    ).scalar() or 0.0
+    amount_out = (
+        await session.execute(
+            select(func.coalesce(func.sum(stats_sq.c.amount_delta), 0.0)).select_from(stats_sq).where(stats_sq.c.amount_delta < 0)
+        )
+    ).scalar() or 0.0
+    frozen_delta = (
+        await session.execute(select(func.coalesce(func.sum(stats_sq.c.frozen_delta), 0.0)).select_from(stats_sq))
+    ).scalar() or 0.0
+    rows = (
+        await session.execute(
+            query.order_by(EquityLedger.created_at.desc(), EquityLedger.id.desc()).offset((page - 1) * page_size).limit(page_size)
+        )
+    ).scalars().all()
+
+    user_map = await _get_user_map(session, [row.user_id for row in rows])
+    return response(
+        data=PaginatedResponse(
+            list=[_equity_ledger_to_dict(item, user_map.get(item.user_id)) for item in rows],
+            total=total,
+            page=page,
+            page_size=page_size,
+            has_more=((page - 1) * page_size + len(rows)) < total,
+        ).model_dump()
+        | {
+            "stats": {
+                "amount_in": round(float(amount_in), 2),
+                "amount_out": round(float(amount_out), 2),
+                "net_amount": round(float(amount_in) + float(amount_out), 2),
+                "frozen_delta": round(float(frozen_delta), 2),
+            }
+        }
+    )
+
+
 @router.get("/netdisk/uploads", summary="admin netdisk upload list")
 async def admin_list_netdisk_uploads(
     status: Optional[str] = Query(None),
@@ -614,11 +703,36 @@ async def admin_reply_netdisk_feedback(
             feedback_id=feedback_id,
             status=req.result_action or "processing",
             admin_reply=req.note,
+            reward_points=req.reward_points,
         )
     except ValueError as exc:
         return response([], 400, str(exc))
     await _record_netdisk_audit_log(session, "feedback_reply", "netdisk_feedback", feedback_id, "用户反馈", req.note)
     return response(data=jsonable_encoder(payload), msg="netdisk feedback replied")
+
+
+@router.post("/netdisk/feedbacks/{feedback_id}/appeal-approve", summary="approve netdisk invalid penalty appeal")
+async def admin_approve_netdisk_feedback_appeal(
+    feedback_id: str,
+    req: NetdiskAdminAuditRequest,
+    x_admin_role: str = Header("operator"),
+    session: AsyncSession = Depends(get_session),
+):
+    if not _is_quality_supervisor(x_admin_role):
+        return response([], 403, "仅主管可通过申诉并返还扣罚")
+    try:
+        payload = await NetdiskResourceService.approve_feedback_appeal(session, feedback_id, req.note)
+    except ValueError as exc:
+        return response([], 400, str(exc))
+    await _record_netdisk_audit_log(
+        session,
+        "feedback_appeal_approved",
+        "netdisk_feedback",
+        feedback_id,
+        "申诉通过",
+        req.note,
+    )
+    return response(data=jsonable_encoder(payload), msg="申诉已通过，扣罚已处理")
 
 
 @router.get("/netdisk/resources", summary="admin netdisk resource list")
@@ -677,6 +791,120 @@ async def admin_restore_netdisk_resource(
         req.note,
     )
     return response(data=jsonable_encoder(payload), msg="netdisk resource restored")
+
+
+@router.post("/netdisk/resources/{resource_id}/hide", summary="admin hide netdisk resource")
+async def admin_hide_netdisk_resource(
+    resource_id: str,
+    req: NetdiskAdminAuditRequest,
+    x_admin_role: str = Header("operator"),
+    session: AsyncSession = Depends(get_session),
+):
+    if not _is_quality_supervisor(x_admin_role):
+        return response([], 403, "仅主管可删除资源")
+    try:
+        payload = await NetdiskResourceService.hide_resource(session, resource_id, req.note)
+    except ValueError as exc:
+        return response([], 400, str(exc))
+    await _record_netdisk_audit_log(
+        session,
+        "resource_hide",
+        "netdisk_resource",
+        resource_id,
+        payload["resource"].get("title", ""),
+        req.note,
+    )
+    return response(data=jsonable_encoder(payload), msg="netdisk resource hidden")
+
+
+@router.get("/netdisk/requests", summary="admin netdisk request bounty list")
+async def admin_list_netdisk_requests(
+    status: Optional[str] = Query(None),
+    keyword: Optional[str] = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    session: AsyncSession = Depends(get_session),
+):
+    payload = await NetdiskResourceService.list_admin_requests(
+        session=session,
+        status=status,
+        keyword=keyword,
+        page=page,
+        page_size=page_size,
+    )
+    status_counts = (
+        await session.execute(
+            select(NetdiskRequest.status, func.count()).group_by(NetdiskRequest.status)
+        )
+    ).all()
+    payload["stats"] = {str(status): int(count or 0) for status, count in status_counts}
+    return response(data=jsonable_encoder(payload))
+
+
+@router.post("/netdisk/requests/{request_id}/delete", summary="admin delete netdisk request bounty")
+async def admin_delete_netdisk_request(
+    request_id: str,
+    req: NetdiskAdminAuditRequest,
+    x_admin_role: str = Header("operator"),
+    session: AsyncSession = Depends(get_session),
+):
+    if not _is_quality_supervisor(x_admin_role):
+        return response([], 403, "仅主管可删除悬赏")
+    try:
+        payload = await NetdiskResourceService.admin_delete_request(session, request_id, req.note)
+    except ValueError as exc:
+        return response([], 400, str(exc))
+    await _record_netdisk_audit_log(
+        session,
+        "request_delete",
+        "netdisk_request",
+        request_id,
+        payload["request"].get("title", ""),
+        req.note,
+    )
+    return response(data=jsonable_encoder(payload), msg="netdisk request deleted")
+
+
+@router.get("/netdisk/resource-subscriptions", summary="admin netdisk resource subscription list")
+async def admin_list_netdisk_resource_subscriptions(
+    status: Optional[str] = Query(None),
+    wx_subscribe_status: Optional[str] = Query(None),
+    keyword: Optional[str] = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    session: AsyncSession = Depends(get_session),
+):
+    payload = await NetdiskResourceService.list_admin_resource_subscriptions(
+        session=session,
+        status=status,
+        wx_subscribe_status=wx_subscribe_status,
+        keyword=keyword,
+        page=page,
+        page_size=page_size,
+    )
+    return response(data=jsonable_encoder(payload))
+
+
+@router.get("/netdisk/resource-subscription-push-logs", summary="admin netdisk resource subscription push logs")
+async def admin_list_netdisk_resource_subscription_push_logs(
+    subscription_id: Optional[str] = Query(None),
+    resource_id: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    keyword: Optional[str] = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    session: AsyncSession = Depends(get_session),
+):
+    payload = await NetdiskResourceService.list_admin_subscription_push_logs(
+        session=session,
+        subscription_id=subscription_id,
+        resource_id=resource_id,
+        status=status,
+        keyword=keyword,
+        page=page,
+        page_size=page_size,
+    )
+    return response(data=jsonable_encoder(payload))
 
 
 @router.post("/netdisk/resources/restore-hidden-kdocs", summary="admin restore hidden kdocs resources")
@@ -968,6 +1196,12 @@ async def admin_netdisk_ops_dashboard(
     today_new_users = (
         await session.execute(select(func.count()).select_from(User).where(User.created_at >= today_start))
     ).scalar() or 0
+    total_share_friends = (
+        await session.execute(select(func.count()).select_from(InviteRelation))
+    ).scalar() or 0
+    today_share_friends = (
+        await session.execute(select(func.count()).select_from(InviteRelation).where(InviteRelation.created_at >= today_start))
+    ).scalar() or 0
 
     business_points_filter = or_(PointsLedger.source.is_(None), PointsLedger.source != "admin_adjust")
     points_gain = (
@@ -1046,6 +1280,11 @@ async def admin_netdisk_ops_dashboard(
             select(func.count()).select_from(NetdiskResourceModel).where(NetdiskResourceModel.is_active == False)  # noqa: E712
         )
     ).scalar() or 0
+    total_resources = (
+        await session.execute(
+            select(func.count()).select_from(NetdiskResourceModel)
+        )
+    ).scalar() or 0
     risk_totals = (
         await session.execute(
             select(
@@ -1077,6 +1316,21 @@ async def admin_netdisk_ops_dashboard(
             )
         )
     ).scalar() or 0
+    today_resources = (
+        await session.execute(
+            select(func.count()).select_from(NetdiskResourceModel).where(NetdiskResourceModel.created_at >= today_start)
+        )
+    ).scalar() or 0
+    resource_update_stats = (
+        await session.execute(
+            select(
+                func.count(),
+                func.max(NetdiskResourceModel.verified_at),
+            )
+            .select_from(NetdiskResourceModel)
+            .where(NetdiskResourceModel.verified_at >= today_start)
+        )
+    ).one()
     trends = await _build_netdisk_ops_trends(session, today_start)
     point_sources = await _build_point_source_distribution(session, point_source_start)
     resource_quality_rankings = await _build_resource_quality_rankings(session, range_mode=quality_range)
@@ -1095,6 +1349,16 @@ async def admin_netdisk_ops_dashboard(
             "users": {
                 "total": int(total_users),
                 "today_new": int(today_new_users),
+            },
+            "invites": {
+                "today_share_friends": int(today_share_friends),
+                "total_share_friends": int(total_share_friends),
+            },
+            "resources": {
+                "today_new": int(today_resources),
+                "today_updated": int(resource_update_stats[0] or 0),
+                "total": int(total_resources),
+                "latest_verified_at": resource_update_stats[1].isoformat() if resource_update_stats[1] else None,
             },
             "points": {
                 "today_gain_users": int(points_gain[0] or 0),
@@ -1119,6 +1383,8 @@ async def admin_netdisk_ops_dashboard(
                 "quality_review_pool": int(quality_review_pool_count),
             },
             "today_activity": {
+                "resources": int(today_resources),
+                "resource_updates": int(resource_update_stats[0] or 0),
                 "uploads": int(today_uploads),
                 "repairs": int(today_repairs),
                 "reports": int(today_reports),
@@ -1165,7 +1431,7 @@ async def admin_netdisk_crawler_status(session: AsyncSession = Depends(get_sessi
             "key": "kdocs_anime",
             "name": "KDocs 影视剧",
             "source": "kdocs",
-            "schedule": f"每 {anime_interval} 分钟",
+            "schedule": "每小时 30 分" if anime_interval == 60 else f"每 {anime_interval} 分钟",
             "limit_text": f"最新日期分组最多 {kdocs_limit} 条",
             "enabled": os.getenv("ANIME_SYNC_ENABLED", "true").lower() == "true",
             "published_count": int(kdocs_count),
@@ -1221,6 +1487,7 @@ async def admin_netdisk_crawler_status(session: AsyncSession = Depends(get_sessi
                 "force_cleanup": os.getenv("BROWSER_FORCE_CLEANUP", "true").lower() != "false",
                 "browser_processes": int(worker_status.get("browser_processes") or 0),
                 "browser_process_limit": int(worker_status.get("browser_process_limit") or 0),
+                "browser_stale_seconds": int(worker_status.get("browser_stale_seconds") or 0),
             },
             "generated_at": datetime.utcnow().isoformat(),
         }
@@ -1243,6 +1510,7 @@ async def _fetch_crawler_worker_status() -> dict:
             "chromium": payload.get("chromium", ""),
             "browser_processes": payload.get("browser_processes", 0),
             "browser_process_limit": payload.get("browser_process_limit", 0),
+            "browser_stale_seconds": payload.get("browser_stale_seconds", 0),
             "auto_cleaned": payload.get("auto_cleaned", 0),
             "task_timeout_seconds": payload.get("task_timeout_seconds", 0),
             "failure_breaker_threshold": payload.get("failure_breaker_threshold", 0),
@@ -1250,19 +1518,20 @@ async def _fetch_crawler_worker_status() -> dict:
             "running_tasks": payload.get("running_tasks", []),
             "blocked_tasks": payload.get("blocked_tasks", []),
             "tasks": payload.get("tasks", []),
+            "recent_runs": payload.get("recent_runs", []),
+            "scheduler_jobs": payload.get("scheduler_jobs", []),
         }
     except Exception as exc:
         logger.warning("crawler worker status unavailable: %s", exc)
+        fallback = await _build_crawler_worker_fallback_status()
         return {
             "reachable": False,
-            "status": "offline",
+            **fallback,
             "service": "crawler-worker",
             "error": str(exc),
             "browser_processes": 0,
             "browser_process_limit": 0,
-            "tasks": [],
-            "running_tasks": [],
-            "blocked_tasks": [],
+            "browser_stale_seconds": 0,
         }
 
 
@@ -1365,6 +1634,40 @@ async def admin_handle_netdisk_collected_resource(
         req.note,
     )
     return response(data=jsonable_encoder(payload), msg="采集候选已处理")
+
+
+@router.post("/netdisk/collected-resources/bulk-action", summary="bulk handle collected resource candidates")
+async def admin_bulk_handle_netdisk_collected_resources(
+    req: NetdiskCollectedBulkActionRequest,
+    x_admin_role: str = Header("operator"),
+    session: AsyncSession = Depends(get_session),
+):
+    if not _is_quality_supervisor(x_admin_role):
+        return response([], 403, "需要主管权限才能批量处理采集候选")
+    if req.action not in {"approve", "skip", "merge"}:
+        return response([], 400, "未知处理动作")
+    try:
+        payload = await NetdiskResourceService.bulk_handle_admin_collected_resources(
+            session=session,
+            action=req.action,  # type: ignore[arg-type]
+            ids=req.ids,
+            all_matching=req.all_matching,
+            status=req.status,
+            bucket=req.bucket,
+            keyword=req.keyword,
+            note=req.note,
+        )
+    except ValueError as exc:
+        return response([], 400, str(exc))
+    await _record_netdisk_audit_log(
+        session,
+        f"collected_bulk_{req.action}",
+        "netdisk_collected_resource",
+        "bulk",
+        f"批量处理 {payload.get('handled', 0)} 条采集候选",
+        req.note,
+    )
+    return response(data=jsonable_encoder(payload), msg="批量处理完成")
 
 
 @router.post("/netdisk/collected-resources/import", summary="import collected resources from file")
@@ -2107,6 +2410,170 @@ async def _build_netdisk_ops_trends(session: AsyncSession, today_start: datetime
             }
         )
     return trends
+
+
+async def _build_crawler_worker_fallback_status() -> dict:
+    fallback_tasks = {
+        "kdocs_anime": _empty_crawler_task("kdocs_anime"),
+        "kdocs_movie": _empty_crawler_task("kdocs_movie"),
+        "kdocs_4k": _empty_crawler_task("kdocs_4k"),
+        "linuxdo": _empty_crawler_task("linuxdo"),
+    }
+
+    try:
+        from models.base import get_session_ctx
+
+        async with get_session_ctx() as session:
+            recent_rows = (
+                await session.execute(
+                    select(NetdiskCrawlerRun)
+                    .order_by(NetdiskCrawlerRun.started_at.desc(), NetdiskCrawlerRun.created_at.desc())
+                    .limit(8)
+                )
+            ).scalars().all()
+
+            for crawler_key in fallback_tasks.keys():
+                latest_row = (
+                    await session.execute(
+                        select(NetdiskCrawlerRun)
+                        .where(NetdiskCrawlerRun.crawler_key == crawler_key)
+                        .order_by(NetdiskCrawlerRun.started_at.desc(), NetdiskCrawlerRun.created_at.desc())
+                        .limit(1)
+                    )
+                ).scalars().first()
+                latest_success_row = (
+                    await session.execute(
+                        select(NetdiskCrawlerRun)
+                        .where(NetdiskCrawlerRun.crawler_key == crawler_key, NetdiskCrawlerRun.status == "success")
+                        .order_by(NetdiskCrawlerRun.finished_at.desc(), NetdiskCrawlerRun.created_at.desc())
+                        .limit(1)
+                    )
+                ).scalars().first()
+                if latest_row:
+                    fallback_tasks[crawler_key].update(_crawler_task_from_run(latest_row, latest_success_row))
+    except Exception:
+        logger.error("failed to build crawler worker fallback status", exc_info=True)
+        recent_rows = []
+
+    return {
+        "status": "offline",
+        "task_timeout_seconds": int(os.getenv("CRAWLER_TASK_TIMEOUT_SECONDS", "900")),
+        "failure_breaker_threshold": int(os.getenv("CRAWLER_FAILURE_BREAKER_THRESHOLD", "3")),
+        "failure_breaker_cooldown_seconds": int(os.getenv("CRAWLER_FAILURE_BREAKER_COOLDOWN_SECONDS", "1800")),
+        "running_tasks": [],
+        "blocked_tasks": [],
+        "tasks": list(fallback_tasks.values()),
+        "recent_runs": [_crawler_recent_run_to_dict(item) for item in recent_rows],
+        "scheduler_jobs": _build_crawler_scheduler_jobs_fallback(recent_rows),
+    }
+
+
+def _empty_crawler_task(crawler_key: str) -> dict:
+    return {
+        "key": crawler_key,
+        "running": False,
+        "last_started_at": "",
+        "last_finished_at": "",
+        "last_success_at": "",
+        "last_error": "",
+        "last_result": {},
+        "consecutive_failures": 0,
+        "breaker_until": "",
+    }
+
+
+def _crawler_task_from_run(row: NetdiskCrawlerRun, latest_success_row: NetdiskCrawlerRun | None) -> dict:
+    task = _empty_crawler_task(row.crawler_key)
+    task["last_started_at"] = row.started_at.isoformat() if row.started_at else ""
+    task["last_finished_at"] = row.finished_at.isoformat() if row.finished_at else ""
+    task["last_success_at"] = latest_success_row.finished_at.isoformat() if latest_success_row and latest_success_row.finished_at else ""
+    task["last_error"] = row.error_text or (row.status if row.status != "success" else "")
+    task["last_result"] = _parse_crawler_result_payload(row.result_payload)
+    task["consecutive_failures"] = int(row.consecutive_failures or 0)
+    return task
+
+
+def _crawler_recent_run_to_dict(row: NetdiskCrawlerRun) -> dict:
+    return {
+        "id": str(row.id),
+        "crawler_key": row.crawler_key,
+        "trigger_source": row.trigger_source,
+        "status": row.status,
+        "started_at": row.started_at.isoformat() if row.started_at else "",
+        "finished_at": row.finished_at.isoformat() if row.finished_at else "",
+        "duration_seconds": int(row.duration_seconds or 0),
+        "synced_count": int(row.synced_count or 0),
+        "inactive_count": int(row.inactive_count or 0),
+        "auto_published_count": int(row.auto_published_count or 0),
+        "review_required_count": int(row.review_required_count or 0),
+        "skipped_count": int(row.skipped_count or 0),
+        "failed_count": int(row.failed_count or 0),
+        "netdisk_inactive_count": int(row.netdisk_inactive_count or 0),
+        "consecutive_failures": int(row.consecutive_failures or 0),
+        "error_text": row.error_text or "",
+        "result_payload": _parse_crawler_result_payload(row.result_payload),
+    }
+
+
+def _parse_crawler_result_payload(payload_text: str) -> dict:
+    if not payload_text:
+        return {}
+    try:
+        payload = json.loads(payload_text)
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _build_crawler_scheduler_jobs_fallback(recent_rows: list[NetdiskCrawlerRun]) -> list[dict]:
+    now_bj = datetime.now(ZoneInfo("Asia/Shanghai"))
+    rows_by_key: dict[str, NetdiskCrawlerRun] = {}
+    for row in recent_rows:
+        rows_by_key.setdefault(row.crawler_key, row)
+
+    jobs = []
+    anime_interval = int(os.getenv("ANIME_SYNC_INTERVAL", "60"))
+    if os.getenv("ANIME_SYNC_ENABLED", "true").lower() == "true":
+        if anime_interval == 60:
+            next_run = now_bj.replace(minute=30, second=0, microsecond=0)
+            if next_run <= now_bj:
+                next_run = next_run + timedelta(hours=1)
+            name = "影视剧数据每小时30分同步(金山文档)"
+        else:
+            anchor = _row_finished_time_bj(rows_by_key.get("kdocs_anime")) or now_bj
+            next_run = anchor + timedelta(minutes=anime_interval)
+            name = "影视剧数据定时间隔同步(金山文档)"
+        jobs.append({"id": "sync_anime_job", "name": name, "next_run_time": next_run.isoformat()})
+
+    next_midnight = (now_bj + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    jobs.append(
+        {
+            "id": "sync_movie_4k_job",
+            "name": "电影/4K数据每日凌晨同步(金山文档)",
+            "next_run_time": next_midnight.isoformat(),
+        }
+    )
+
+    if os.getenv("LINUXDO_SYNC_ENABLED", "true").lower() == "true":
+        linuxdo_hours = int(os.getenv("LINUXDO_SYNC_INTERVAL_HOURS", "12"))
+        anchor = _row_finished_time_bj(rows_by_key.get("linuxdo")) or now_bj
+        jobs.append(
+            {
+                "id": "linuxdo_netdisk_12h_sync",
+                "name": "LinuxDo云资产每12小时同步",
+                "next_run_time": (anchor + timedelta(hours=linuxdo_hours)).isoformat(),
+            }
+        )
+    return jobs
+
+
+def _row_finished_time_bj(row: NetdiskCrawlerRun | None) -> datetime | None:
+    if not row or not row.finished_at:
+        return None
+    dt = row.finished_at
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Shanghai"))
+    return dt.astimezone(ZoneInfo("Asia/Shanghai"))
 
 
 async def _build_point_source_distribution(session: AsyncSession, start_dt: datetime) -> list[dict]:
@@ -3047,6 +3514,47 @@ def _withdrawal_to_dict(record: WithdrawalRecord, user: Optional[User] = None) -
         "created_at": record.created_at.isoformat() if record.created_at else None,
         "completed_at": record.completed_at.isoformat() if record.completed_at else None,
     }
+
+
+def _equity_ledger_to_dict(item: EquityLedger, user: Optional[User] = None) -> dict:
+    return {
+        "id": str(item.id),
+        "user_id": str(item.user_id),
+        "nickname": user.nickname if user else "",
+        "openid": user.openid if user else "",
+        "invite_code": user.invite_code if user else "",
+        "change_type": item.change_type,
+        "amount_delta": float(item.amount_delta),
+        "frozen_delta": float(item.frozen_delta),
+        "total_income_delta": float(item.total_income_delta),
+        "total_withdrawn_delta": float(item.total_withdrawn_delta),
+        "balance_after": float(item.balance_after),
+        "frozen_balance_after": float(item.frozen_balance_after),
+        "total_income_after": float(item.total_income_after),
+        "total_withdrawn_after": float(item.total_withdrawn_after),
+        "related_type": item.related_type,
+        "related_id": item.related_id,
+        "idempotency_key": item.idempotency_key,
+        "remark": item.remark,
+        "created_at": item.created_at.isoformat() if item.created_at else None,
+    }
+
+
+def _parse_admin_datetime(raw: Optional[str], *, end_of_day: bool = False) -> Optional[datetime]:
+    if not raw:
+        return None
+    value = raw.strip()
+    if not value:
+        return None
+    try:
+        if len(value) == 10:
+            parsed = datetime.strptime(value, "%Y-%m-%d")
+            if end_of_day:
+                return parsed.replace(hour=23, minute=59, second=59, microsecond=999999)
+            return parsed
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).replace(tzinfo=None)
+    except ValueError:
+        return None
 
 
 def _parse_settlement_date_or_default(raw: Optional[str]):

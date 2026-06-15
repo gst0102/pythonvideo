@@ -86,7 +86,7 @@ async def verify() -> None:
             _assert_equal("normal duplicate total_points", int(duplicate_payload["total_points"]), 1)
 
             normal_account, _ = await PointsAccountService.ensure_user_account(session, normal_user.id)
-            _assert_equal("normal withdrawable points", int(normal_account.withdrawable_points), 1)
+            _assert_equal("normal consumable points", int(normal_account.consumable_points), 1)
             _assert_equal("normal total points", int(normal_account.total_points), 1)
 
             normal_record_result = await session.execute(
@@ -127,7 +127,7 @@ async def verify() -> None:
             _assert_equal("member status member_bonus_enabled", bool(member_status_after["member_bonus_enabled"]), True)
 
             member_account, _ = await PointsAccountService.ensure_user_account(session, member_user.id)
-            _assert_equal("member withdrawable points", int(member_account.withdrawable_points), 2)
+            _assert_equal("member consumable points", int(member_account.consumable_points), 2)
 
             print("Checkin verification passed")
             print("checks=normal success, duplicate block, member bonus, ledger/stat consistency")

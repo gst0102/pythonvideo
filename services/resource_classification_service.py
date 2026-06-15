@@ -68,7 +68,7 @@ def media_level_and_cost(title: str, text: str = "") -> tuple[str, int, list[str
     content = f"{title}\n{text}"
     tags: list[str] = ["影视"]
     if MEDIA_UPDATING_RE.search(content):
-        tags.append("更新中")
+        tags.append("未更新完结")
         return "normal", 5, tags
     if MEDIA_COMPLETE_RE.search(content):
         tags.append("完结")

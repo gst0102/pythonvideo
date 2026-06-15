@@ -22,6 +22,7 @@ from models.anime_resource import AnimeResource
 from models.base import get_session_ctx
 from models.netdisk_resource import NetdiskResource as NetdiskResourceModel
 from services.netdisk_resource_service import _calculate_resource_quality_score
+from services.netdisk_subscription_push_service import notify_resource_updated
 from services.resource_classification_service import media_level_and_cost, normalize_resource_title
 
 logger = logging.getLogger("sync_anime")
@@ -199,6 +200,7 @@ async def _upsert_netdisk_resources(session: AsyncSession, item: dict) -> list[s
             resource = link_result.scalar_one_or_none()
         if resource:
             active_ids.append(resource.id)
+            old_title = resource.title or ""
             resource.title = title
             resource.category = "影视剧"
             resource.pan = pan
@@ -218,6 +220,7 @@ async def _upsert_netdisk_resources(session: AsyncSession, item: dict) -> list[s
             resource.updated_at = datetime.utcnow()
             resource.quality_score = _calculate_resource_quality_score(resource)
             session.add(resource)
+            await notify_resource_updated(session, resource, old_title=old_title)
             continue
 
         active_ids.append(resource_id)
@@ -253,7 +256,7 @@ async def sync_anime_from_kdocs(types: list[str] | None = None) -> dict:
         types = ["anime", "movie", "4k"]
 
     logger.info("[sync] ====== start kdocs sync (types=%s) ======", types)
-    result = {"synced": 0, "inactive": 0, "error": None}
+    result = {"synced": 0, "inactive": 0, "fetched": 0, "error": None}
 
     try:
         from core.kdocs_service import KDocsService
@@ -261,11 +264,13 @@ async def sync_anime_from_kdocs(types: list[str] | None = None) -> dict:
         loop = asyncio.get_event_loop()
         all_items = await loop.run_in_executor(None, KDocsService.crawl_all, types, KDOCS_SYNC_LIMIT_PER_TYPE)
 
+        result["fetched"] = len(all_items)
         logger.info("[sync] kdocs fetched %s items", len(all_items))
         all_items = _dedupe_source_links(all_items)
 
         if not all_items:
             logger.info("[sync] kdocs data is empty, skip sync")
+            result["error"] = "KDocs 本次没有返回可同步资源，已按采集异常处理"
             return result
 
         async with get_session_ctx() as session:

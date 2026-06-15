@@ -95,11 +95,12 @@ async def main() -> None:
                 row(1, "测试剧 全集 4K", "夸克", "https://pan.quark.cn/s/same"),
                 row(2, "测试剧 全集 迅雷资源", "迅雷", "https://pan.xunlei.com/s/new-pan"),
                 row(3, "更新至08集 示例剧", "夸克", "https://pan.quark.cn/s/updating"),
+                row(4, "求资源：测试剧夸克链接", "夸克", "https://pan.quark.cn/s/request"),
             ],
         )
         await session.commit()
 
-        assert result["skipped"] == 1, result
+        assert result["skipped"] == 2, result
         assert result["auto_published"] == 2, result
 
         resources = (await session.exec(select(NetdiskResource))).all()
@@ -107,6 +108,14 @@ async def main() -> None:
         assert by_link["https://pan.xunlei.com/s/new-pan"].cost_points == 20
         assert by_link["https://pan.xunlei.com/s/new-pan"].source_type == "linuxdo"
         assert by_link["https://pan.quark.cn/s/updating"].cost_points == 5
+        dirty_candidate = (
+            await session.exec(
+                select(NetdiskCollectedResource).where(NetdiskCollectedResource.link == "https://pan.quark.cn/s/request")
+            )
+        ).one()
+        assert dirty_candidate.status == "skipped"
+        assert dirty_candidate.ingest_action == "skip_dirty"
+        assert "求助" in dirty_candidate.error or "求资源" in dirty_candidate.error
 
         second = await ingest_linuxdo_rows(
             session,

@@ -15,6 +15,13 @@ from core.timezone import bj_day_bounds_utc, today_bj
 
 DAILY_EARN_CAP = 60
 DAILY_EARN_EXCLUDED_SOURCES = {"signup", "recharge", "vip", "withdraw", "dev", "admin"}
+DAILY_EARN_EXCLUDED_CHANGE_TYPES = {
+    "request_bounty_return",
+    "withdraw_reject_return",
+    "points_recharge_refund",
+    "vip_gift_refund",
+    "invite_first_recharge_refund",
+}
 
 
 class PointsSummaryService:
@@ -41,6 +48,7 @@ class PointsSummaryService:
             end=today_end,
             availability="consumable",
             exclude_sources=DAILY_EARN_EXCLUDED_SOURCES,
+            exclude_change_types=DAILY_EARN_EXCLUDED_CHANGE_TYPES,
             positive_only=True,
         )
         yesterday_settled_points = await _sum_positive_points(
@@ -81,6 +89,7 @@ async def _sum_ledger_points(
     source: str | None = None,
     exclude_source: str | None = None,
     exclude_sources: set[str] | None = None,
+    exclude_change_types: set[str] | None = None,
     positive_only: bool = False,
 ) -> int:
     filters = [
@@ -97,6 +106,8 @@ async def _sum_ledger_points(
         filters.append(PointsLedger.source != exclude_source)
     if exclude_sources:
         filters.append(PointsLedger.source.notin_(exclude_sources))
+    if exclude_change_types:
+        filters.append(PointsLedger.change_type.notin_(exclude_change_types))
 
     stmt = select(func.coalesce(func.sum(PointsLedger.points_delta), 0)).where(and_(*filters))
     result = await session.execute(stmt)

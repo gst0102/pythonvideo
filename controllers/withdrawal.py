@@ -5,13 +5,14 @@ import os
 
 from Crypto.Cipher import AES
 from fastapi import APIRouter, Depends, Query, Request
-from sqlmodel import select
+from sqlmodel import func, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from core.certKey import verify_signature
 from core.response import response
 from jwt_create import get_current_user
 from models.base import get_session, get_session_ctx
+from models.equity_ledger import EquityLedger
 from models.user import User
 from schemas.points import (
     PointsWithdrawalApplyRequest,
@@ -149,6 +150,60 @@ async def get_records(
             "completed_at": record.completed_at.isoformat() if record.completed_at else None,
         }
         for record in records
+    ]
+    return response(
+        data=PaginatedResponse(
+            list=items,
+            total=total,
+            page=page,
+            page_size=page_size,
+            has_more=((page - 1) * page_size + len(items)) < total,
+        ).model_dump()
+    )
+
+
+@router.get("/equity-ledger", summary="equity cash ledger")
+async def get_equity_ledger(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    openid: str = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    result = await session.execute(select(User).where(User.openid == openid))
+    user = result.scalar_one_or_none()
+    if not user:
+        return response([], 404, "user not found")
+
+    total_result = await session.execute(
+        select(func.count()).select_from(EquityLedger).where(EquityLedger.user_id == user.id)
+    )
+    total = int(total_result.scalar() or 0)
+    rows_result = await session.execute(
+        select(EquityLedger)
+        .where(EquityLedger.user_id == user.id)
+        .order_by(EquityLedger.created_at.desc(), EquityLedger.id.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    )
+    rows = list(rows_result.scalars().all())
+    items = [
+        {
+            "id": str(item.id),
+            "change_type": item.change_type,
+            "amount_delta": float(item.amount_delta),
+            "frozen_delta": float(item.frozen_delta),
+            "total_income_delta": float(item.total_income_delta),
+            "total_withdrawn_delta": float(item.total_withdrawn_delta),
+            "balance_after": float(item.balance_after),
+            "frozen_balance_after": float(item.frozen_balance_after),
+            "total_income_after": float(item.total_income_after),
+            "total_withdrawn_after": float(item.total_withdrawn_after),
+            "related_type": item.related_type,
+            "related_id": item.related_id,
+            "remark": item.remark,
+            "created_at": item.created_at.isoformat() if item.created_at else None,
+        }
+        for item in rows
     ]
     return response(
         data=PaginatedResponse(

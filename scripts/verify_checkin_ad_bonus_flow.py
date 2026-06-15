@@ -127,7 +127,7 @@ async def verify() -> None:
             _assert_equal("same-day second event total points", int(second_payload["total_points"]), 4)
 
             account, _ = await PointsAccountService.ensure_user_account(session, user.id)
-            _assert_equal("account withdrawable points", int(account.withdrawable_points), 4)
+            _assert_equal("account consumable points", int(account.consumable_points), 4)
             _assert_equal("account total points", int(account.total_points), 4)
 
             record_result = await session.execute(

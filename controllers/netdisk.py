@@ -17,6 +17,7 @@ from schemas.netdisk import (
     NetdiskFeedbackCreate,
     NetdiskFeedbackListResponse,
     NetdiskFeedbackResponse,
+    NetdiskNotificationItem,
     NetdiskNotificationListResponse,
     NetdiskRepairCreate,
     NetdiskRepairListResponse,
@@ -29,12 +30,20 @@ from schemas.netdisk import (
     NetdiskResourceAccessResponse,
     NetdiskResourceDetailResponse,
     NetdiskResourceListResponse,
+    NetdiskShareUnlockCreate,
+    NetdiskShareTokenResponse,
+    NetdiskShareUnlockResponse,
+    NetdiskResourceSubscribeCreate,
+    NetdiskResourceSubscriptionResponse,
     NetdiskResourceUnlockResponse,
+    NetdiskUnlockHistoryHideResponse,
+    NetdiskUnlockHistoryListResponse,
     NetdiskUnfavoriteResponse,
     NetdiskUploadCreate,
     NetdiskUploadListResponse,
     NetdiskUploadResponse,
 )
+from services.config_service import ConfigService
 from services.netdisk_resource_service import NetdiskResourceService
 
 router = APIRouter(prefix="/netdisk", tags=["netdisk"])
@@ -43,6 +52,12 @@ router = APIRouter(prefix="/netdisk", tags=["netdisk"])
 async def _get_user_by_openid(session: AsyncSession, openid: str) -> User | None:
     result = await session.execute(select(User).where(User.openid == openid))
     return result.scalar_one_or_none()
+
+
+@router.get("/co-build/config", summary="get netdisk co-build config")
+async def get_netdisk_co_build_config(session: AsyncSession = Depends(get_session)):
+    config = await ConfigService.get(session, "co_build_config")
+    return response(data=config)
 
 
 @router.get("/resources", summary="list netdisk resources")
@@ -68,6 +83,15 @@ async def list_netdisk_resources(
         page=page,
         page_size=page_size,
     )
+    return response(data=NetdiskResourceListResponse(**payload).model_dump(mode="json"))
+
+
+@router.get("/resources/featured-today", summary="list today's featured netdisk resources")
+async def list_today_featured_netdisk_resources(
+    limit: int = 3,
+    session: AsyncSession = Depends(get_session),
+):
+    payload = await NetdiskResourceService.list_today_featured_resources(session=session, limit=limit)
     return response(data=NetdiskResourceListResponse(**payload).model_dump(mode="json"))
 
 
@@ -361,6 +385,49 @@ async def get_netdisk_resource_access(
     return response(data=NetdiskResourceAccessResponse(**payload).model_dump(mode="json"))
 
 
+@router.get("/resources/{resource_id}/subscription", summary="get netdisk resource subscription")
+async def get_netdisk_resource_subscription(
+    resource_id: str,
+    openid: str = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    user = await _get_user_by_openid(session, openid)
+    if not user:
+        return response([], 404, "user not found")
+
+    try:
+        payload = await NetdiskResourceService.get_resource_subscription(session, user, resource_id)
+    except ValueError as exc:
+        return response([], 400, str(exc))
+
+    return response(data=NetdiskResourceSubscriptionResponse(**payload).model_dump(mode="json"))
+
+
+@router.post("/resources/{resource_id}/subscribe", summary="subscribe netdisk resource updates")
+async def subscribe_netdisk_resource(
+    resource_id: str,
+    payload: NetdiskResourceSubscribeCreate,
+    openid: str = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    user = await _get_user_by_openid(session, openid)
+    if not user:
+        return response([], 404, "user not found")
+
+    try:
+        result = await NetdiskResourceService.subscribe_resource(
+            session=session,
+            user=user,
+            resource_id=resource_id,
+            wx_subscribe_status=payload.wx_subscribe_status,
+            template_id=payload.template_id,
+        )
+    except ValueError as exc:
+        return response([], 400, str(exc))
+
+    return response(data=NetdiskResourceSubscriptionResponse(**result).model_dump(mode="json"), msg="resource subscribed")
+
+
 @router.post("/resources/{resource_id}/unlock", summary="unlock netdisk resource")
 async def unlock_netdisk_resource(
     resource_id: str,
@@ -382,6 +449,72 @@ async def unlock_netdisk_resource(
     )
 
 
+@router.post("/resources/{resource_id}/share-token", summary="prepare netdisk resource share unlock token")
+async def prepare_netdisk_resource_share_token(
+    resource_id: str,
+    openid: str = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    user = await _get_user_by_openid(session, openid)
+    if not user:
+        return response([], 404, "user not found")
+
+    try:
+        payload = await NetdiskResourceService.prepare_share_unlock_token(session, user, resource_id)
+    except ValueError as exc:
+        return response([], 400, str(exc))
+
+    return response(data=NetdiskShareTokenResponse(**payload).model_dump(mode="json"))
+
+
+@router.post("/resources/{resource_id}/share-unlock", summary="share netdisk resource and unlock without points")
+async def share_unlock_netdisk_resource(
+    resource_id: str,
+    openid: str = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    user = await _get_user_by_openid(session, openid)
+    if not user:
+        return response([], 404, "user not found")
+
+    try:
+        payload, unlocked_now = await NetdiskResourceService.share_unlock_resource(session, user, resource_id)
+    except ValueError as exc:
+        return response([], 400, str(exc))
+
+    return response(
+        data=NetdiskShareUnlockResponse(**payload).model_dump(mode="json"),
+        msg="share unlock created" if unlocked_now else "resource already unlocked",
+    )
+
+
+@router.post("/resources/{resource_id}/share-claim", summary="claim shared netdisk resource unlock without points")
+async def claim_shared_netdisk_resource(
+    resource_id: str,
+    payload: NetdiskShareUnlockCreate,
+    openid: str = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    user = await _get_user_by_openid(session, openid)
+    if not user:
+        return response([], 404, "user not found")
+
+    try:
+        result, unlocked_now = await NetdiskResourceService.claim_share_unlock(
+            session,
+            user,
+            resource_id,
+            payload.share_token,
+        )
+    except ValueError as exc:
+        return response([], 400, str(exc))
+
+    return response(
+        data=NetdiskResourceUnlockResponse(**result).model_dump(mode="json"),
+        msg="share unlock claimed" if unlocked_now else "resource already unlocked",
+    )
+
+
 @router.get("/favorites", summary="list current user's netdisk favorites")
 async def list_netdisk_favorites(
     openid: str = Depends(get_current_user),
@@ -393,6 +526,37 @@ async def list_netdisk_favorites(
 
     payload = await NetdiskResourceService.list_favorites(session, user)
     return response(data=NetdiskFavoriteListResponse(**payload).model_dump(mode="json"))
+
+
+@router.get("/unlocks/mine", summary="list current user's netdisk unlock history")
+async def list_my_netdisk_unlock_history(
+    openid: str = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    user = await _get_user_by_openid(session, openid)
+    if not user:
+        return response([], 404, "user not found")
+
+    payload = await NetdiskResourceService.list_unlock_history(session, user)
+    return response(data=NetdiskUnlockHistoryListResponse(**payload).model_dump(mode="json"))
+
+
+@router.delete("/unlocks/{ledger_id}", summary="hide current user's netdisk unlock history")
+async def hide_my_netdisk_unlock_history(
+    ledger_id: str,
+    openid: str = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    user = await _get_user_by_openid(session, openid)
+    if not user:
+        return response([], 404, "user not found")
+
+    try:
+        payload = await NetdiskResourceService.hide_unlock_history(session, user, ledger_id)
+    except ValueError as exc:
+        return response([], 404, str(exc))
+
+    return response(data=NetdiskUnlockHistoryHideResponse(**payload).model_dump(mode="json"), msg="unlock history hidden")
 
 
 @router.get("/notifications", summary="list current user's netdisk notifications")
@@ -435,6 +599,19 @@ async def mark_netdisk_notification_read(
     openid: str = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ):
+    return await _mark_netdisk_notification_read(notification_id, openid, session)
+
+
+@router.get("/notifications/{notification_id}/read", summary="mark netdisk notification read fallback")
+async def mark_netdisk_notification_read_fallback(
+    notification_id: str,
+    openid: str = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    return await _mark_netdisk_notification_read(notification_id, openid, session)
+
+
+async def _mark_netdisk_notification_read(notification_id: str, openid: str, session: AsyncSession):
     user = await _get_user_by_openid(session, openid)
     if not user:
         return response([], 404, "user not found")
@@ -447,7 +624,8 @@ async def mark_netdisk_notification_read(
         return response([], 404, "notification not found")
     item.status = "read"
     await session.flush()
-    return response(data=_build_notification_payload(item), msg="notification marked read")
+    payload = NetdiskNotificationItem(**_build_notification_payload(item)).model_dump(mode="json")
+    return response(data=payload, msg="notification marked read")
 
 
 @router.post("/resources/{resource_id}/favorite", summary="favorite netdisk resource")

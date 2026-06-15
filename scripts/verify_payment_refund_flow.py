@@ -3,9 +3,10 @@
 The script runs inside a rollback transaction when called with --execute.
 It covers:
 1. VIP order refund revokes vip gift points and invite rebate points.
-2. Settled invite rebate is clawed back from withdrawable points.
-3. Points recharge refund revokes recharge points and first-recharge invite reward.
-4. Refund and late payment-success replays are idempotent.
+2. Settled invite rebate is clawed back from consumable points.
+3. Benefit card refund revokes card points, invite rebate points, and equity cash.
+4. Points recharge refund revokes recharge points, first-recharge invite reward, invite rebate points, and equity cash.
+5. Refund and late payment-success replays are idempotent.
 """
 
 from __future__ import annotations
@@ -49,6 +50,10 @@ REQUIRED_TABLES = {
 def _assert_equal(label: str, actual, expected) -> None:
     if actual != expected:
         raise AssertionError(f"{label}: expected {expected!r}, got {actual!r}")
+
+
+def _money(value) -> float:
+    return round(float(value or 0), 2)
 
 
 async def verify() -> None:
@@ -145,9 +150,9 @@ async def verify() -> None:
             buyer_account, _ = await PointsAccountService.ensure_user_account(session, buyer.id)
             parent_account, _ = await PointsAccountService.ensure_user_account(session, parent.id)
             grand_account, _ = await PointsAccountService.ensure_user_account(session, grandparent.id)
-            _assert_equal("buyer withdrawable after vip refund", int(buyer_account.withdrawable_points), 0)
+            _assert_equal("buyer consumable after vip refund", int(buyer_account.consumable_points), 0)
             _assert_equal("buyer total after vip refund", int(buyer_account.total_points), 0)
-            _assert_equal("settled level1 withdrawable after refund", int(parent_account.withdrawable_points), 0)
+            _assert_equal("settled level1 consumable after refund", int(parent_account.consumable_points), 0)
             _assert_equal("settled level1 total after refund", int(parent_account.total_points), 0)
             _assert_equal("pending level2 frozen after refund", int(grand_account.frozen_points), 0)
             _assert_equal("pending level2 total after refund", int(grand_account.total_points), 0)
@@ -174,6 +179,94 @@ async def verify() -> None:
             _assert_equal("vip gift refund ledger count", vip_gift_refunds, 1)
             rebate_refunds = await _source_ledger_count(session, "refund", prefix="invite_rebate_refund")
             _assert_equal("invite rebate refund ledger count", rebate_refunds, 2)
+
+            card_parent = User(
+                openid=f"{marker}-card-parent",
+                nickname="Card Refund Parent",
+                avatar="",
+                invite_code=f"{marker}cp"[-10:],
+            )
+            card_buyer = User(
+                openid=f"{marker}-card-buyer",
+                nickname="Card Refund Buyer",
+                avatar="",
+                invite_code=f"{marker}cb"[-10:],
+                parent_id=card_parent.id,
+            )
+            session.add(card_parent)
+            session.add(card_buyer)
+            await session.flush()
+            session.add(
+                InviteRelation(
+                    inviter_id=card_parent.id,
+                    invitee_id=card_buyer.id,
+                    invite_code=card_parent.invite_code,
+                    source="test",
+                )
+            )
+            await session.flush()
+
+            card_order = Order(
+                user_id=card_buyer.id,
+                amount=10.00,
+                period="card_month_10",
+                duration_days=30,
+                description="Stage2 refund benefit card verification",
+                out_trade_no=f"{marker}-card-order",
+                status="pending",
+            )
+            session.add(card_order)
+            await session.flush()
+
+            card_ok = await PaymentService.handle_payment_success(
+                session=session,
+                out_trade_no=card_order.out_trade_no,
+                transaction_id=f"{marker}-card-tx",
+                total_fee_in_fen=1000,
+                paid_at=datetime.now(timezone.utc).isoformat(),
+            )
+            _assert_equal("card payment success", card_ok, True)
+            card_parent_after_pay = await session.get(User, card_parent.id)
+            if not card_parent_after_pay:
+                raise AssertionError("card parent missing after pay")
+            _assert_equal("card parent equity after pay", _money(card_parent_after_pay.balance), 5.0)
+            _assert_equal("card parent total income after pay", _money(card_parent_after_pay.total_income), 5.0)
+
+            card_refund_ok = await PaymentService.handle_payment_refund(
+                session=session,
+                out_trade_no=card_order.out_trade_no,
+                refund_id=f"{marker}-card-refund",
+                refunded_at=datetime.now(timezone.utc).isoformat(),
+            )
+            _assert_equal("card refund success", card_refund_ok, True)
+
+            card_buyer_account, _ = await PointsAccountService.ensure_user_account(session, card_buyer.id)
+            card_parent_account, _ = await PointsAccountService.ensure_user_account(session, card_parent.id)
+            card_parent_after_refund = await session.get(User, card_parent.id)
+            if not card_parent_after_refund:
+                raise AssertionError("card parent missing after refund")
+            _assert_equal("card buyer card points after refund", int(card_buyer_account.consumable_points), 0)
+            _assert_equal("card buyer total points after refund", int(card_buyer_account.total_points), 0)
+            _assert_equal("card parent invite frozen after refund", int(card_parent_account.frozen_points), 0)
+            _assert_equal("card parent invite total after refund", int(card_parent_account.total_points), 0)
+            _assert_equal("card parent equity after refund", _money(card_parent_after_refund.balance), 0.0)
+            _assert_equal("card parent total income after refund", _money(card_parent_after_refund.total_income), 0.0)
+
+            card_refund_replay_ok = await PaymentService.handle_payment_refund(
+                session=session,
+                out_trade_no=card_order.out_trade_no,
+                refund_id=f"{marker}-card-refund-replay",
+                refunded_at=datetime.now(timezone.utc).isoformat(),
+            )
+            _assert_equal("card refund replay", card_refund_replay_ok, True)
+            card_parent_after_replay = await session.get(User, card_parent.id)
+            if not card_parent_after_replay:
+                raise AssertionError("card parent missing after refund replay")
+            _assert_equal("card parent equity after refund replay", _money(card_parent_after_replay.balance), 0.0)
+            card_point_refunds = await _ledger_count(session, "benefit_card_points_refund", str(card_order.id))
+            _assert_equal("benefit card points refund ledger count", card_point_refunds, 1)
+            card_equity_refunds = await _notification_count(session, "invite_equity_refund", "commission_record")
+            _assert_equal("card equity refund notification count", card_equity_refunds, 1)
 
             points_parent = User(
                 openid=f"{marker}-points-parent",
@@ -232,10 +325,16 @@ async def verify() -> None:
 
             points_buyer_account, _ = await PointsAccountService.ensure_user_account(session, points_buyer.id)
             points_parent_account, _ = await PointsAccountService.ensure_user_account(session, points_parent.id)
+            points_parent_after_refund = await session.get(User, points_parent.id)
+            if not points_parent_after_refund:
+                raise AssertionError("points parent missing after refund")
             _assert_equal("points buyer consumable after refund", int(points_buyer_account.consumable_points), 0)
             _assert_equal("points buyer total after refund", int(points_buyer_account.total_points), 0)
             _assert_equal("first recharge parent consumable after refund", int(points_parent_account.consumable_points), 0)
+            _assert_equal("points recharge invite frozen after refund", int(points_parent_account.frozen_points), 0)
             _assert_equal("first recharge parent total after refund", int(points_parent_account.total_points), 0)
+            _assert_equal("points parent equity after refund", _money(points_parent_after_refund.balance), 0.0)
+            _assert_equal("points parent total income after refund", _money(points_parent_after_refund.total_income), 0.0)
 
             points_refund_replay_ok = await PaymentService.handle_payment_refund(
                 session=session,
@@ -248,11 +347,16 @@ async def verify() -> None:
             _assert_equal("points recharge refund ledger count", points_recharge_refunds, 1)
             first_recharge_refunds = await _ledger_count(session, "invite_first_recharge_refund", str(points_order.id))
             _assert_equal("first recharge refund ledger count", first_recharge_refunds, 1)
+            points_rebate_refunds = await _commission_refund_ledger_count(session, points_order.id)
+            _assert_equal("points recharge invite rebate refund ledger count", points_rebate_refunds, 1)
+            all_equity_refunds = await _notification_count(session, "invite_equity_refund", "commission_record")
+            _assert_equal("all equity refund notification count", all_equity_refunds, 2)
 
             print("Payment refund verification passed")
             print(
-                "checks=vip gift refund, invite rebate refund pending+settled, points recharge refund, "
-                "first recharge reward refund, refund idempotency, late success replay ignored"
+                "checks=vip gift refund, invite rebate refund pending+settled, benefit card refund, "
+                "equity cash refund, points recharge refund, first recharge reward refund, "
+                "refund idempotency, late success replay ignored"
             )
         finally:
             await session.rollback()
@@ -273,6 +377,33 @@ async def _source_ledger_count(session, source: str, prefix: str) -> int:
         select(PointsLedger).where(
             PointsLedger.source == source,
             PointsLedger.change_type.startswith(prefix),
+        )
+    )
+    return len(list(result.scalars().all()))
+
+
+async def _commission_refund_ledger_count(session, order_id) -> int:
+    records_result = await session.execute(select(CommissionRecord).where(CommissionRecord.order_id == order_id))
+    record_ids = [str(record.id) for record in records_result.scalars().all()]
+    if not record_ids:
+        return 0
+    result = await session.execute(
+        select(PointsLedger).where(
+            PointsLedger.source == "refund",
+            PointsLedger.change_type.startswith("invite_rebate_refund"),
+            PointsLedger.related_id.in_(record_ids),
+        )
+    )
+    return len(list(result.scalars().all()))
+
+
+async def _notification_count(session, notice_type: str, related_type: str) -> int:
+    from models.netdisk_user_notification import NetdiskUserNotification
+
+    result = await session.execute(
+        select(NetdiskUserNotification).where(
+            NetdiskUserNotification.notice_type == notice_type,
+            NetdiskUserNotification.related_type == related_type,
         )
     )
     return len(list(result.scalars().all()))
@@ -301,8 +432,8 @@ def main() -> None:
     if not args.execute:
         print("Dry run only. Re-run with --execute to verify against the configured database.")
         print(
-            "Checks: vip gift refund, invite rebate refund, points recharge refund, "
-            "first recharge reward refund, refund idempotency."
+            "Checks: vip gift refund, invite rebate refund, benefit card refund, "
+            "equity cash refund, points recharge refund, first recharge reward refund, refund idempotency."
         )
         return
 

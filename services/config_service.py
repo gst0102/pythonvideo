@@ -82,7 +82,7 @@ DEFAULT_CONFIGS: Dict[str, Dict[str, Any]] = {
         "withdraw_min_member": 1.00,
         "max_amount": 200.00,
         "daily_limit": 100.00,
-        "tips": "提现申请提交后，实际到账以微信回调结果为准。",
+        "tips": "提现申请提交后，预计24小时内到账。",
     },
     "commission_settings": {
         "level1_rate": 50.0,
@@ -156,6 +156,7 @@ DEFAULT_CONFIGS: Dict[str, Dict[str, Any]] = {
         "upload_reward_points": 5,
         "repair_reward_points": 5,
         "report_hide_threshold": 3,
+        "report_confirm_invalid_threshold": 2,
         "quality_high_report_threshold": 3,
         "quality_high_unlock_threshold": 5,
         "quality_burst_report_threshold": 1,
@@ -165,6 +166,21 @@ DEFAULT_CONFIGS: Dict[str, Dict[str, Any]] = {
         "quality_auto_hide_burst": False,
         "invalid_penalty_multiplier": 1,
         "auto_hide_on_report": True,
+    },
+    "co_build_config": {
+        "enabled": True,
+        "announcement_title": "早期共建用户招募中，百万积分奖励池等你来拿",
+        "announcement_jump_url": "/pages/netdisk/co-build",
+        "activity_title": "悦享共建计划",
+        "main_title": "让每一个好建议，都被看见",
+        "subtitle": "你能点进这里，说明你比较认可我们，也愿意和我们一起把悦享资源库做得更好。",
+        "intro_text": "悦享资源库还在持续成长中。发现问题、提出建议、反馈体验、补充资源、完善规则，你的每一次反馈，都可能帮助更多人更快找到有价值的资源。",
+        "reward_title": "早期共建用户招募中",
+        "reward_desc": "百万积分奖励池等你来拿",
+        "reward_rules": "有效反馈、优质建议、重大问题反馈，都有机会获得积分奖励。\n普通有效反馈：10-20积分\n优质问题反馈：20-50积分\n重大问题反馈：50-500积分\n功能建议被采纳：300-500积分\n长期参与共建的用户，还有机会获得「悦享共建者」「荣誉会员」等专属权益。\n奖励以平台审核结果为准，重复提交、虚假反馈、恶意刷反馈不发放奖励。",
+        "primary_button_text": "提交反馈",
+        "secondary_button_text": "查看我的记录",
+        "footer_slogan": "让每一份资源，都有价值。",
     },
 }
 

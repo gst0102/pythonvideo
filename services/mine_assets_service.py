@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from typing import Any, Dict
 
 from sqlalchemy import func
@@ -64,6 +65,7 @@ class MineAssetsService:
                 "indirect_count": int(user.indirect_count),
                 "team_count": int(user.team_count),
             },
+            "benefit_card": _build_benefit_card_payload(user),
             "netdisk_stats": await _build_netdisk_stats(session, user, summary),
             "quick_actions": [
                 {
@@ -88,6 +90,20 @@ class MineAssetsService:
                 },
             ],
         }
+
+
+def _build_benefit_card_payload(user: User) -> Dict[str, Any]:
+    now = datetime.utcnow()
+    active = bool(user.is_vip and user.vip_expire_at and user.vip_expire_at > now)
+    expire_at = user.vip_expire_at if active else None
+    display_until = (expire_at - timedelta(days=1)).date().isoformat() if expire_at else None
+    return {
+        "active": active,
+        "ad_free_netdisk": active,
+        "expire_at": expire_at.isoformat() if expire_at else None,
+        "display_until": display_until,
+        "desc": "月卡有效期内免获取网盘广告" if active else "购买月卡后可免获取网盘广告",
+    }
 
 
 async def _build_netdisk_stats(session, user: User, summary: Dict[str, Any]) -> Dict[str, int]:

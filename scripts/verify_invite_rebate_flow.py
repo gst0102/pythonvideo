@@ -185,7 +185,7 @@ async def verify() -> None:
             _assert_equal("level1 release replay", level1_replay, False)
 
             parent_account_after, _ = await PointsAccountService.ensure_user_account(session, parent.id)
-            _assert_equal("level1 withdrawable after release", int(parent_account_after.withdrawable_points), 500)
+            _assert_equal("level1 consumable after release", int(parent_account_after.consumable_points), 500)
             _assert_equal("level1 frozen after release", int(parent_account_after.frozen_points), 0)
 
             unfreeze_result = await session.execute(
@@ -209,7 +209,7 @@ async def verify() -> None:
             _assert_equal("level2 release replay", level2_replay, False)
 
             grand_account_after, _ = await PointsAccountService.ensure_user_account(session, grandparent.id)
-            _assert_equal("level2 withdrawable after release", int(grand_account_after.withdrawable_points), 50)
+            _assert_equal("level2 consumable after release", int(grand_account_after.consumable_points), 50)
             _assert_equal("level2 frozen after release", int(grand_account_after.frozen_points), 0)
 
             level2_unfreeze_result = await session.execute(

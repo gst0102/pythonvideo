@@ -25,6 +25,7 @@ from models.base import get_session_ctx
 from models.netdisk_collected_resource import NetdiskCollectedResource
 from models.netdisk_resource import NetdiskResource as NetdiskResourceModel
 from services.netdisk_resource_service import _calculate_resource_quality_score
+from services.netdisk_subscription_push_service import notify_resource_updated
 from services.resource_classification_service import (
     classify_resource,
     media_level_and_cost,
@@ -60,6 +61,10 @@ CODE_PATTERNS = [
     re.compile(r"(?:邀请码|转存码|口令|兑换码)\s*[:：]?\s*([A-Za-z0-9_\-]{3,16})", re.I),
 ]
 URL_RE = re.compile(r"https?://[^\s<>'\"，。；、)）\]]+", re.I)
+DIRTY_TITLE_PATTERNS = [
+    re.compile(r"(?:^|[\s【\[(])(?:求|跪求|求助|求资源|求片|求剧|求电影|求链接|有没有)(?:[\s】\])]|$)", re.I),
+    re.compile(r"(失效|已失效|链接挂了|补链|求补|失链|取消分享|违规资源)", re.I),
+]
 
 
 @dataclass(frozen=True)
@@ -306,6 +311,12 @@ async def ingest_linuxdo_rows(session, rows: Iterable[LinuxDoAssetRow | dict]) -
             if not row.link:
                 _append_failed_row(result, index, raw, "缺少网盘链接")
                 continue
+            dirty_reason = _dirty_row_reason(row)
+            if dirty_reason:
+                await _upsert_dirty_candidate(session, row, dirty_reason)
+                result["skipped"] += 1
+                result["synced"] += 1
+                continue
             classification = await classify_resource(row.title, "", row.netdisk)
             normalized_title = normalize_resource_title(row.title)
             duplicate_status = await _duplicate_status(session, normalized_title, row.netdisk, row.link, classification.category)
@@ -508,6 +519,21 @@ def dedupe_rows(rows: Iterable[LinuxDoAssetRow]) -> list[LinuxDoAssetRow]:
     return result
 
 
+def _dirty_row_reason(row: LinuxDoAssetRow) -> str:
+    title = (row.title or "").strip()
+    if not title:
+        return "缺少资源标题"
+    normalized = normalize_resource_title(title)
+    if len(normalized) < 4:
+        return "标题信息过短，疑似无效资源"
+    for pattern in DIRTY_TITLE_PATTERNS:
+        if pattern.search(title):
+            if "失效" in pattern.pattern or "补链" in pattern.pattern:
+                return "标题疑似失效/补链求助内容，已自动跳过"
+            return "标题疑似求助/求资源内容，已自动跳过"
+    return ""
+
+
 async def _duplicate_status(session, normalized_title: str, pan: str, link: str, category: str) -> str:
     same_link = await session.execute(select(NetdiskResourceModel).where(NetdiskResourceModel.link == link).limit(1))
     if same_link.scalar_one_or_none():
@@ -546,6 +572,7 @@ async def _publish_resource(session, row: LinuxDoAssetRow, classification, norma
     tags = sorted(set([*classification.tags, *media_tags, row.netdisk]))
     if existing:
         resource = existing
+        old_title = resource.title or ""
         resource.title = row.title[:120]
         resource.category = classification.category
         resource.pan = row.netdisk[:32]
@@ -562,6 +589,7 @@ async def _publish_resource(session, row: LinuxDoAssetRow, classification, norma
         resource.updated_at = datetime.utcnow()
         resource.is_active = True
         resource.verified_at = datetime.utcnow()
+        await notify_resource_updated(session, resource, old_title=old_title)
     else:
         resource = NetdiskResourceModel(
             id=f"{row.source_type}-{hashlib.sha1(source_ref.encode('utf-8')).hexdigest()[:20]}",
@@ -591,6 +619,20 @@ async def _publish_resource(session, row: LinuxDoAssetRow, classification, norma
     await _upsert_candidate(session, row, classification, normalized_title, duplicate_status, ingest_action, "published")
 
 
+async def _upsert_dirty_candidate(session, row: LinuxDoAssetRow, reason: str) -> None:
+    normalized_title = normalize_resource_title(row.title)
+    await _upsert_candidate(
+        session,
+        row,
+        ClassificationResult(category="其他资源", tags=["脏数据"], confidence=0),
+        normalized_title,
+        "none",
+        "skip_dirty",
+        "skipped",
+        error=reason,
+    )
+
+
 async def _get_resource_by_source_ref_or_link(session, source_ref: str, link: str) -> NetdiskResourceModel | None:
     result = await session.execute(select(NetdiskResourceModel).where(NetdiskResourceModel.source_ref == source_ref).limit(1))
     existing = result.scalar_one_or_none()
@@ -608,7 +650,16 @@ async def _get_resource_by_source_ref_or_link(session, source_ref: str, link: st
     return link_result.scalar_one_or_none()
 
 
-async def _upsert_candidate(session, row: LinuxDoAssetRow, classification, normalized_title: str, duplicate_status: str, ingest_action: str, status: str) -> None:
+async def _upsert_candidate(
+    session,
+    row: LinuxDoAssetRow,
+    classification,
+    normalized_title: str,
+    duplicate_status: str,
+    ingest_action: str,
+    status: str,
+    error: str | None = None,
+) -> None:
     source_ref = _source_ref(row)
     result = await session.execute(select(NetdiskCollectedResource).where(NetdiskCollectedResource.source_ref == source_ref).limit(1))
     item = result.scalar_one_or_none()
@@ -626,7 +677,7 @@ async def _upsert_candidate(session, row: LinuxDoAssetRow, classification, norma
         item.duplicate_status = duplicate_status
         item.ingest_action = ingest_action
         item.status = status
-        item.error = row.error or ""
+        item.error = (error if error is not None else row.error) or ""
         item.updated_at = datetime.utcnow()
         return
     session.add(
@@ -645,7 +696,7 @@ async def _upsert_candidate(session, row: LinuxDoAssetRow, classification, norma
             duplicate_status=duplicate_status,
             ingest_action=ingest_action,
             status=status,
-            error=row.error or "",
+            error=(error if error is not None else row.error) or "",
         )
     )
 

@@ -35,6 +35,7 @@ from models.user_account import UserAccount
 from models.user_quality_profile import UserQualityProfile
 from models.points_ledger import PointsLedger
 from models.checkin_record import CheckinRecord
+from models.equity_ledger import EquityLedger
 from models.game_round import GameRound
 from models.daily_task_stat import DailyTaskStat
 from models.game_settlement_batch import GameSettlementBatch
@@ -44,12 +45,16 @@ from models.netdisk_favorite import NetdiskFavorite
 from models.netdisk_feedback import NetdiskFeedback
 from models.netdisk_import_batch import NetdiskImportBatch
 from models.netdisk_audit_log import NetdiskAuditLog
+from models.netdisk_crawler_run import NetdiskCrawlerRun
 from models.netdisk_collected_resource import NetdiskCollectedResource
+from models.netdisk_unlock_hidden import NetdiskUnlockHidden
 from models.netdisk_quality_alert import NetdiskQualityAlert
 from models.netdisk_quality_daily_stat import NetdiskQualityDailyStat
 from models.netdisk_repair import NetdiskRepair
 from models.netdisk_request import NetdiskRequest
 from models.netdisk_resource import NetdiskResource
+from models.netdisk_resource_subscription import NetdiskResourceSubscription
+from models.netdisk_resource_subscription_push_log import NetdiskResourceSubscriptionPushLog
 from models.netdisk_risk_record import NetdiskRiskRecord
 from models.netdisk_upload import NetdiskUpload
 from models.netdisk_user_notification import NetdiskUserNotification
@@ -70,6 +75,7 @@ __all__ = [
     "UserQualityProfile",
     "PointsLedger",
     "CheckinRecord",
+    "EquityLedger",
     "GameRound",
     "DailyTaskStat",
     "GameSettlementBatch",
@@ -79,12 +85,16 @@ __all__ = [
     "NetdiskFeedback",
     "NetdiskImportBatch",
     "NetdiskAuditLog",
+    "NetdiskCrawlerRun",
     "NetdiskCollectedResource",
+    "NetdiskUnlockHidden",
     "NetdiskQualityAlert",
     "NetdiskQualityDailyStat",
     "NetdiskRepair",
     "NetdiskRequest",
     "NetdiskResource",
+    "NetdiskResourceSubscription",
+    "NetdiskResourceSubscriptionPushLog",
     "NetdiskRiskRecord",
     "NetdiskUpload",
     "NetdiskUserNotification",

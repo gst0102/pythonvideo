@@ -155,20 +155,22 @@ class GameSettlementService:
             existing = await _get_user_settlement(session, settlement_day, preview.user.id)
             if not existing:
                 if preview.estimated_points > 0:
-                    await PointsAccountService.move_consumable_to_withdrawable(
+                    await PointsAccountService.record_neutral_event(
                         session=session,
                         user_id=preview.user.id,
-                        points=preview.estimated_points,
                         idempotency_key=f"game_settlement_transfer:{settlement_day}:{preview.user.id}",
                         related_type="game_settlement",
                         related_id=str(batch.id),
-                        remark=f"{settlement_day.isoformat()} game settlement transfer",
+                        remark=f"{settlement_day.isoformat()} game settlement confirmed",
+                        source="game",
+                        change_type="game_settlement",
+                        availability="consumable",
                     )
 
                 delta = preview.settled_points - preview.estimated_points
                 if delta != 0:
                     total_adjustment_points += delta
-                    await PointsAccountService.adjust_withdrawable_points(
+                    await PointsAccountService.adjust_consumable_points(
                         session=session,
                         user_id=preview.user.id,
                         points_delta=delta,
@@ -199,7 +201,7 @@ class GameSettlementService:
             delta = preview.settled_points - int(existing.settled_points)
             if delta != 0:
                 total_adjustment_points += delta
-                await PointsAccountService.adjust_withdrawable_points(
+                await PointsAccountService.adjust_consumable_points(
                     session=session,
                     user_id=preview.user.id,
                     points_delta=delta,
