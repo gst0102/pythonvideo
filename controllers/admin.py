@@ -421,6 +421,7 @@ async def trigger_game_settlement(
 @router.get("/withdrawals", summary="withdrawal list")
 async def get_withdrawals(
     status: Optional[str] = Query(None),
+    keyword: Optional[str] = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=200),
     session: AsyncSession = Depends(get_session),
@@ -428,21 +429,65 @@ async def get_withdrawals(
     query = select(WithdrawalRecord)
     if status:
         query = query.where(WithdrawalRecord.status == status)
+    if keyword and keyword.strip():
+        kw = keyword.strip()
+        user_sq = select(User.id).where(
+            (User.openid.ilike(f"%{kw}%"))
+            | (User.nickname.ilike(f"%{kw}%"))
+            | (User.invite_code.ilike(f"%{kw}%"))
+        )
+        keyword_filters = [
+            WithdrawalRecord.batch_no.ilike(f"%{kw}%"),
+            WithdrawalRecord.transfer_bill_no.ilike(f"%{kw}%"),
+            WithdrawalRecord.fail_reason.ilike(f"%{kw}%"),
+            WithdrawalRecord.user_id.in_(user_sq),
+        ]
+        try:
+            keyword_filters.append(WithdrawalRecord.id == UUID(kw))
+        except ValueError:
+            pass
+        query = query.where(or_(*keyword_filters))
 
-    total = (await session.execute(select(func.count()).select_from(query.subquery()))).scalar() or 0
+    stats_sq = query.subquery()
+    total = (await session.execute(select(func.count()).select_from(stats_sq))).scalar() or 0
+    total_amount = (
+        await session.execute(select(func.coalesce(func.sum(stats_sq.c.amount), 0.0)).select_from(stats_sq))
+    ).scalar() or 0.0
+    processing_amount = (
+        await session.execute(
+            select(func.coalesce(func.sum(stats_sq.c.amount), 0.0)).select_from(stats_sq).where(stats_sq.c.status == "processing")
+        )
+    ).scalar() or 0.0
+    success_amount = (
+        await session.execute(
+            select(func.coalesce(func.sum(stats_sq.c.amount), 0.0)).select_from(stats_sq).where(stats_sq.c.status == "success")
+        )
+    ).scalar() or 0.0
+    failed_amount = (
+        await session.execute(
+            select(func.coalesce(func.sum(stats_sq.c.amount), 0.0)).select_from(stats_sq).where(stats_sq.c.status.in_(["failed", "rejected"]))
+        )
+    ).scalar() or 0.0
     records = (
         await session.execute(
             query.order_by(WithdrawalRecord.created_at.desc()).offset((page - 1) * page_size).limit(page_size)
         )
     ).scalars().all()
 
-    user_ids = {record.user_id for record in records}
-    user_map = {}
-    if user_ids:
-        users = (await session.execute(select(User).where(User.id.in_(list(user_ids))))).scalars().all()
-        user_map = {user.id: user for user in users}
+    user_ids = [record.user_id for record in records]
+    user_map = await _get_user_map(session, user_ids)
+    account_map = await _get_user_account_map(session, user_ids)
+    ledger_map = await _get_withdrawal_equity_ledger_map(session, [record.id for record in records])
 
-    items = [_withdrawal_to_dict(record, user_map.get(record.user_id)) for record in records]
+    items = [
+        _withdrawal_to_dict(
+            record,
+            user_map.get(record.user_id),
+            account_map.get(record.user_id),
+            ledger_map.get(str(record.id), []),
+        )
+        for record in records
+    ]
     return response(
         data=PaginatedResponse(
             list=items,
@@ -451,6 +496,14 @@ async def get_withdrawals(
             page_size=page_size,
             has_more=((page - 1) * page_size + len(items)) < total,
         ).model_dump()
+        | {
+            "stats": {
+                "total_amount": round(float(total_amount), 2),
+                "processing_amount": round(float(processing_amount), 2),
+                "success_amount": round(float(success_amount), 2),
+                "failed_amount": round(float(failed_amount), 2),
+            }
+        }
     )
 
 
@@ -3476,6 +3529,26 @@ async def _get_recharge_ledger_map(session: AsyncSession, order_ids: list[UUID])
     return {str(item.related_id): item for item in ledgers}
 
 
+async def _get_withdrawal_equity_ledger_map(session: AsyncSession, record_ids: list[UUID]) -> dict[str, list[EquityLedger]]:
+    if not record_ids:
+        return {}
+    record_id_texts = [str(item) for item in record_ids]
+    rows = (
+        await session.execute(
+            select(EquityLedger)
+            .where(
+                EquityLedger.related_type == "withdraw_record",
+                EquityLedger.related_id.in_(record_id_texts),
+            )
+            .order_by(EquityLedger.created_at.asc(), EquityLedger.id.asc())
+        )
+    ).scalars().all()
+    ledger_map: dict[str, list[EquityLedger]] = {}
+    for row in rows:
+        ledger_map.setdefault(str(row.related_id), []).append(row)
+    return ledger_map
+
+
 def _payment_order_to_dict(order: Order, user: Optional[User], ledger: Optional[PointsLedger]) -> dict:
     return {
         "id": str(order.id),
@@ -3558,12 +3631,24 @@ def _user_to_dict(user: User, account: Optional[UserAccount] = None) -> dict:
     }
 
 
-def _withdrawal_to_dict(record: WithdrawalRecord, user: Optional[User] = None) -> dict:
+def _withdrawal_to_dict(
+    record: WithdrawalRecord,
+    user: Optional[User] = None,
+    account: Optional[UserAccount] = None,
+    equity_ledgers: Optional[list[EquityLedger]] = None,
+) -> dict:
     return {
         "id": str(record.id),
         "user_id": str(record.user_id),
         "nickname": user.nickname if user else "",
         "avatar": user.avatar if user else "",
+        "openid": user.openid if user else "",
+        "invite_code": user.invite_code if user else "",
+        "user_balance": float(user.balance) if user else 0.0,
+        "user_frozen_balance": float(user.frozen_balance) if user else 0.0,
+        "user_total_income": float(user.total_income) if user else 0.0,
+        "user_total_withdrawn": float(user.total_withdrawn) if user else 0.0,
+        "account": _account_to_dict(account),
         "amount": float(record.amount),
         "status": record.status,
         "batch_no": record.batch_no,
@@ -3572,6 +3657,8 @@ def _withdrawal_to_dict(record: WithdrawalRecord, user: Optional[User] = None) -
         "ip": record.ip,
         "created_at": record.created_at.isoformat() if record.created_at else None,
         "completed_at": record.completed_at.isoformat() if record.completed_at else None,
+        "updated_at": record.updated_at.isoformat() if record.updated_at else None,
+        "equity_ledgers": [_equity_ledger_to_dict(item, user) for item in (equity_ledgers or [])],
     }
 
 
