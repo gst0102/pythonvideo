@@ -1333,6 +1333,7 @@ async def admin_netdisk_ops_dashboard(
     ).one()
     trends = await _build_netdisk_ops_trends(session, today_start)
     point_sources = await _build_point_source_distribution(session, point_source_start)
+    point_spend_users = await _build_today_point_spend_users(session, today_start)
     resource_quality_rankings = await _build_resource_quality_rankings(session, range_mode=quality_range)
     quality_alerts = await _build_resource_quality_alerts(session)
     quality_review_pool_count = (
@@ -1392,6 +1393,7 @@ async def admin_netdisk_ops_dashboard(
             "trends": trends,
             "point_source_range": points_range,
             "point_sources": point_sources,
+            "point_spend_users": point_spend_users,
             "quality_range": quality_range,
             "resource_quality_rankings": resource_quality_rankings,
             "resource_quality_alerts": quality_alerts,
@@ -2601,6 +2603,63 @@ async def _build_point_source_distribution(session: AsyncSession, start_dt: date
         }
         for row in rows
     ]
+
+
+async def _build_today_point_spend_users(session: AsyncSession, today_start: datetime) -> list[dict]:
+    business_points_filter = or_(PointsLedger.source.is_(None), PointsLedger.source != "admin_adjust")
+    rows = (
+        await session.execute(
+            select(
+                User.id,
+                User.nickname,
+                User.openid,
+                func.coalesce(func.sum(PointsLedger.points_delta), 0).label("spend_points"),
+                func.count(PointsLedger.id).label("spend_count"),
+                func.max(PointsLedger.created_at).label("last_spend_at"),
+            )
+            .select_from(PointsLedger)
+            .join(User, User.id == PointsLedger.user_id)
+            .where(
+                PointsLedger.created_at >= today_start,
+                PointsLedger.points_delta < 0,
+                business_points_filter,
+            )
+            .group_by(User.id, User.nickname, User.openid)
+            .order_by(func.abs(func.coalesce(func.sum(PointsLedger.points_delta), 0)).desc())
+            .limit(30)
+        )
+    ).all()
+
+    details: list[dict] = []
+    for row in rows:
+        user_id = row[0]
+        latest = (
+            await session.execute(
+                select(PointsLedger)
+                .where(
+                    PointsLedger.user_id == user_id,
+                    PointsLedger.created_at >= today_start,
+                    PointsLedger.points_delta < 0,
+                    business_points_filter,
+                )
+                .order_by(PointsLedger.created_at.desc(), PointsLedger.id.desc())
+                .limit(1)
+            )
+        ).scalars().first()
+        details.append(
+            {
+                "user_id": str(user_id),
+                "nickname": row[1] or "",
+                "openid": row[2] or "",
+                "spend_points": abs(int(row[3] or 0)),
+                "spend_count": int(row[4] or 0),
+                "last_spend_at": row[5].isoformat() if row[5] else None,
+                "latest_source": latest.source if latest else "",
+                "latest_change_type": latest.change_type if latest else "",
+                "latest_remark": latest.remark if latest else "",
+            }
+        )
+    return details
 
 
 async def _build_resource_quality_rankings(
