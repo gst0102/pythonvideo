@@ -76,16 +76,16 @@ DEFAULT_CONFIGS: Dict[str, Dict[str, Any]] = {
     },
     "withdrawal_config": {
         "enabled": True,
-        "min_amount": 0.01,
-        "withdraw_min_first": 0.01,
-        "withdraw_min_normal": 0.01,
-        "withdraw_min_member": 0.01,
+        "min_amount": 1.00,
+        "withdraw_min_first": 1.00,
+        "withdraw_min_normal": 1.00,
+        "withdraw_min_member": 1.00,
         "max_amount": 100.00,
         "daily_limit": 100.00,
         "daily_count_limit": 1,
         "service_time": "每日00:00-24:00可提交提现申请",
         "arrival_time": "预计24小时内到账，具体以微信支付到账时间为准",
-        "tips": "有可提现余额即可申请提现，单次0.01-100元，每天1次，可自定义提现金额，预计24小时内到账。",
+        "tips": "有可提现余额即可申请提现，单次1-100元，每天1次，可自定义提现金额，预计24小时内到账。",
     },
     "commission_settings": {
         "level1_rate": 50.0,
@@ -332,16 +332,16 @@ def _normalize_withdrawal_config(config: Dict[str, Any]) -> Dict[str, Any]:
     normalized = dict(config or {})
     normalized.update(
         {
-            "min_amount": 0.01,
-            "withdraw_min_first": 0.01,
-            "withdraw_min_normal": 0.01,
-            "withdraw_min_member": 0.01,
+            "min_amount": 1.00,
+            "withdraw_min_first": 1.00,
+            "withdraw_min_normal": 1.00,
+            "withdraw_min_member": 1.00,
             "max_amount": 100.00,
             "daily_limit": 100.00,
             "daily_count_limit": 1,
             "service_time": "每日00:00-24:00可提交提现申请",
             "arrival_time": "预计24小时内到账，具体以微信支付到账时间为准",
-            "tips": "有可提现余额即可申请提现，单次0.01-100元，每天1次，可自定义提现金额，预计24小时内到账。",
+            "tips": "有可提现余额即可申请提现，单次1-100元，每天1次，可自定义提现金额，预计24小时内到账。",
         }
     )
     normalized["enabled"] = bool(normalized.get("enabled", True))

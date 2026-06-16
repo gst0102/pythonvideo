@@ -188,8 +188,8 @@ class WithdrawalApplyRequest(BaseModel):
     @field_validator("amount")
     @classmethod
     def check_min(cls, value: float) -> float:
-        if value < 0.01:
-            raise ValueError("minimum amount is 0.01")
+        if value < 1:
+            raise ValueError("minimum amount is 1.00")
         return value
 
 
