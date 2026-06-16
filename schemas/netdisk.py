@@ -89,18 +89,6 @@ class NetdiskResourceUnlockResponse(BaseModel):
     platform_recovered_points: int = 0
 
 
-class NetdiskShareUnlockCreate(BaseModel):
-    share_token: str
-
-
-class NetdiskShareTokenResponse(BaseModel):
-    share_token: str
-
-
-class NetdiskShareUnlockResponse(NetdiskResourceUnlockResponse):
-    share_token: str = ""
-
-
 class NetdiskResourceAccessResponse(BaseModel):
     resource: NetdiskResourceSummary
     access: NetdiskAccessData

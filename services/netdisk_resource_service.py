@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-import base64
-import hmac
 import json
 import hashlib
-import os
 import re
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta, timezone
@@ -42,8 +39,6 @@ from services.points_account_service import PointsAccountService
 from services.resource_classification_service import ClassificationResult, media_level_and_cost, normalize_resource_title
 
 ResourceLevel = Literal["normal", "featured", "official"]
-RESOURCE_UNLOCK_CHANGE_TYPES = ("resource_unlock", "resource_share_unlock")
-SHARE_UNLOCK_TOKEN_VERSION = "v1"
 
 
 @dataclass(frozen=True)
@@ -341,11 +336,6 @@ class NetdiskResourceService:
         resource = await _get_resource_or_raise(session, resource_id)
         await _attach_resource_quality_labels(session, [resource])
 
-        existing_ledger = await _get_unlock_ledger(session, user.id, resource.id)
-        if existing_ledger:
-            account, _ = await PointsAccountService.ensure_user_account(session, user.id)
-            return _build_unlock_payload(resource, existing_ledger, account, None, None, 0), False
-
         ledger, account, unlocked_now = await PointsAccountService.consume_consumable_points(
             session=session,
             user_id=user.id,
@@ -378,58 +368,6 @@ class NetdiskResourceService:
 
         await session.flush()
         return _build_unlock_payload(resource, ledger, account, invite_reward, creator_reward, platform_recovered_points), unlocked_now
-
-    @staticmethod
-    async def prepare_share_unlock_token(
-        session: AsyncSession,
-        user: User,
-        resource_id: str,
-    ) -> dict:
-        await _ensure_seed_resources(session)
-        resource = await _get_resource_or_raise(session, resource_id)
-        return {"share_token": _build_share_unlock_token(resource.id, str(user.id))}
-
-    @staticmethod
-    async def share_unlock_resource(
-        session: AsyncSession,
-        user: User,
-        resource_id: str,
-    ) -> tuple[dict, bool]:
-        await _ensure_seed_resources(session)
-        resource = await _get_resource_or_raise(session, resource_id)
-        await _attach_resource_quality_labels(session, [resource])
-
-        payload, unlocked_now = await _create_share_unlock(
-            session=session,
-            user=user,
-            resource=resource,
-            idempotency_key=f"netdisk_share_unlock:{user.id}:{resource.id}",
-            remark=f"share unlock netdisk resource: {resource.title}",
-        )
-        payload["share_token"] = _build_share_unlock_token(resource.id, str(user.id))
-        return payload, unlocked_now
-
-    @staticmethod
-    async def claim_share_unlock(
-        session: AsyncSession,
-        user: User,
-        resource_id: str,
-        share_token: str,
-    ) -> tuple[dict, bool]:
-        await _ensure_seed_resources(session)
-        resource = await _get_resource_or_raise(session, resource_id)
-        token_payload = _parse_share_unlock_token(share_token)
-        if token_payload.get("resource_id") != resource.id:
-            raise ValueError("invalid share token")
-        await _attach_resource_quality_labels(session, [resource])
-
-        return await _create_share_unlock(
-            session=session,
-            user=user,
-            resource=resource,
-            idempotency_key=f"netdisk_share_claim:{user.id}:{resource.id}",
-            remark=f"claim shared netdisk resource: {resource.title}; sender={token_payload['sender_id']}",
-        )
 
     @staticmethod
     async def list_favorites(
@@ -496,7 +434,7 @@ class NetdiskResourceService:
             select(PointsLedger)
             .where(
                 PointsLedger.user_id == user.id,
-                PointsLedger.change_type.in_(RESOURCE_UNLOCK_CHANGE_TYPES),
+                PointsLedger.change_type == "resource_unlock",
                 PointsLedger.related_type == "netdisk_resource",
                 PointsLedger.related_id.is_not(None),
                 ~PointsLedger.id.in_(
@@ -533,7 +471,7 @@ class NetdiskResourceService:
         if (
             not ledger
             or ledger.user_id != user.id
-            or ledger.change_type not in RESOURCE_UNLOCK_CHANGE_TYPES
+            or ledger.change_type != "resource_unlock"
             or ledger.related_type != "netdisk_resource"
         ):
             raise ValueError("unlock history not found")
@@ -2236,102 +2174,12 @@ class NetdiskResourceService:
 
 async def _get_unlock_ledger(session: AsyncSession, user_id, resource_id: str) -> PointsLedger | None:
     result = await session.execute(
-        select(PointsLedger)
-        .where(
+        select(PointsLedger).where(
             PointsLedger.user_id == user_id,
-            PointsLedger.related_type == "netdisk_resource",
-            PointsLedger.related_id == str(resource_id),
-            PointsLedger.change_type.in_(RESOURCE_UNLOCK_CHANGE_TYPES),
+            PointsLedger.idempotency_key == f"netdisk_unlock:{user_id}:{resource_id}",
         )
-        .order_by(PointsLedger.created_at.asc(), PointsLedger.id.asc())
     )
     return result.scalar_one_or_none()
-
-
-async def _create_share_unlock(
-    session: AsyncSession,
-    user: User,
-    resource: NetdiskResourceModel,
-    idempotency_key: str,
-    remark: str,
-) -> tuple[dict, bool]:
-    existing_ledger = await _get_unlock_ledger(session, user.id, resource.id)
-    if existing_ledger:
-        account, _ = await PointsAccountService.ensure_user_account(session, user.id)
-        return _build_unlock_payload(resource, existing_ledger, account, None, None, 0), False
-
-    ledger, account, unlocked_now = await PointsAccountService.record_neutral_event(
-        session=session,
-        user_id=user.id,
-        source="netdisk",
-        change_type="resource_share_unlock",
-        availability="consumable",
-        idempotency_key=idempotency_key,
-        related_type="netdisk_resource",
-        related_id=resource.id,
-        remark=remark,
-    )
-    if unlocked_now:
-        resource.downloads = int(resource.downloads) + 1
-        resource.quality_score = await _calculate_resource_quality_score_with_profile(session, resource)
-    await session.flush()
-    return _build_unlock_payload(resource, ledger, account, None, None, 0), unlocked_now
-
-
-def _build_share_unlock_token(resource_id: str, sender_id: str) -> str:
-    payload = {
-        "resource_id": str(resource_id),
-        "sender_id": str(sender_id),
-        "iat": int(datetime.utcnow().timestamp()),
-    }
-    body = _urlsafe_b64encode(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8"))
-    signature = _sign_share_unlock_body(body)
-    return f"{SHARE_UNLOCK_TOKEN_VERSION}.{body}.{signature}"
-
-
-def _parse_share_unlock_token(token: str) -> dict:
-    parts = str(token or "").split(".")
-    if len(parts) != 3 or parts[0] != SHARE_UNLOCK_TOKEN_VERSION:
-        raise ValueError("invalid share token")
-
-    body, signature = parts[1], parts[2]
-    expected = _sign_share_unlock_body(body)
-    if not hmac.compare_digest(signature, expected):
-        raise ValueError("invalid share token")
-    try:
-        payload = json.loads(_urlsafe_b64decode(body).decode("utf-8"))
-    except Exception as exc:
-        raise ValueError("invalid share token") from exc
-
-    resource_id = str(payload.get("resource_id") or "")
-    sender_id = str(payload.get("sender_id") or "")
-    issued_at = int(payload.get("iat") or 0)
-    max_age_days = int(os.getenv("NETDISK_SHARE_UNLOCK_TOKEN_DAYS", "30") or "30")
-    if not resource_id or not sender_id or issued_at <= 0:
-        raise ValueError("invalid share token")
-    if max_age_days > 0 and datetime.utcnow().timestamp() - issued_at > max_age_days * 86400:
-        raise ValueError("share token expired")
-    return {"resource_id": resource_id, "sender_id": sender_id, "iat": issued_at}
-
-
-def _sign_share_unlock_body(body: str) -> str:
-    secret = (
-        os.getenv("NETDISK_SHARE_UNLOCK_SECRET")
-        or os.getenv("SECRET_KEY")
-        or os.getenv("SECRET")
-        or "netdisk-share-unlock-dev-secret"
-    )
-    digest = hmac.new(secret.encode("utf-8"), body.encode("utf-8"), hashlib.sha256).digest()
-    return _urlsafe_b64encode(digest)
-
-
-def _urlsafe_b64encode(value: bytes) -> str:
-    return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
-
-
-def _urlsafe_b64decode(value: str) -> bytes:
-    padding = "=" * (-len(value) % 4)
-    return base64.urlsafe_b64decode((value + padding).encode("ascii"))
 
 
 def _normalize_resource_level_and_cost(resource_level: str | None, cost_points: int | None) -> tuple[str, int]:

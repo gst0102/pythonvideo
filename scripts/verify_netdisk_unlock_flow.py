@@ -98,55 +98,6 @@ async def verify() -> None:
             inviter_account_after, _ = await PointsAccountService.ensure_user_account(session, inviter.id)
             _assert_equal("inviter consumable after first resource reward", int(inviter_account_after.consumable_points), 15)
 
-            share_sender = User(
-                openid=f"{marker}-share-sender",
-                nickname="Share Sender",
-                avatar="",
-                invite_code=f"{marker}s"[-10:],
-            )
-            share_friend = User(
-                openid=f"{marker}-share-friend",
-                nickname="Share Friend",
-                avatar="",
-                invite_code=f"{marker}f"[-10:],
-            )
-            session.add(share_sender)
-            session.add(share_friend)
-            await session.flush()
-
-            token_payload = await NetdiskResourceService.prepare_share_unlock_token(session, share_sender, "r3")
-            _assert_true("share token created", bool(token_payload["share_token"]))
-
-            sender_payload, sender_unlocked = await NetdiskResourceService.share_unlock_resource(session, share_sender, "r3")
-            _assert_equal("sender share unlock created", sender_unlocked, True)
-            _assert_equal("sender share unlock is free", int(sender_payload["unlock"]["points_delta"]), 0)
-            _assert_equal("sender consumable unchanged", int(sender_payload["account"]["consumable_points"]), 0)
-            _assert_true("sender share token returned", bool(sender_payload["share_token"]))
-
-            friend_payload, friend_unlocked = await NetdiskResourceService.claim_share_unlock(
-                session,
-                share_friend,
-                "r3",
-                token_payload["share_token"],
-            )
-            _assert_equal("friend share unlock created", friend_unlocked, True)
-            _assert_equal("friend share unlock is free", int(friend_payload["unlock"]["points_delta"]), 0)
-            _assert_equal("friend consumable unchanged", int(friend_payload["account"]["consumable_points"]), 0)
-            _assert_true("friend link visible", bool(friend_payload["unlock"]["link"]))
-
-            replay_friend_payload, replay_friend_unlocked = await NetdiskResourceService.claim_share_unlock(
-                session,
-                share_friend,
-                "r3",
-                token_payload["share_token"],
-            )
-            _assert_equal("friend share replay skipped", replay_friend_unlocked, False)
-            _assert_equal(
-                "friend share replay same ledger",
-                replay_friend_payload["unlock"]["ledger_id"],
-                friend_payload["unlock"]["ledger_id"],
-            )
-
             poor_user = User(
                 openid=f"{marker}-poor",
                 nickname="Poor User",
@@ -166,14 +117,13 @@ async def verify() -> None:
                 select(PointsLedger).where(
                     PointsLedger.user_id == invitee.id,
                     PointsLedger.source == "netdisk",
-                    PointsLedger.change_type == "resource_unlock",
                 )
             )
             unlock_ledgers = list(unlock_ledgers_result.scalars().all())
             _assert_equal("netdisk unlock ledger count", len(unlock_ledgers), 2)
 
             print("Netdisk unlock verification passed")
-            print("checks=deduct consumable points, unlock idempotency, first-resource invite reward, share free unlock, insufficient balance")
+            print("checks=deduct consumable points, unlock idempotency, first-resource invite reward, insufficient balance")
         finally:
             await session.rollback()
 
@@ -200,7 +150,7 @@ def main() -> None:
     args = parse_args()
     if not args.execute:
         print("Dry run only. Re-run with --execute to verify against the configured database.")
-        print("Checks: deduct consumable points, unlock idempotency, first-resource invite reward, share free unlock, insufficient balance.")
+        print("Checks: deduct consumable points, unlock idempotency, first-resource invite reward, insufficient balance.")
         return
 
     try:

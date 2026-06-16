@@ -30,9 +30,6 @@ from schemas.netdisk import (
     NetdiskResourceAccessResponse,
     NetdiskResourceDetailResponse,
     NetdiskResourceListResponse,
-    NetdiskShareUnlockCreate,
-    NetdiskShareTokenResponse,
-    NetdiskShareUnlockResponse,
     NetdiskResourceSubscribeCreate,
     NetdiskResourceSubscriptionResponse,
     NetdiskResourceUnlockResponse,
@@ -446,72 +443,6 @@ async def unlock_netdisk_resource(
     return response(
         data=NetdiskResourceUnlockResponse(**payload).model_dump(mode="json"),
         msg="resource unlocked" if unlocked_now else "resource already unlocked",
-    )
-
-
-@router.post("/resources/{resource_id}/share-token", summary="prepare netdisk resource share unlock token")
-async def prepare_netdisk_resource_share_token(
-    resource_id: str,
-    openid: str = Depends(get_current_user),
-    session: AsyncSession = Depends(get_session),
-):
-    user = await _get_user_by_openid(session, openid)
-    if not user:
-        return response([], 404, "user not found")
-
-    try:
-        payload = await NetdiskResourceService.prepare_share_unlock_token(session, user, resource_id)
-    except ValueError as exc:
-        return response([], 400, str(exc))
-
-    return response(data=NetdiskShareTokenResponse(**payload).model_dump(mode="json"))
-
-
-@router.post("/resources/{resource_id}/share-unlock", summary="share netdisk resource and unlock without points")
-async def share_unlock_netdisk_resource(
-    resource_id: str,
-    openid: str = Depends(get_current_user),
-    session: AsyncSession = Depends(get_session),
-):
-    user = await _get_user_by_openid(session, openid)
-    if not user:
-        return response([], 404, "user not found")
-
-    try:
-        payload, unlocked_now = await NetdiskResourceService.share_unlock_resource(session, user, resource_id)
-    except ValueError as exc:
-        return response([], 400, str(exc))
-
-    return response(
-        data=NetdiskShareUnlockResponse(**payload).model_dump(mode="json"),
-        msg="share unlock created" if unlocked_now else "resource already unlocked",
-    )
-
-
-@router.post("/resources/{resource_id}/share-claim", summary="claim shared netdisk resource unlock without points")
-async def claim_shared_netdisk_resource(
-    resource_id: str,
-    payload: NetdiskShareUnlockCreate,
-    openid: str = Depends(get_current_user),
-    session: AsyncSession = Depends(get_session),
-):
-    user = await _get_user_by_openid(session, openid)
-    if not user:
-        return response([], 404, "user not found")
-
-    try:
-        result, unlocked_now = await NetdiskResourceService.claim_share_unlock(
-            session,
-            user,
-            resource_id,
-            payload.share_token,
-        )
-    except ValueError as exc:
-        return response([], 400, str(exc))
-
-    return response(
-        data=NetdiskResourceUnlockResponse(**result).model_dump(mode="json"),
-        msg="share unlock claimed" if unlocked_now else "resource already unlocked",
     )
 
 
