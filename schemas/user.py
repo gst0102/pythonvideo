@@ -188,8 +188,8 @@ class WithdrawalApplyRequest(BaseModel):
     @field_validator("amount")
     @classmethod
     def check_min(cls, value: float) -> float:
-        if value < 0.10:
-            raise ValueError("minimum amount is 0.10")
+        if value < 0.01:
+            raise ValueError("minimum amount is 0.01")
         return value
 
 
@@ -206,6 +206,10 @@ class WithdrawalRecordItem(BaseModel):
 class WithdrawalConfigResponse(BaseModel):
     min_amount: float
     max_amount: float
+    daily_limit: float = 100.0
+    daily_count_limit: int = 1
+    service_time: str = "每日00:00-24:00可提交提现申请"
+    arrival_time: str = "预计24小时内到账，具体以微信支付到账时间为准"
     tips: str = ""
 
 

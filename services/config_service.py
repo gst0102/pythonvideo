@@ -76,13 +76,16 @@ DEFAULT_CONFIGS: Dict[str, Dict[str, Any]] = {
     },
     "withdrawal_config": {
         "enabled": True,
-        "min_amount": 0.10,
-        "withdraw_min_first": 1.00,
-        "withdraw_min_normal": 5.00,
-        "withdraw_min_member": 1.00,
-        "max_amount": 200.00,
+        "min_amount": 0.01,
+        "withdraw_min_first": 0.01,
+        "withdraw_min_normal": 0.01,
+        "withdraw_min_member": 0.01,
+        "max_amount": 100.00,
         "daily_limit": 100.00,
-        "tips": "提现申请提交后，预计24小时内到账。",
+        "daily_count_limit": 1,
+        "service_time": "每日00:00-24:00可提交提现申请",
+        "arrival_time": "预计24小时内到账，具体以微信支付到账时间为准",
+        "tips": "有可提现余额即可申请提现，单次0.01-100元，每天1次，可自定义提现金额，预计24小时内到账。",
     },
     "commission_settings": {
         "level1_rate": 50.0,
@@ -231,7 +234,7 @@ class ConfigService:
 
     @staticmethod
     async def get_withdrawal_config(session: AsyncSession) -> Dict[str, Any]:
-        return await ConfigService.get(session, "withdrawal_config")
+        return _normalize_withdrawal_config(await ConfigService.get(session, "withdrawal_config"))
 
     @staticmethod
     async def get_all_config_types(session: AsyncSession) -> List[SystemConfig]:
@@ -323,3 +326,23 @@ def _enrich_vip_package(package: Dict[str, Any]) -> Dict[str, Any]:
         2,
     )
     return enriched
+
+
+def _normalize_withdrawal_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    normalized = dict(config or {})
+    normalized.update(
+        {
+            "min_amount": 0.01,
+            "withdraw_min_first": 0.01,
+            "withdraw_min_normal": 0.01,
+            "withdraw_min_member": 0.01,
+            "max_amount": 100.00,
+            "daily_limit": 100.00,
+            "daily_count_limit": 1,
+            "service_time": "每日00:00-24:00可提交提现申请",
+            "arrival_time": "预计24小时内到账，具体以微信支付到账时间为准",
+            "tips": "有可提现余额即可申请提现，单次0.01-100元，每天1次，可自定义提现金额，预计24小时内到账。",
+        }
+    )
+    normalized["enabled"] = bool(normalized.get("enabled", True))
+    return normalized

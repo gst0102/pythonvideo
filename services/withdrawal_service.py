@@ -110,8 +110,9 @@ class WithdrawalService:
         exchange_rate = _get_points_exchange_rate(points_config)
         amount = round(points_amount / exchange_rate, 2)
         min_amount = await _get_points_min_withdraw_amount(session, user, config)
-        max_amount = round(float(config.get("max_amount", 200.00)), 2)
+        max_amount = round(float(config.get("max_amount", 100.00)), 2)
         daily_limit = round(float(config.get("daily_limit", 100.00)), 2)
+        daily_count_limit = max(1, int(config.get("daily_count_limit", 1) or 1))
         min_points = _amount_to_points(min_amount, exchange_rate)
         max_points = _amount_to_points(max_amount, exchange_rate)
 
@@ -133,6 +134,8 @@ class WithdrawalService:
         daily_total = round(float(daily_result.scalar() or 0), 2)
         if daily_total + amount > daily_limit:
             return None, None, f"daily limit exceeded, current total {daily_total:.2f}"
+        if await _daily_withdrawal_count(session, user_id, today_start) >= daily_count_limit:
+            return None, None, f"daily withdrawal count limit exceeded: {daily_count_limit}"
 
         pending_result = await session.execute(
             select(WithdrawalRecord)
@@ -216,9 +219,10 @@ class WithdrawalService:
         if not config.get("enabled", True):
             return None, "withdrawal is disabled"
 
-        min_amount = round(float(config.get("min_amount", 0.10)), 2)
-        max_amount = round(float(config.get("max_amount", 200.00)), 2)
+        min_amount = round(float(config.get("min_amount", 0.01)), 2)
+        max_amount = round(float(config.get("max_amount", 100.00)), 2)
         daily_limit = round(float(config.get("daily_limit", 100.00)), 2)
+        daily_count_limit = max(1, int(config.get("daily_count_limit", 1) or 1))
 
         if amount < min_amount:
             return None, f"minimum amount is {min_amount:.2f}"
@@ -242,6 +246,8 @@ class WithdrawalService:
         daily_total = round(float(daily_result.scalar() or 0), 2)
         if daily_total + amount > daily_limit:
             return None, f"daily limit exceeded, current total {daily_total:.2f}"
+        if await _daily_withdrawal_count(session, user_id, today_start) >= daily_count_limit:
+            return None, f"daily withdrawal count limit exceeded: {daily_count_limit}"
 
         pending_result = await session.execute(
             select(WithdrawalRecord)
@@ -630,10 +636,23 @@ async def _get_points_min_withdraw_amount(
     config: dict,
 ) -> float:
     if await _is_first_withdraw(session, user.id):
-        return round(float(config.get("withdraw_min_first", config.get("min_first_amount", 1.00))), 2)
+        return round(float(config.get("withdraw_min_first", config.get("min_first_amount", 0.01))), 2)
     if user.is_vip:
-        return round(float(config.get("withdraw_min_member", config.get("min_member_amount", 1.00))), 2)
-    return round(float(config.get("withdraw_min_normal", config.get("min_amount", 5.00))), 2)
+        return round(float(config.get("withdraw_min_member", config.get("min_member_amount", 0.01))), 2)
+    return round(float(config.get("withdraw_min_normal", config.get("min_amount", 0.01))), 2)
+
+
+async def _daily_withdrawal_count(session: AsyncSession, user_id: UUID, today_start: datetime) -> int:
+    result = await session.execute(
+        select(func.count()).select_from(WithdrawalRecord).where(
+            and_(
+                WithdrawalRecord.user_id == user_id,
+                WithdrawalRecord.created_at >= today_start,
+                WithdrawalRecord.status.in_(["processing", "success"]),
+            )
+        )
+    )
+    return int(result.scalar() or 0)
 
 
 def _account_summary(account) -> dict:

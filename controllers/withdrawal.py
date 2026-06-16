@@ -32,8 +32,12 @@ async def get_config(session: AsyncSession = Depends(get_session)):
     config = await ConfigService.get_withdrawal_config(session)
     return response(
         data=WithdrawalConfigResponse(
-            min_amount=float(config.get("min_amount", 0.10)),
-            max_amount=float(config.get("max_amount", 200.00)),
+            min_amount=float(config.get("min_amount", 0.01)),
+            max_amount=float(config.get("max_amount", 100.00)),
+            daily_limit=float(config.get("daily_limit", 100.00)),
+            daily_count_limit=int(config.get("daily_count_limit", 1) or 1),
+            service_time=str(config.get("service_time", "每日00:00-24:00可提交提现申请")),
+            arrival_time=str(config.get("arrival_time", "预计24小时内到账，具体以微信支付到账时间为准")),
             tips=str(config.get("tips", "")),
         ).model_dump()
     )
