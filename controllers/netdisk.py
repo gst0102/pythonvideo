@@ -2,12 +2,12 @@
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Header
 from sqlmodel import func, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from core.response import response
-from jwt_create import get_current_user
+from jwt_create import create_access_token, get_current_user
 from models.base import get_session
 from models.netdisk_user_notification import NetdiskUserNotification
 from models.user import User
@@ -17,6 +17,11 @@ from schemas.netdisk import (
     NetdiskFeedbackCreate,
     NetdiskFeedbackListResponse,
     NetdiskFeedbackResponse,
+    NetdiskH5ConfigResponse,
+    NetdiskH5RequestDetailResponse,
+    NetdiskH5ResourceDetailResponse,
+    NetdiskH5SessionResponse,
+    NetdiskH5WechatCallbackCreate,
     NetdiskNotificationItem,
     NetdiskNotificationListResponse,
     NetdiskRepairCreate,
@@ -55,6 +60,90 @@ async def _get_user_by_openid(session: AsyncSession, openid: str) -> User | None
 async def get_netdisk_co_build_config(session: AsyncSession = Depends(get_session)):
     config = await ConfigService.get(session, "co_build_config")
     return response(data=config)
+
+
+def _normalize_category_names(categories: list[str]) -> list[str]:
+    seen: set[str] = set()
+    normalized: list[str] = []
+    for item in categories:
+        value = str(item or "").strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        normalized.append(value[:32])
+    return normalized
+
+
+@router.get("/frontend-categories", summary="get netdisk frontend categories")
+async def get_netdisk_frontend_categories(session: AsyncSession = Depends(get_session)):
+    config = await ConfigService.get(session, "netdisk_frontend_categories_config")
+    configured = _normalize_category_names(config.get("categories") or [])
+    return response(data={"categories": configured})
+
+
+@router.get("/h5/config", summary="get interactbao h5 config")
+async def get_netdisk_h5_config(session: AsyncSession = Depends(get_session)):
+    payload = await NetdiskResourceService.get_h5_config(session)
+    return response(data=NetdiskH5ConfigResponse(**payload).model_dump(mode="json"))
+
+
+@router.get("/h5/resources/{resource_id}", summary="get h5 safe resource detail")
+async def get_netdisk_h5_resource_detail(
+    resource_id: str,
+    authorization: str | None = Header(None),
+    session: AsyncSession = Depends(get_session),
+):
+    try:
+        payload = await NetdiskResourceService.get_h5_resource_detail(
+            session,
+            resource_id,
+            logged_in=bool(authorization),
+        )
+    except ValueError as exc:
+        return response([], 404, str(exc))
+    return response(data=NetdiskH5ResourceDetailResponse(**payload).model_dump(mode="json"))
+
+
+@router.get("/h5/requests/{request_id}", summary="get h5 public request detail")
+async def get_netdisk_h5_request_detail(
+    request_id: str,
+    authorization: str | None = Header(None),
+    session: AsyncSession = Depends(get_session),
+):
+    try:
+        payload = await NetdiskResourceService.get_h5_request_detail(
+            session,
+            request_id,
+            logged_in=bool(authorization),
+        )
+    except ValueError as exc:
+        return response([], 404, str(exc))
+    return response(data=NetdiskH5RequestDetailResponse(**payload).model_dump(mode="json"))
+
+
+@router.post("/h5/auth/wechat/callback", summary="h5 wechat oauth callback")
+async def create_netdisk_h5_wechat_session(payload: NetdiskH5WechatCallbackCreate):
+    clean_code = (payload.code or "").strip()
+    if not clean_code:
+        return response(
+            data=NetdiskH5SessionResponse(
+                logged_in=False,
+                message="微信网页授权未配置或授权码为空，H5 已降级为只读详情。",
+            ).model_dump(mode="json")
+        )
+    # First edition keeps the OAuth handoff explicit. Once official account
+    # appid/secret are configured, replace this deterministic placeholder with
+    # real sns/oauth2 access_token + userinfo exchange and unionid binding.
+    token = create_access_token({"openid": f"h5:{clean_code[:32]}", "login_source": "h5_wechat"})
+    return response(
+        data=NetdiskH5SessionResponse(
+            token=token,
+            logged_in=True,
+            nickname="互动宝用户",
+            unionid_bound=False,
+            message="H5 会话已创建；当前未完成公众号 unionid 绑定。",
+        ).model_dump(mode="json")
+    )
 
 
 @router.get("/resources", summary="list netdisk resources")

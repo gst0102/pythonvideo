@@ -24,11 +24,13 @@ from models.netdisk_audit_log import NetdiskAuditLog
 from models.netdisk_crawler_run import NetdiskCrawlerRun
 from models.netdisk_collected_resource import NetdiskCollectedResource
 from models.netdisk_import_batch import NetdiskImportBatch
+from models.netdisk_official_access_record import NetdiskOfficialAccessRecord
 from models.netdisk_quality_alert import NetdiskQualityAlert
 from models.netdisk_quality_daily_stat import NetdiskQualityDailyStat
 from models.netdisk_repair import NetdiskRepair
 from models.netdisk_request import NetdiskRequest
 from models.netdisk_resource import NetdiskResource as NetdiskResourceModel
+from models.netdisk_transfer_task import NetdiskTransferTask
 from models.netdisk_risk_record import NetdiskRiskRecord
 from models.netdisk_upload import NetdiskUpload
 from models.netdisk_user_notification import NetdiskUserNotification
@@ -64,6 +66,10 @@ class AdminPointsAdjustRequest(BaseModel):
 class AdminPaymentReconcileRequest(BaseModel):
     lookback_minutes: int = Field(default=180, ge=1, le=1440)
     limit: int = Field(default=50, ge=1, le=200)
+
+
+class NetdiskFrontendCategoriesUpdateRequest(BaseModel):
+    categories: list[str] = Field(default_factory=list)
 
 
 @router.get("/dashboard", summary="dashboard")
@@ -354,6 +360,126 @@ async def get_config(type: Optional[str] = Query(None), session: AsyncSession = 
 async def update_config(req: ConfigUpdateRequest, session: AsyncSession = Depends(get_session)):
     config = await ConfigService.set(session, req.type, req.config_data)
     return response(data={"type": config.type, "updated_at": config.updated_at.isoformat()}, msg="config updated")
+
+
+def _normalize_category_names(categories: list[str]) -> list[str]:
+    seen: set[str] = set()
+    normalized: list[str] = []
+    for item in categories:
+        value = str(item or "").strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        normalized.append(value[:32])
+    return normalized
+
+
+@router.get("/netdisk/frontend-categories", summary="get netdisk frontend categories")
+async def get_netdisk_frontend_categories(session: AsyncSession = Depends(get_session)):
+    config = await ConfigService.get(session, "netdisk_frontend_categories_config")
+    configured = _normalize_category_names(config.get("categories") or [])
+    return response(data={"categories": configured})
+
+
+@router.put("/netdisk/frontend-categories", summary="update netdisk frontend categories")
+async def update_netdisk_frontend_categories(
+    req: NetdiskFrontendCategoriesUpdateRequest,
+    session: AsyncSession = Depends(get_session),
+):
+    categories = _normalize_category_names(req.categories)
+    config = await ConfigService.set(session, "netdisk_frontend_categories_config", {"categories": categories})
+    return response(data={"categories": categories, "updated_at": config.updated_at.isoformat()}, msg="categories updated")
+
+
+@router.get("/netdisk/transfer-tasks", summary="admin netdisk transfer tasks")
+async def admin_netdisk_transfer_tasks(
+    status: Optional[str] = Query(None),
+    pan: Optional[str] = Query(None),
+    keyword: Optional[str] = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    session: AsyncSession = Depends(get_session),
+):
+    query = select(NetdiskTransferTask)
+    if status:
+        query = query.where(NetdiskTransferTask.status == status)
+    if pan:
+        query = query.where((NetdiskTransferTask.source_pan == pan) | (NetdiskTransferTask.target_pan == pan))
+    if keyword and keyword.strip():
+        kw = keyword.strip()
+        query = query.where(
+            or_(
+                NetdiskTransferTask.title.ilike(f"%{kw}%"),
+                NetdiskTransferTask.source_link.ilike(f"%{kw}%"),
+                NetdiskTransferTask.target_link.ilike(f"%{kw}%"),
+                NetdiskTransferTask.resource_id.ilike(f"%{kw}%"),
+                NetdiskTransferTask.source_ref.ilike(f"%{kw}%"),
+            )
+        )
+
+    total = (await session.execute(select(func.count()).select_from(query.subquery()))).scalar() or 0
+    rows = (
+        await session.execute(
+            query.order_by(NetdiskTransferTask.created_at.desc(), NetdiskTransferTask.id.desc())
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        )
+    ).scalars().all()
+    return response(
+        data=PaginatedResponse(
+            list=[_transfer_task_to_dict(item) for item in rows],
+            total=total,
+            page=page,
+            page_size=page_size,
+            has_more=((page - 1) * page_size + len(rows)) < total,
+        ).model_dump()
+    )
+
+
+@router.get("/netdisk/new-official-access-records", summary="admin netdisk new official access records")
+async def admin_netdisk_new_official_access_records(
+    settlement_status: Optional[str] = Query(None),
+    pan: Optional[str] = Query(None),
+    keyword: Optional[str] = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    session: AsyncSession = Depends(get_session),
+):
+    query = select(NetdiskOfficialAccessRecord)
+    if settlement_status:
+        query = query.where(NetdiskOfficialAccessRecord.settlement_status == settlement_status)
+    if pan:
+        query = query.where(NetdiskOfficialAccessRecord.pan == pan)
+    if keyword and keyword.strip():
+        kw = keyword.strip()
+        query = query.where(
+            or_(
+                NetdiskOfficialAccessRecord.resource_id.ilike(f"%{kw}%"),
+                NetdiskOfficialAccessRecord.unlock_ledger_id.ilike(f"%{kw}%"),
+                NetdiskOfficialAccessRecord.idempotency_key.ilike(f"%{kw}%"),
+                NetdiskOfficialAccessRecord.remark.ilike(f"%{kw}%"),
+            )
+        )
+
+    total = (await session.execute(select(func.count()).select_from(query.subquery()))).scalar() or 0
+    rows = (
+        await session.execute(
+            query.order_by(NetdiskOfficialAccessRecord.created_at.desc(), NetdiskOfficialAccessRecord.id.desc())
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        )
+    ).scalars().all()
+    user_ids = [item.user_id for item in rows] + [item.level1_user_id for item in rows if item.level1_user_id] + [item.level2_user_id for item in rows if item.level2_user_id]
+    user_map = await _get_user_map(session, user_ids)
+    return response(
+        data=PaginatedResponse(
+            list=[_new_official_access_to_dict(item, user_map) for item in rows],
+            total=total,
+            page=page,
+            page_size=page_size,
+            has_more=((page - 1) * page_size + len(rows)) < total,
+        ).model_dump()
+    )
 
 
 @router.get("/ad/game-bonus-config", summary="get stage2 game bonus ad config")
@@ -916,6 +1042,56 @@ async def admin_delete_netdisk_request(
         req.note,
     )
     return response(data=jsonable_encoder(payload), msg="netdisk request deleted")
+
+
+@router.post("/netdisk/requests/{request_id}/approve", summary="admin approve netdisk request bounty")
+async def admin_approve_netdisk_request(
+    request_id: str,
+    req: NetdiskAdminAuditRequest,
+    x_admin_role: str = Header("operator"),
+    session: AsyncSession = Depends(get_session),
+):
+    if not _is_quality_supervisor(x_admin_role):
+        return response([], 403, "仅主管可审核悬赏")
+    try:
+        payload = await NetdiskResourceService.admin_approve_request(session, request_id, req.note)
+    except ValueError as exc:
+        return response([], 400, str(exc))
+    await _record_netdisk_audit_log(
+        session,
+        "request_approve",
+        "netdisk_request",
+        request_id,
+        payload["request"].get("title", ""),
+        req.note,
+    )
+    return response(data=jsonable_encoder(payload), msg="netdisk request approved")
+
+
+@router.post("/netdisk/requests/{request_id}/reject", summary="admin reject netdisk request bounty")
+async def admin_reject_netdisk_request(
+    request_id: str,
+    req: NetdiskAdminAuditRequest,
+    x_admin_role: str = Header("operator"),
+    session: AsyncSession = Depends(get_session),
+):
+    if not _is_quality_supervisor(x_admin_role):
+        return response([], 403, "仅主管可审核悬赏")
+    if not (req.note or "").strip():
+        return response([], 400, "拒绝原因必填")
+    try:
+        payload = await NetdiskResourceService.admin_reject_request(session, request_id, req.note)
+    except ValueError as exc:
+        return response([], 400, str(exc))
+    await _record_netdisk_audit_log(
+        session,
+        "request_reject",
+        "netdisk_request",
+        request_id,
+        payload["request"].get("title", ""),
+        req.note,
+    )
+    return response(data=jsonable_encoder(payload), msg="netdisk request rejected")
 
 
 @router.get("/netdisk/resource-subscriptions", summary="admin netdisk resource subscription list")
@@ -3680,6 +3856,61 @@ def _equity_ledger_to_dict(item: EquityLedger, user: Optional[User] = None) -> d
         "total_withdrawn_after": float(item.total_withdrawn_after),
         "related_type": item.related_type,
         "related_id": item.related_id,
+        "idempotency_key": item.idempotency_key,
+        "remark": item.remark,
+        "created_at": item.created_at.isoformat() if item.created_at else None,
+    }
+
+
+def _transfer_task_to_dict(item: NetdiskTransferTask) -> dict:
+    return {
+        "id": str(item.id),
+        "source_type": item.source_type,
+        "source_ref": item.source_ref,
+        "resource_id": item.resource_id,
+        "title": item.title,
+        "source_pan": item.source_pan,
+        "source_link": item.source_link,
+        "source_extract_code": item.source_extract_code,
+        "target_pan": item.target_pan,
+        "target_link": item.target_link,
+        "target_extract_code": item.target_extract_code,
+        "target_folder": item.target_folder,
+        "tool_name": item.tool_name,
+        "status": item.status,
+        "error_message": item.error_message,
+        "log_summary": item.log_summary,
+        "duration_ms": int(item.duration_ms or 0),
+        "attempts": int(item.attempts or 0),
+        "expected_level1_amount": float(item.expected_level1_amount or 0),
+        "expected_level2_amount": float(item.expected_level2_amount or 0),
+        "idempotency_key": item.idempotency_key,
+        "created_at": item.created_at.isoformat() if item.created_at else None,
+        "updated_at": item.updated_at.isoformat() if item.updated_at else None,
+    }
+
+
+def _new_official_access_to_dict(item: NetdiskOfficialAccessRecord, user_map: dict) -> dict:
+    user = user_map.get(item.user_id)
+    level1_user = user_map.get(item.level1_user_id) if item.level1_user_id else None
+    level2_user = user_map.get(item.level2_user_id) if item.level2_user_id else None
+    return {
+        "id": str(item.id),
+        "user_id": str(item.user_id),
+        "nickname": user.nickname if user else "",
+        "openid": user.openid if user else "",
+        "resource_id": item.resource_id,
+        "unlock_ledger_id": item.unlock_ledger_id,
+        "pan": item.pan,
+        "level1_user_id": str(item.level1_user_id) if item.level1_user_id else "",
+        "level1_nickname": level1_user.nickname if level1_user else "",
+        "level1_amount": float(item.level1_amount or 0),
+        "level2_user_id": str(item.level2_user_id) if item.level2_user_id else "",
+        "level2_nickname": level2_user.nickname if level2_user else "",
+        "level2_amount": float(item.level2_amount or 0),
+        "settlement_mode": item.settlement_mode,
+        "settlement_status": item.settlement_status,
+        "equity_granted": bool(item.equity_granted),
         "idempotency_key": item.idempotency_key,
         "remark": item.remark,
         "created_at": item.created_at.isoformat() if item.created_at else None,

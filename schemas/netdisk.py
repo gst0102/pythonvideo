@@ -48,6 +48,33 @@ class NetdiskResourceDetailResponse(BaseModel):
     resource: NetdiskResourceSummary
 
 
+class NetdiskH5ConfigResponse(BaseModel):
+    h5_base_url: str = ""
+    miniapp_public_mode: str = "review_safe"
+    request_default_bounty_points: int = 10
+    request_requires_audit: bool = True
+
+
+class NetdiskH5ResourceDetailResponse(BaseModel):
+    resource: NetdiskResourceSummary
+    h5_base_url: str = ""
+    logged_in: bool = False
+    access_hint: str = ""
+
+
+class NetdiskH5WechatCallbackCreate(BaseModel):
+    code: str = ""
+    state: str = ""
+
+
+class NetdiskH5SessionResponse(BaseModel):
+    token: str = ""
+    logged_in: bool = False
+    nickname: str = ""
+    unionid_bound: bool = False
+    message: str = ""
+
+
 class NetdiskUnlockData(BaseModel):
     unlocked: bool = True
     ledger_id: str
@@ -167,6 +194,11 @@ class NetdiskRequestListResponse(BaseModel):
 
 class NetdiskRequestResponse(BaseModel):
     request: NetdiskRequestItem
+
+
+class NetdiskH5RequestDetailResponse(BaseModel):
+    request: NetdiskRequestItem
+    logged_in: bool = False
 
 
 class NetdiskUploadCreate(BaseModel):

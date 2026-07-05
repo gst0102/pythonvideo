@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import json
 import hashlib
+import os
 import re
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta, timezone
 from typing import Literal
 from uuid import UUID
 
-from sqlalchemy import and_, func, or_, text, update as sql_update
+from sqlalchemy import and_, false, func, or_, text, update as sql_update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -19,6 +20,7 @@ from models.netdisk_favorite import NetdiskFavorite
 from models.netdisk_feedback import NetdiskFeedback
 from models.netdisk_audit_log import NetdiskAuditLog
 from models.netdisk_collected_resource import NetdiskCollectedResource
+from models.netdisk_official_access_record import NetdiskOfficialAccessRecord
 from models.netdisk_repair import NetdiskRepair
 from models.netdisk_request import NetdiskRequest
 from models.netdisk_resource import NetdiskResource as NetdiskResourceModel
@@ -30,6 +32,7 @@ from models.netdisk_upload import NetdiskUpload
 from models.netdisk_user_notification import NetdiskUserNotification
 from models.points_ledger import PointsLedger
 from models.user import User
+from models.invite_relation import InviteRelation
 from models.user_quality_profile import UserQualityProfile
 from models.user_account import UserAccount
 from core.timezone import BUSINESS_TZ, bj_day_bounds_utc, now_bj, today_bj
@@ -38,7 +41,16 @@ from services.config_service import ConfigService
 from services.points_account_service import PointsAccountService
 from services.resource_classification_service import ClassificationResult, media_level_and_cost, normalize_resource_title
 
-ResourceLevel = Literal["normal", "featured", "official"]
+ResourceLevel = Literal["normal", "featured", "official", "new_official"]
+
+PUBLIC_HIDDEN_CATEGORIES = {
+    item.strip()
+    for item in os.getenv("NETDISK_PUBLIC_HIDDEN_CATEGORIES", "影视剧").split(",")
+    if item.strip()
+}
+PUBLIC_FEATURED_CATEGORY = os.getenv("NETDISK_PUBLIC_FEATURED_CATEGORY", "AI工具").strip()
+PUBLIC_VISIBILITY_CONFIG_TYPE = "netdisk_public_visibility_config"
+FRONTEND_CATEGORIES_CONFIG_TYPE = "netdisk_frontend_categories_config"
 
 
 @dataclass(frozen=True)
@@ -131,7 +143,7 @@ class NetdiskResourceService:
         current_page = max(1, int(page or 1))
         current_page_size = max(1, min(50, int(page_size or 20)))
 
-        filters = [NetdiskResourceModel.is_active == True]  # noqa: E712
+        filters = await _public_resource_filters(session)
         if selected_keyword:
             keyword_like = f"%{selected_keyword}%"
             filters.append(
@@ -209,11 +221,15 @@ class NetdiskResourceService:
 
         clean_limit = max(1, min(12, int(limit or 3)))
         today_start, today_end = bj_day_bounds_utc()
+        public_filters = await _public_resource_filters(session)
+        public_featured_category = await _public_featured_category(session)
         today_filters = [
-            NetdiskResourceModel.is_active == True,  # noqa: E712
+            *public_filters,
             NetdiskResourceModel.created_at >= today_start,
             NetdiskResourceModel.created_at < today_end,
         ]
+        if public_featured_category:
+            today_filters.append(NetdiskResourceModel.category == public_featured_category)
         today_total_result = await session.execute(
             select(func.count()).select_from(NetdiskResourceModel).where(and_(*today_filters))
         )
@@ -235,7 +251,12 @@ class NetdiskResourceService:
         if len(selected) < clean_limit:
             fallback_result = await session.execute(
                 select(NetdiskResourceModel)
-                .where(NetdiskResourceModel.is_active == True)  # noqa: E712
+                .where(
+                    and_(
+                        *public_filters,
+                        *([NetdiskResourceModel.category == public_featured_category] if public_featured_category else []),
+                    )
+                )
                 .order_by(
                     NetdiskResourceModel.created_at.desc(),
                     NetdiskResourceModel.quality_score.desc(),
@@ -364,6 +385,7 @@ class NetdiskResourceService:
                 resource=resource,
                 unlock_user=user,
             )
+            await _record_new_official_access(session, resource, user, ledger)
             resource.quality_score = await _calculate_resource_quality_score_with_profile(session, resource)
 
         await session.flush()
@@ -563,7 +585,10 @@ class NetdiskResourceService:
         clean_pans = [item.strip() for item in pans if item and item.strip()]
         clean_category = (category or "").strip()
         clean_note = (note or "").strip()
-        bounty = max(5, min(50, int(bounty_points or 5)))
+        public_config = await _get_netdisk_public_config(session)
+        default_bounty = int(public_config.get("request_default_bounty_points") or 10)
+        bounty = max(5, min(50, int(bounty_points or default_bounty)))
+        requires_audit = bool(public_config.get("request_requires_audit", True))
         if not clean_title:
             raise ValueError("请填写需求标题")
         if not _is_public_resource_title_safe(clean_title):
@@ -584,7 +609,7 @@ class NetdiskResourceService:
             category=clean_category[:64],
             bounty_points=bounty,
             note=clean_note[:500],
-            status="open",
+            status="pending_review" if requires_audit else "open",
             bounty_status="frozen",
             deadline_text="3天后",
             expires_at=datetime.utcnow() + timedelta(days=3),
@@ -598,7 +623,7 @@ class NetdiskResourceService:
             idempotency_key=f"request_bounty_freeze:{item.id}",
             related_type="netdisk_request",
             related_id=str(item.id),
-            remark=f"发布求资源悬赏冻结：{item.title}",
+            remark=f"发布资料需求悬赏冻结：{item.title}",
         )
         await session.refresh(item)
         return {"request": _build_request_payload(item, user.id)}
@@ -669,12 +694,40 @@ class NetdiskResourceService:
             raise ValueError("悬赏不存在")
         if request.user_id != user.id:
             raise ValueError("只能取消自己发布的悬赏")
-        if request.status != "open" or request.bounty_status != "frozen":
+        if request.status not in {"pending_review", "open"} or request.bounty_status != "frozen":
             raise ValueError("该悬赏已处理，不能取消")
 
-        await _return_request_bounty(session, request, status="canceled", remark_prefix="取消求资源悬赏退回")
+        await _return_request_bounty(session, request, status="canceled", remark_prefix="取消资料需求悬赏退回")
         await session.refresh(request)
         return {"request": _build_request_payload(request, user.id)}
+
+    @staticmethod
+    async def admin_approve_request(session: AsyncSession, request_id: str, note: str = "") -> dict:
+        request = await _get_request_by_id(session, request_id, for_update=True)
+        if not request:
+            raise ValueError("悬赏不存在")
+        if request.status != "pending_review" or request.bounty_status != "frozen":
+            raise ValueError("只有待审核且积分已冻结的需求可以通过")
+        request.status = "open"
+        request.updated_at = datetime.utcnow()
+        if note:
+            request.note = _append_note(request.note, f"审核通过：{note}")
+        await session.flush()
+        await session.refresh(request)
+        return {"request": _build_request_payload(request)}
+
+    @staticmethod
+    async def admin_reject_request(session: AsyncSession, request_id: str, note: str = "") -> dict:
+        request = await _get_request_by_id(session, request_id, for_update=True)
+        if not request:
+            raise ValueError("悬赏不存在")
+        if request.status != "pending_review" or request.bounty_status != "frozen":
+            raise ValueError("只有待审核且积分已冻结的需求可以拒绝")
+        reject_note = (note or "需求不符合发布规则").strip()
+        request.note = _append_note(request.note, f"审核拒绝：{reject_note}")
+        await _return_request_bounty(session, request, status="rejected", remark_prefix="资料需求审核未通过退回")
+        await session.refresh(request)
+        return {"request": _build_request_payload(request)}
 
     @staticmethod
     async def admin_delete_request(session: AsyncSession, request_id: str, note: str = "") -> dict:
@@ -684,7 +737,7 @@ class NetdiskResourceService:
         if request.status == "admin_deleted":
             return {"request": _build_request_payload(request)}
 
-        if request.status == "open" and request.bounty_status == "frozen":
+        if request.status in {"pending_review", "open"} and request.bounty_status == "frozen":
             await _return_request_bounty(session, request, status="admin_deleted", remark_prefix="后台删除悬赏退回")
         else:
             now = datetime.utcnow()
@@ -701,7 +754,7 @@ class NetdiskResourceService:
         result = await session.execute(
             select(NetdiskRequest)
             .where(
-                NetdiskRequest.status == "open",
+                NetdiskRequest.status.in_(["pending_review", "open"]),
                 NetdiskRequest.bounty_status == "frozen",
                 NetdiskRequest.expires_at <= now,
             )
@@ -715,6 +768,33 @@ class NetdiskResourceService:
             expired_count += 1
             returned_points += int(item.bounty_points)
         return {"expired_count": expired_count, "returned_points": returned_points}
+
+    @staticmethod
+    async def get_h5_config(session: AsyncSession) -> dict:
+        config = await _get_netdisk_public_config(session)
+        return {
+            "h5_base_url": str(config.get("h5_base_url") or "").rstrip("/"),
+            "miniapp_public_mode": str(config.get("miniapp_public_mode") or "review_safe"),
+            "request_default_bounty_points": int(config.get("request_default_bounty_points") or 10),
+            "request_requires_audit": bool(config.get("request_requires_audit", True)),
+        }
+
+    @staticmethod
+    async def get_h5_resource_detail(session: AsyncSession, resource_id: str, *, logged_in: bool = False) -> dict:
+        resource = await _get_resource_or_raise(session, resource_id)
+        return {
+            "resource": _build_resource_payload(resource),
+            "h5_base_url": (await NetdiskResourceService.get_h5_config(session))["h5_base_url"],
+            "logged_in": logged_in,
+            "access_hint": "登录后可查看获取指引；完整链接展示受平台审核规则控制。" if not logged_in else "请按页面提示获取资料，若信息失效可提交反馈。",
+        }
+
+    @staticmethod
+    async def get_h5_request_detail(session: AsyncSession, request_id: str, *, logged_in: bool = False) -> dict:
+        request = await _get_request_by_id(session, request_id)
+        if not request or request.status not in {"open", "accepted"}:
+            raise ValueError("需求不存在或暂未公开")
+        return {"request": _build_request_payload(request), "logged_in": logged_in}
 
     @staticmethod
     async def list_my_uploads(session: AsyncSession, user: User) -> dict:
@@ -2479,6 +2559,75 @@ async def _grant_creator_share_for_unlock(
     return creator_reward, platform_recovered
 
 
+async def _record_new_official_access(
+    session: AsyncSession,
+    resource: NetdiskResourceModel,
+    unlock_user: User,
+    unlock_ledger: PointsLedger,
+) -> None:
+    if not _is_new_official_resource(resource):
+        return
+
+    config = await ConfigService.get(session, "netdisk_official_transfer_config")
+    if not bool(config.get("enabled", True)):
+        return
+
+    rule = _official_transfer_pan_rule(config, resource.pan)
+    if not bool(rule.get("enabled", True)):
+        return
+
+    level1_user_id = await _get_inviter_id(session, unlock_user.id)
+    level2_user_id = await _get_inviter_id(session, level1_user_id) if level1_user_id else None
+    idempotency_key = f"netdisk_new_official_access:{unlock_user.id}:{resource.id}"
+
+    existing = await session.execute(
+        select(NetdiskOfficialAccessRecord).where(NetdiskOfficialAccessRecord.idempotency_key == idempotency_key)
+    )
+    if existing.scalar_one_or_none():
+        return
+
+    record = NetdiskOfficialAccessRecord(
+        user_id=unlock_user.id,
+        resource_id=resource.id,
+        unlock_ledger_id=str(unlock_ledger.id),
+        pan=resource.pan,
+        level1_user_id=level1_user_id,
+        level2_user_id=level2_user_id,
+        level1_amount=round(float(rule.get("level1_amount") or 0), 2) if level1_user_id else 0.0,
+        level2_amount=round(float(rule.get("level2_amount") or 0), 2) if level2_user_id else 0.0,
+        settlement_mode=str(config.get("settlement_mode") or "record_only")[:32],
+        settlement_status="recorded",
+        equity_granted=False,
+        idempotency_key=idempotency_key,
+        remark=f"record only new official access: {resource.title}",
+    )
+    session.add(record)
+
+
+def _is_new_official_resource(resource: NetdiskResourceModel) -> bool:
+    if (resource.level or "") == "new_official":
+        return True
+    return "新官方" in _resource_tags(resource)
+
+
+def _official_transfer_pan_rule(config: dict, pan: str) -> dict:
+    pan_rules = config.get("pan_rules") if isinstance(config.get("pan_rules"), dict) else {}
+    rule = pan_rules.get(pan) if isinstance(pan_rules.get(pan), dict) else {}
+    return {
+        "enabled": rule.get("enabled", True),
+        "level1_amount": rule.get("level1_amount", config.get("default_level1_amount", 0.20)),
+        "level2_amount": rule.get("level2_amount", config.get("default_level2_amount", 0.05)),
+    }
+
+
+async def _get_inviter_id(session: AsyncSession, invitee_id) -> UUID | None:
+    if not invitee_id:
+        return None
+    result = await session.execute(select(InviteRelation).where(InviteRelation.invitee_id == invitee_id))
+    relation = result.scalar_one_or_none()
+    return relation.inviter_id if relation else None
+
+
 def _creator_share_points(resource: NetdiskResourceModel) -> int:
     return {"normal": 1, "featured": 2, "official": 0}.get(resource.level, 0)
 
@@ -3280,10 +3429,13 @@ async def _get_resource_subscription(session: AsyncSession, user_id, resource_id
 
 async def _get_resource_or_raise(session: AsyncSession, resource_id: str) -> NetdiskResourceModel:
     resource_key = (resource_id or "").strip()
+    public_filters = await _public_resource_filters(session)
     result = await session.execute(
         select(NetdiskResourceModel).where(
-            NetdiskResourceModel.id == resource_key,
-            NetdiskResourceModel.is_active == True,  # noqa: E712
+            and_(
+                NetdiskResourceModel.id == resource_key,
+                *public_filters,
+            )
         )
     )
     resource = result.scalar_one_or_none()
@@ -3296,13 +3448,67 @@ async def _get_resource_map(session: AsyncSession, resource_ids: list[str]) -> d
     clean_ids = [resource_id for resource_id in dict.fromkeys(resource_ids) if resource_id]
     if not clean_ids:
         return {}
+    public_filters = await _public_resource_filters(session)
     result = await session.execute(
         select(NetdiskResourceModel).where(
-            NetdiskResourceModel.id.in_(clean_ids),
-            NetdiskResourceModel.is_active == True,  # noqa: E712
+            and_(
+                NetdiskResourceModel.id.in_(clean_ids),
+                *public_filters,
+            )
         )
     )
     return {resource.id: resource for resource in result.scalars().all()}
+
+
+async def _public_resource_filters(session: AsyncSession) -> list:
+    filters = [NetdiskResourceModel.is_active == True]  # noqa: E712
+    allowed_categories = await _public_allowed_categories(session)
+    if allowed_categories is not None:
+        if allowed_categories:
+            filters.append(NetdiskResourceModel.category.in_(allowed_categories))
+        else:
+            filters.append(false())
+    hidden_categories = await _public_hidden_categories(session)
+    if hidden_categories:
+        filters.append(NetdiskResourceModel.category.notin_(hidden_categories))
+    return filters
+
+
+async def _public_allowed_categories(session: AsyncSession) -> set[str] | None:
+    public_config = await _get_netdisk_public_config(session)
+    safe_categories = public_config.get("safe_frontend_categories")
+    miniapp_mode = str(public_config.get("miniapp_public_mode") or "review_safe")
+    if miniapp_mode == "review_safe" and isinstance(safe_categories, list):
+        return {str(item).strip() for item in safe_categories if str(item).strip()}
+    config = await ConfigService.get(session, FRONTEND_CATEGORIES_CONFIG_TYPE)
+    configured = config.get("categories")
+    if not isinstance(configured, list):
+        return None
+    return {str(item).strip() for item in configured if str(item).strip()}
+
+
+async def _public_hidden_categories(session: AsyncSession) -> set[str]:
+    config = await _get_netdisk_public_config(session)
+    if bool(config.get("show_media_in_miniapp", False)):
+        return set()
+    if isinstance(config.get("hidden_categories"), list):
+        return {str(item).strip() for item in config.get("hidden_categories", []) if str(item).strip()}
+    configured = config.get("hidden_categories_when_closed")
+    if isinstance(configured, list):
+        return {str(item).strip() for item in configured if str(item).strip()}
+    return set(PUBLIC_HIDDEN_CATEGORIES)
+
+
+async def _public_featured_category(session: AsyncSession) -> str:
+    config = await _get_netdisk_public_config(session)
+    if bool(config.get("show_media_in_miniapp", False)):
+        return ""
+    value = str(config.get("featured_category_when_closed") or "").strip()
+    return value or PUBLIC_FEATURED_CATEGORY
+
+
+async def _get_netdisk_public_config(session: AsyncSession) -> dict:
+    return await ConfigService.get(session, PUBLIC_VISIBILITY_CONFIG_TYPE)
 
 
 async def _ensure_seed_resources(session: AsyncSession) -> None:
